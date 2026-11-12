@@ -1,0 +1,127 @@
+"""Scripted scenario. Run it with:  python -m hmc.run --out out"""
+
+import argparse
+import csv
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+from hmc import hri, plotting
+from hmc.scoresheet import MAX_TOTAL, Referee, Scoresheet
+from hmc.task import State, Task
+from hmc.world import DT, World, build_world
+
+LOG_EVERY = 0.5  # seconds between timeline rows (events always get a row)
+
+COLUMNS = [
+    "time", "state", "robot_x", "robot_y", "robot_heading",
+    "operator_x", "operator_y", "carrying", "score", "event",
+]  # fmt: skip
+
+
+@dataclass
+class Result:
+    world: World
+    task: Task
+    sheet: Scoresheet
+    speech: hri.Speech
+    rows: list[dict]
+
+
+def run_scenario(
+    target_bag: str = "blue",
+    robot_speed: float = 1.0,
+    on_step: Callable[[World, Task], None] | None = None,
+) -> Result:
+    """Run the whole scenario. on_step lets tests poke the world (e.g. drop the bag)."""
+    world = build_world(target_bag=target_bag, robot_speed=robot_speed)
+    speech = hri.Speech()
+    task = Task(world, speech)
+    sheet = Scoresheet()
+    referee = Referee(sheet)
+    rows: list[dict] = []
+    seen_messages = 0
+    last_state = task.state
+    last_logged = -LOG_EVERY
+
+    while not task.finished:
+        if on_step:
+            on_step(world, task)
+        task.step(DT)
+        if hri.READY_TEXT in [text for _, text in speech.messages]:
+            world.operator.start_walking()  # the operator waits for "ready"
+        # Timing out does nothing, so it takes no sim time.
+        if task.state != State.TIMEOUT:
+            world.step(DT)
+        referee.update(world, task.perceived_bag)
+
+        events = []
+        if task.state != last_state:
+            events.append(f"state {task.state.value}")
+            last_state = task.state
+        for _, text in speech.messages[seen_messages:]:
+            events.append(f"say: {text}")
+        seen_messages = len(speech.messages)
+
+        if events or world.time - last_logged >= LOG_EVERY - 1e-9:
+            last_logged = world.time
+            rows.append(
+                {
+                    "time": f"{world.time:.1f}",
+                    "state": task.state.value,
+                    "robot_x": f"{world.robot.x:.3f}",
+                    "robot_y": f"{world.robot.y:.3f}",
+                    "robot_heading": f"{world.robot.heading:.3f}",
+                    "operator_x": f"{world.operator.x:.3f}",
+                    "operator_y": f"{world.operator.y:.3f}",
+                    "carrying": world.carried_bag().name if world.carried_bag() else "",
+                    "score": sheet.total(),
+                    "event": "; ".join(events),
+                }
+            )
+    return Result(world, task, sheet, speech, rows)
+
+
+def write_outputs(result: Result, out: Path) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    with open(out / "timeline.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=COLUMNS)
+        writer.writeheader()
+        writer.writerows(result.rows)
+    summary = f"{result.sheet.table()}\nSim time: {result.world.time:.1f} s\nEnd state: {result.task.state.value}\n"
+    (out / "score.txt").write_text(summary, encoding="utf-8")
+    if not plotting.save_trajectory(
+        out / "trajectory.png", result.world, [_floats(r) for r in result.rows]
+    ):
+        print(
+            "matplotlib not installed, skipping trajectory.png (pip install -e .[plot])"
+        )
+
+
+def _floats(row: dict) -> dict:
+    return {
+        k: float(v) if k.startswith(("robot_", "operator_")) else v
+        for k, v in row.items()
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Help Me Carry slice 1 scenario")
+    parser.add_argument("--out", default="out", help="output folder (default: out)")
+    parser.add_argument("--bag", default="blue", choices=["red", "blue", "green"],
+                        help="bag the operator points at")  # fmt: skip
+    args = parser.parse_args(argv)
+
+    result = run_scenario(target_bag=args.bag)
+    write_outputs(result, Path(args.out))
+    print(result.sheet.table())
+    print(f"Awarded {result.sheet.total()} of {MAX_TOTAL}")
+    print(
+        f"Sim time: {result.world.time:.1f} s (limit 300 s), end state: {result.task.state.value}"
+    )
+    return 0 if result.task.state == State.DONE else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

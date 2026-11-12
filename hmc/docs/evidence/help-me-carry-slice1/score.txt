@@ -1,0 +1,21 @@
+Row                                                    Max  Awarded  Status
+Following the person to the car                        300      300  awarded
+Perceiving the correct bag                              15       15  awarded
+Picking up the correct bag                             100      100  awarded
+Avoiding the crowd of people                            50        0  not-run
+Avoiding the small object on the ground                 50        0  not-run
+Avoiding the hard-to-see object                         50        0  not-run
+Avoiding the retractable barriers                       50        0  not-run
+Re-reaching the starting location                      200      200  awarded
+Joining and staying in the queue                       300        0  not-run
+Dropping the bag                                       -50        0  not-earned
+Rediscovering operator, natural interaction            -50        0  not-run
+Rediscovering operator, unnatural interaction         -100        0  not-run
+Rediscovering operator, asking them to come back      -150        0  not-run
+Rediscovering operator, direct contact                -200        0  not-run
+Not attending                                         -500        0  not-run
+Using alternative start signal                        -100        0  not-run
+Outstanding performance                                111        0  not-run
+TOTAL (max 1115 without special rows): 615
+Sim time: 40.1 s
+End state: done
