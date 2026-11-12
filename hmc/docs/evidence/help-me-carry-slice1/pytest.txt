@@ -1,9 +1,4 @@
 ============================= test session starts =============================
-platform win32 -- Python 3.13.17, pytest-9.2.0, pluggy-1.7.0 -- C:\Users\teera\dev\robocup-home-education\hmc\.venv\Scripts\python.exe
-cachedir: .pytest_cache
-rootdir: C:\Users\teera\dev\robocup-home-education\hmc
-configfile: pyproject.toml
-testpaths: tests
 collecting ... collected 49 items
 
 tests/test_follow_and_bags.py::test_robot_stays_behind_operator_while_following PASSED [  2%]
@@ -56,4 +51,4 @@ tests/test_task.py::test_finished_states_do_not_change PASSED            [ 95%]
 tests/test_task.py::test_timeout_at_five_minutes PASSED                  [ 97%]
 tests/test_task.py::test_drop_costs_50_and_robot_recovers PASSED         [100%]
 
-============================= 49 passed in 0.46s ==============================
+============================= 49 passed in 0.44s ==============================
