@@ -15,7 +15,7 @@ def save_trajectory(path: Path, world: World, rows: list[dict]) -> bool:
     except ImportError:
         return False
 
-    fig, ax = plt.subplots(figsize=(7, 6))
+    fig, ax = plt.subplots(figsize=(9, 7))
     ax.plot([r["robot_x"] for r in rows], [r["robot_y"] for r in rows], label="robot")
     ax.plot(
         [r["operator_x"] for r in rows],
@@ -31,7 +31,8 @@ def save_trajectory(path: Path, world: World, rows: list[dict]) -> bool:
         else:
             patch = plt.Circle((shape.x, shape.y), shape.r, color="gray", alpha=0.6)
         ax.add_patch(patch)
-        ax.annotate(obstacle.kind, shape.bounds()[2:], fontsize=7, color="gray")
+        if obstacle.kind != "wall":
+            ax.annotate(obstacle.kind, shape.bounds()[2:], fontsize=7, color="gray")
     crowd = [person.home for person in world.people]
     if crowd:
         ax.plot(

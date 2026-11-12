@@ -40,6 +40,13 @@ python -m hmc.run
 
 `python -m hmc.run` prints the score table and writes these files to `out/`. Use `--out` to pick another folder and `--bag red|blue|green` to pick the bag.
 
+Use `--map` to pick the scenario:
+
+| Map | What it is |
+|---|---|
+| `default` | A small made-up scenario, about 14 m by 9 m |
+| `eindhoven2024` | The layout of the official Carry My Luggage map of RoboCup 2024 in Eindhoven: team tables, arenas A to C, audience stands and starting point A, about 40 m by 27 m. The official map has no scale and no car, so the scale (5 cm per pixel) and the car position are our own choice. See `src/hmc/maps.py` |
+
 | File | What it holds |
 |---|---|
 | `score.txt` | the score table |
@@ -58,18 +65,19 @@ python -m hmc.run
 | `src/hmc/task.py` | The state machine that decides what to do next |
 | `src/hmc/scoresheet.py` | The scoresheet and the referee that fills it in |
 | `src/hmc/plotting.py` | Draws `trajectory.png` |
+| `src/hmc/maps.py` | The scenario maps you can pick with `--map` |
 | `src/hmc/run.py` | The scripted scenario CLI |
 | `tests/` | pytest tests |
 | `docs/tasks/5.1-help-me-carry.md` | The task spec, the scoresheet and the acceptance tests |
 | `docs/reference/` | The rulebook and the other inputs |
 | `docs/evidence/help-me-carry-slice1/` | Outputs of slice 1 (615 of 1115), with `SHA256SUMS` |
-| `docs/evidence/help-me-carry-slice2/` | Outputs of slice 2 (1115 of 1115), with `SHA256SUMS` |
+| `docs/evidence/help-me-carry-slice2/` | Outputs of slice 2 (1115 of 1115) for both maps, with `SHA256SUMS` |
 | `AGENTS.md` | Rules for coding agents |
 | `WORKLOG.md` | Decisions and why we made them |
 
 ## Limits
 
-- The scripted run scores **1115 of 1115**. That is every main and bonus row. The world, the obstacles and the referee are all our own code, so this shows the logic works in our scenario. It does not show that the real robot can do the task.
+- The scripted run scores **1115 of 1115** on both maps. That is every main and bonus row. The world, the obstacles and the referee are all our own code, so this shows the logic works in our scenario. It does not show that the real robot can do the task.
 - Deus ex Machina, the alternative start signal, restarts and the three tries are not simulated. Not attending and outstanding performance are referee decisions.
 - The robot drives at up to 1.0 m/s in the simulation. The real base is limited to 0.15 m/s, which is too slow to follow a person walking at 0.8 m/s.
 - Perception is perfect and comes straight from the world. There is no camera, lidar or noise.

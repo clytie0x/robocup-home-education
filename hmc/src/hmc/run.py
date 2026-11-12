@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Callable
 
 from hmc import hri, plotting
+from hmc.maps import MAPS
 from hmc.scoresheet import MAX_TOTAL, Referee, Scoresheet
 from hmc.task import State, Task
-from hmc.world import DT, World, build_world
+from hmc.world import DT, World
 
 LOG_EVERY = 0.5  # seconds between timeline rows (events always get a row)
 
@@ -33,9 +34,10 @@ def run_scenario(
     target_bag: str = "blue",
     robot_speed: float = 1.0,
     on_step: Callable[[World, Task], None] | None = None,
+    map_name: str = "default",
 ) -> Result:
     """Run the whole scenario. on_step lets tests poke the world (e.g. drop the bag)."""
-    world = build_world(target_bag=target_bag, robot_speed=robot_speed)
+    world = MAPS[map_name](target_bag=target_bag, robot_speed=robot_speed)
     speech = hri.Speech()
     task = Task(world, speech)
     sheet = Scoresheet()
@@ -109,11 +111,12 @@ def _floats(row: dict) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Help Me Carry slice 1 scenario")
     parser.add_argument("--out", default="out", help="output folder (default: out)")
+    parser.add_argument("--map", default="default", choices=sorted(MAPS), help="scenario map")
     parser.add_argument("--bag", default="blue", choices=["red", "blue", "green"],
                         help="bag the operator points at")  # fmt: skip
     args = parser.parse_args(argv)
 
-    result = run_scenario(target_bag=args.bag)
+    result = run_scenario(target_bag=args.bag, map_name=args.map)
     write_outputs(result, Path(args.out))
     print(result.sheet.table())
     print(f"Awarded {result.sheet.total()} of {MAX_TOTAL}")

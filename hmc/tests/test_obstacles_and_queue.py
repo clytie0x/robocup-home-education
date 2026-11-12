@@ -7,11 +7,11 @@ import hmc.navigation
 import hmc.task
 from hmc.navigation import INFLATE, plan_path
 from hmc.perception import see_obstacles
-from hmc.run import run_scenario
+from hmc.run import main, run_scenario
 from hmc.scoresheet import Referee, Scoresheet
 from hmc.task import State
 from hmc.world import (
-    PERSON_RADIUS, ROBOT_RADIUS, Box, Circle, build_world, distance,
+    PERSON_RADIUS, ROBOT_RADIUS, TIME_LIMIT, Box, Circle, build_world, distance,
 )  # fmt: skip
 
 AVOID_ROWS = [
@@ -138,3 +138,26 @@ def test_falling_back_from_the_queue_loses_the_queue_row():
     result = run_scenario(on_step=fall_back)
     assert result.task.state == State.DONE
     assert result.sheet.counts.get("queue", 0) == 0
+
+
+# The Eindhoven 2024 map
+
+
+def test_eindhoven2024_map_earns_everything_without_touching_anything():
+    closest = []
+
+    def record(world, task):
+        robot = world.robot.pos
+        closest.extend(o.shape.clearance(robot) for o in world.obstacles)
+        closest.extend(distance(robot, p.pos) - PERSON_RADIUS for p in world.people)
+
+    result = run_scenario(map_name="eindhoven2024", on_step=record)
+    assert result.task.state == State.DONE
+    assert result.sheet.total() == 1115
+    assert result.world.time < TIME_LIMIT
+    assert min(closest) > ROBOT_RADIUS
+
+
+def test_cli_can_pick_the_map(tmp_path, capsys):
+    assert main(["--map", "eindhoven2024", "--out", str(tmp_path)]) == 0
+    assert "Awarded 1115 of 1115" in capsys.readouterr().out

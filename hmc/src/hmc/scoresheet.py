@@ -120,7 +120,8 @@ class Referee:
         if not at_car_before and self.sheet.counts.get("follow_to_car", 0) > 0:
             # The obstacles are on the way to the car, so they are judged on arrival.
             for kind in sorted(self.faced - self.touched):
-                self.sheet.award(AVOID_ROW[kind])
+                if kind in AVOID_ROW:  # walls and tables have no row of their own
+                    self.sheet.award(AVOID_ROW[kind])
         self._watch_queue(world)
         self._once("perceive_bag", perceived_bag == target)
         self._once("pick_bag", bag.state == "carried")
