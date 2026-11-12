@@ -149,7 +149,7 @@ class SttNode(Node):
         # Vocabulary hint for whisper: biases transcription toward robot commands.
         self.declare_parameter('initial_prompt',
                                'Hey robot. Robot voice commands: carry the bag, drop the bag, put the bag down, '
-                               'follow me, stop, move forward, go back, turn left, turn right, do a beatbox.')
+                               'follow me, stop, stay here, move forward, go back, turn left, turn right, do a beatbox.')
 
         p = lambda n: self.get_parameter(n).value
         self.url = p('whisper_url')

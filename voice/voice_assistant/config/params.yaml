@@ -20,7 +20,7 @@ stt_node:
     single_word_allow: ["stop", "halt", "freeze", "stops", "stopped", "stopping", "stab", "stob", "stup", "stap", "top", "tops", "stuff", "wait", "enough", "stay", "hello", "hi", "robot", "yes", "no", "thanks", "beatbox"]   # other 1-word transcripts are dropped as noise
     wake_word: ""             # leave empty: the wake word is handled by dialog_node
     language: "en"
-    initial_prompt: "Hello. Hey robot. Robot voice commands: carry the bag, drop the bag, put the bag down, follow me, stop, move forward, go back, turn left, turn right, do a beatbox."
+    initial_prompt: "Hello. Hey robot. Robot voice commands: carry the bag, drop the bag, put the bag down, follow me, stop, stay here, move forward, go back, turn left, turn right, do a beatbox."
 
 flow_node:                     # task state machine (no wake word). Robot events come in on /robot/event
   ros__parameters:
@@ -42,6 +42,8 @@ dialog_node:                   # NOT launched any more (wake-word version, kept 
     awake_timeout: 15.0        # seconds of silence (after the robot stops talking) before sleeping again
     greeting: "Hi! I'm {name}. How can I help you?"     # {name} = robot_name
     capabilities: "I can carry your bag, drop the bag, follow you, move forward or backward, turn left or right, do a beatbox, and stop."
+    fuzzy_commands: true      # sound-alike fallback: carry / drop / follow / stop / stay here
+    fuzzy_min: 0.75           # 0..1, higher = stricter
     farewell: "Okay. Just say hello if you need me."
     wake_chime: "~/robot_voice/sounds/wake_chime.wav"     # "ding" when it wakes (after the first intro). "" = speak instead
     sleep_chime: "~/robot_voice/sounds/sleep_chime.wav"   # played when it goes back to sleep. "" = silent

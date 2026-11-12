@@ -17,6 +17,7 @@ Numbers: digits ("1.5") or words ("one", "twenty five", "half", "a little"); uni
 """
 import json
 import re
+from difflib import SequenceMatcher
 import time
 
 import rclpy
@@ -35,8 +36,46 @@ R = lambda p: re.compile(p, re.I)
 STOP_ALIKE = R(r"^(?:(?:please|robot|hey|okay|ok)\s+)*(?:stop+s?|stops? it|stopped|stopping|stab|stob|stup|top|tops|"
                r"tap ?tops?|stap|stuff|ta[- ]?ta|tata|that'?s (?:all|it|enough)|that is (?:all|it|enough)|"
                r"enough|wait|hold on|stay|stay there)(?:\s+(?:please|now|robot))*$")
+# Fuzzy fallback for the few commands the robot really needs. Whisper often writes them slightly wrong
+# ("Dopting the bag", "Hollow me", "Keep up the bag"); if no rule matched, a SHORT sentence that sounds
+# close enough to exactly one of these phrases is taken as that command.
+COMMAND_PHRASES = {
+    'carry_bag': ["help me carry this bag", "help me carry the bag", "carry this bag", "carry the bag",
+                  "carry my bag", "pick up the bag", "pick up this bag", "take the bag", "take this bag",
+                  "hold the bag", "grab the bag", "keep up the bag", "beat up the bag"],
+    'drop_bag': ["drop the bag", "drop this bag", "drop it", "put the bag down", "put down the bag",
+                 "release the bag", "let go of the bag"],
+    'follow_me': ["follow me", "follow me please", "come with me", "please follow me"],
+    'stop': ["stop", "robot stop", "please stop", "stop here", "stay here", "stay there", "wait here", "stay"],
+}
+
+
+def _norm(s):
+    return " ".join(re.sub(r"[^a-z ]", " ", s.lower().replace("'", "")).split())
+
+
+def fuzzy_command(text, allowed=None, min_ratio=0.75, margin=0.1, max_words=7):
+    """(action, score) for the best phrase if score >= min_ratio and clearly ahead of the 2nd-best
+    command (margin), else (None, score). Whole text and each sentence of it are tried."""
+    best = (None, 0.0, 0.0)
+    for c in [text] + re.split(r"[.!?,]+", text):
+        t = _norm(c)
+        if not t or len(t.split()) > max_words:
+            continue
+        sc = sorted(((a, max(SequenceMatcher(None, t, _norm(p)).ratio() for p in ph))
+                     for a, ph in COMMAND_PHRASES.items() if allowed is None or a in allowed),
+                    key=lambda kv: -kv[1])
+        if sc and sc[0][1] > best[1]:
+            best = (sc[0][0], sc[0][1], sc[1][1] if len(sc) > 1 else 0.0)
+    a, s1, s2 = best
+    return (a, s1) if a and s1 >= min_ratio and s1 - s2 >= margin else (None, s1)
+
+
+FUZZY_REPLY = {"stop": "Stopping.", "carry_bag": "Sure, I will carry the bag for you.",
+               "drop_bag": "Okay, dropping the bag.", "follow_me": "Okay, I will follow you."}
+
 RULES = [
-    ("stop", R(r"\b(stop|halt|freeze|stay still|don'?t move)\b")),
+    ("stop", R(r"\b(stop|halt|freeze|stay still|stay here|stay there|wait here|don'?t move)\b")),
     ("beatbox", R(r"\b(beat|bit|beet|beats)[\s-]?box(ing)?\b|\bbeatbox|\b(drop|play)\s+(a|the|some)\s+beats?\b|\bplay\s+(some\s+)?music\b")),   # before drop_bag: "drop a beat" is not "drop the bag"
     ("drop_bag", R(r"\b(drop|release|unload|let\s+go)\b|\bput\b.*\bdown\b")),
     ("carry_bag", R(r"\bcarry\b|\b(pick\s+up|hold|take|grab)\b.*\bbags?\b")),
@@ -90,6 +129,9 @@ class RuleParser:
         self.capabilities = capabilities
         self.name = robot_name
         self.allowed = set(allowed)
+        self.fuzzy = True            # sound-alike fallback for the core commands (see COMMAND_PHRASES)
+        self.fuzzy_min = 0.75
+        self.last_fuzzy = None
 
     def parse(self, text):
         """Returns (action, params, reply). action 'none' = nothing to send to the robot."""
@@ -158,6 +200,11 @@ class RuleParser:
                 return "none", {}, "You're welcome."
             if action == "hello":
                 return "none", {}, "Hello! What can I do for you?"
+        if self.fuzzy:
+            a, score = fuzzy_command(t, self.allowed, self.fuzzy_min)
+            if a:
+                self.last_fuzzy = (a, score)
+                return a, {}, FUZZY_REPLY[a]
         return "none", {}, "Sorry, I didn't catch that. Please say it again."
 
 
@@ -172,9 +219,13 @@ class RuleNode(Node):
                                'turn left or right, do a beatbox, and stop.')
         self.declare_parameter('robot_name', 'Predictably Slightly Unpredictable')
         self.declare_parameter('beatbox_file', '~/robot_voice/sounds/cat_beatbox.wav')
+        self.declare_parameter('fuzzy_commands', True)   # sound-alike fallback for carry/drop/follow/stop
+        self.declare_parameter('fuzzy_min', 0.75)        # 0..1, higher = stricter
         p = lambda n: self.get_parameter(n).value
         self.beatbox_file = p('beatbox_file')
         self.parser = RuleParser(p('capabilities'), list(p('allowed_actions')), p('robot_name'))
+        self.parser.fuzzy = bool(p('fuzzy_commands'))
+        self.parser.fuzzy_min = float(p('fuzzy_min'))
 
         # Only reports WHAT the user wants; flow_node decides what the robot says and does.
         self.pub_intent = self.create_publisher(String, '/robot/intent', 10)
@@ -187,11 +238,13 @@ class RuleNode(Node):
         if not text:
             return
         t0 = time.time()
+        self.parser.last_fuzzy = None
         action, params, reply = self.parser.parse(text)
         if action not in self.parser.allowed:
             action, params = 'none', {}
+        fz = f' [sounds like {action}, {self.parser.last_fuzzy[1]:.2f}]' if self.parser.last_fuzzy else ''
         self.get_logger().info(f'({(time.time() - t0) * 1000:.1f} ms) action={action} params={params} '
-                               f'reply="{reply}"')
+                               f'reply="{reply}"{fz}')
         out = {"action": action, "params": params, "reply": reply}
         self.pub_raw.publish(String(data=json.dumps(out)))
         self.pub_intent.publish(String(data=json.dumps(dict(out, utterance=text, source="rules"))))
