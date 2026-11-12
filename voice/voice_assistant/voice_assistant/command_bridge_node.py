@@ -80,7 +80,8 @@ class CommandBridge(Node):
         if action == 'stop':
             self.until = 0.0
             self.pub.publish(Twist())
-            self._stop_arm()
+            if prm.get('arm', True) is not False:     # flow's error-stop sends arm=False
+                self._stop_arm()
             self._state('stopped')
             return
 

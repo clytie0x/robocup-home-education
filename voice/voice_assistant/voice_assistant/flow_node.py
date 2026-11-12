@@ -90,7 +90,8 @@ class FlowLogic:
             out += self._say(msg or "Okay, dropping the bag.", now)
         elif state == ERROR:
             self.error_text = msg or "Sorry, something went wrong."
-            out += [("cmd", {"action": "stop", "params": {}})]
+            # wheels stop; the arm is left alone (it already failed / is busy with its own task, e.g. going to rest)
+            out += [("cmd", {"action": "stop", "params": {"arm": False}})]
             out += self._say(self.error_text, now)
         return out
 

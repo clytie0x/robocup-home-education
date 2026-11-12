@@ -37,8 +37,26 @@ DEFAULT_SYSTEM = (
     "- drop_bag: drop / release / put down / let go of the bag the robot is carrying\n"
     "- beatbox: the user asks the robot to beatbox, drop a beat or play music\n"
     "- go_to: params.target = place name; follow_me; look_at: params.target\n"
-    "- none: chatting, questions, or anything the robot cannot do"
+    "- none: chatting, questions, or anything the robot cannot do\n"
+    "If the sentence is unclear, incomplete or not a command (e.g. 'After that.', 'Okay then.'), "
+    "use action \"none\" and ask the user to repeat. Never guess a movement."
 )
+
+# An action is only accepted if the sentence contains one of its command words; otherwise the LLM guessed
+# (whisper noise like "After that." -> move_forward). 'stop' and 'none' are always allowed.
+ACTION_WORDS = {
+    'move_forward': r"\b(forward|ahead|straight|closer)\b|\bcome\s+(here|to\s+me)\b|\bmove\b.*\b(meters?|metres?|bit|steps?|little)\b",
+    'move_backward': r"\b(back|backwards?|reverse)\b",
+    'turn': r"\b(turn|rotate|spin|left|right|around)\b",
+    'carry_bag': r"\b(bags?|carry|pick|hold|grab|take)\b",
+    'drop_bag': r"\b(drop|release|let\s+go|put|down)\b",
+    'follow_me': r"\bfollow\b|\bcome\s+with\b",
+    'go_to': r"\b(go|navigate|take\s+me|bring\s+me)\b",
+    'look_at': r"\b(look|face|watch)\b",
+    'beatbox': r"\b(beat|box|music|song|rap)",
+}
+ACTION_RX = {a: re.compile(rx, re.I) for a, rx in ACTION_WORDS.items()}
+UNCLEAR_REPLY = "Sorry, I didn't catch that. Please say it again."
 
 # Example turns shown to the LLM before the real conversation (few-shot).
 FEW_SHOT = [
@@ -50,6 +68,7 @@ FEW_SHOT = [
     ("Turn right a little", {"reply": "Turning right a little.", "action": "turn",
                              "params": {"angle": -20}}),
     ("Hi, how are you?", {"reply": "I'm great, thanks! How can I help you?", "action": "none", "params": {}}),
+    ("After that.", {"reply": "Sorry, I didn't catch that. Please say it again.", "action": "none", "params": {}}),
 ]
 
 # Fast path: safety-critical / must-not-miss commands are matched by keyword and executed
@@ -80,6 +99,7 @@ class LlmNode(Node):
         self.declare_parameter('max_tokens', 128)
         self.declare_parameter('temperature', 0.3)
         self.declare_parameter('fast_commands', True)    # keyword fast path for stop / drop_bag
+        self.declare_parameter('check_action_words', True)   # reject actions whose command words are missing
 
         p = lambda n: self.get_parameter(n).value
         self.url = p('llm_url')
@@ -92,6 +112,7 @@ class LlmNode(Node):
         self.max_tokens = int(p('max_tokens'))
         self.temperature = float(p('temperature'))
         self.fast_commands = bool(p('fast_commands'))
+        self.check_words = bool(p('check_action_words'))
         self.few_shot = []
         for user, ans in FEW_SHOT:
             if ans["action"] in self.actions:
@@ -206,6 +227,11 @@ class LlmNode(Node):
         if action not in self.actions:
             action = 'none'
         params = out.get('params') or {}
+        rx = ACTION_RX.get(action)
+        if self.check_words and rx is not None and not rx.search(text):
+            self.get_logger().info(f'(gated) LLM chose {action} but "{text}" has no {action} words -> none')
+            action, params, reply = 'none', {}, UNCLEAR_REPLY
+            out = {"reply": reply, "action": action, "params": params}
         self.get_logger().info(f'({time.time() - t0:.2f}s) action={action} params={params} reply="{reply}"')
 
         self.pub_raw.publish(String(data=json.dumps(out)))
