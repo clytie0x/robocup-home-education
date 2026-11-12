@@ -6,18 +6,25 @@
 #   servers.sh restart      stop, then start both
 #   servers.sh status       which servers are up + RAM
 #   servers.sh get-small    download the more accurate whisper small.en model (once, ~190 MB)
-# Whisper model: small.en is used automatically once downloaded (better with accents), else base.en.
+# Whisper model: small.en by default (downloaded automatically on first start if missing), base.en if offline.
 # Force one with: WHISPER_MODEL=/opt/robot_voice/models/whisper/ggml-base.en-q5_1.bin servers.sh start-stt
 ROOT=/opt/robot_voice
 LLM_MODEL=${LLM_MODEL:-$ROOT/models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf}
 SMALL=$ROOT/models/whisper/ggml-small.en-q5_1.bin
 BASE=$ROOT/models/whisper/ggml-base.en-q5_1.bin
-if [ -z "$WHISPER_MODEL" ]; then
-  if [ -f "$SMALL" ]; then WHISPER_MODEL=$SMALL; else WHISPER_MODEL=$BASE; fi
-fi
+pick_model() {
+  [ -n "$WHISPER_MODEL" ] && return
+  if [ ! -f "$SMALL" ]; then           # small.en is the default: download it once (~190 MB) if missing
+    echo "whisper small.en not found -> downloading once (needs internet, ~190 MB)..."
+    timeout 300 bash $ROOT/src/whisper.cpp/models/download-ggml-model.sh small.en-q5_1 $ROOT/models/whisper \
+      >/tmp/robot_voice_get_small.log 2>&1 || { rm -f "$SMALL"; echo "download failed (offline?) -> using base.en"; }
+  fi
+  if [ -s "$SMALL" ]; then WHISPER_MODEL=$SMALL; else WHISPER_MODEL=$BASE; fi
+}
 
 start_whisper() {
   if pgrep -f whisper-server >/dev/null; then echo "whisper-server already running"; return; fi
+  pick_model
   echo "whisper model: $(basename "$WHISPER_MODEL")"
   $ROOT/src/whisper.cpp/build/bin/whisper-server \
     -m "$WHISPER_MODEL" -l en -t 4 --host 127.0.0.1 --port 8080 \
