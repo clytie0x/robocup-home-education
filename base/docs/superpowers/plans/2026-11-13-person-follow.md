@@ -261,8 +261,8 @@ class Follower:
 - `navigation.py`: read the robot radius as `hmc.world.ROBOT_RADIUS` at call time (the way `run.use_base` already overrides `MAX_ACCEL`), so the robot can set 0.29. `follow_step` gains a `follow_distance` parameter with the present default.
 - `appearance.LookMemory`: sized by the first look added, so a 512-number look works. `LOOK_SIZE` stays the simulation's size.
 
-- [ ] **Step 1:** Record the baseline before touching anything: `cd hmc && pytest -q` (expect `109 passed, 2 xfailed, 1 xpassed`) and `for m in default bangkok2022 bordeaux2023 eindhoven2024 germanopen2024 portugalopen2024; do python -m hmc.run --map $m; done > out/before.txt`.
-- [ ] **Step 2:** Write failing tests in `hmc/tests/test_follower.py`:
+- [x] **Step 1:** Record the baseline before touching anything: `cd hmc && pytest -q` (expect `109 passed, 2 xfailed, 1 xpassed`) and `for m in default bangkok2022 bordeaux2023 eindhoven2024 germanopen2024 portugalopen2024; do python -m hmc.run --map $m; done > out/before.txt`.
+- [x] **Step 2:** Write failing tests in `hmc/tests/test_follower.py`:
 
 ```python
 def test_follows_to_the_follow_distance_and_holds(): ...
@@ -282,9 +282,9 @@ def test_search_turns_again_every_ten_seconds_when_asked_to(): ...
     # with None it stands still
 ```
 
-- [ ] **Step 3:** Move the code. `Task` keeps its states and builds a `Senses` each step from `perception.see_operator`, `see_operator_look`, `see_people`, `see_obstacles`; `_follow` and `_search` call `follower.step`. Nothing about bags, queue or crowd moves.
-- [ ] **Step 4:** Run `pytest -q`: `117 passed, 2 xfailed, 1 xpassed`. Rerun the six maps into `out/after.txt`; `diff out/before.txt out/after.txt` must be empty (a refactor, no behaviour change). If it is not empty, find the cause; do not regenerate evidence to hide it.
-- [ ] **Step 5:** Add a WORKLOG entry. Commit.
+- [x] **Step 3:** Move the code. `Task` keeps its states and builds a `Senses` each step from `perception.see_operator`, `see_operator_look`, `see_people`, `see_obstacles`; `_follow` and `_search` call `follower.step`. Nothing about bags, queue or crowd moves.
+- [x] **Step 4:** Run `pytest -q`: `117 passed, 2 xfailed, 1 xpassed`. Rerun the six maps into `out/after.txt`; `diff out/before.txt out/after.txt` must be empty (a refactor, no behaviour change). If it is not empty, find the cause; do not regenerate evidence to hide it.
+- [x] **Step 5:** Add a WORKLOG entry. Commit.
 
 ### Task 5: People in the LiDAR scan
 
@@ -439,7 +439,7 @@ def test_enrol_refuses_two_people_inside_2_5_m(self): ...
 - One cycle, at the LiDAR rate (10 Hz):
   1. Read odometry (`ValueError` or a serial error: stop, end the run: Review Focus 5), scan, newest frame, newest answer.
   2. `depth_points`; `body.limit(safety.speed_cap(depth_points, p))`; `body.sync(pose)`.
-  3. `senses.read(...)`; `follower.step(senses, dt)`.
+  3. `senses.read(...)`; `follower.watch(senses)`; `follower.step(senses, dt)` (watch first, every cycle).
   4. `v, w = body.command()`; if `safety.must_stop(scan and depth points, v, w, p)`: `v = w = 0` and `body.robot.speed = 0`.
   5. `wheels.send(v, w)`; send the frame to the Jetson; append the record to `logs/<start time>/log.jsonl`: time, pose, v, w, mode, locked, link alive, operator position, people, obstacle count, nearest obstacle distance, stop reason, cycle time. Every 10th scan and its JPEG are saved too.
 - A cycle longer than 0.4 s stops the wheels and ends the run. Ctrl+C and SIGTERM send `S#` first, and a second signal is ignored while stopping.

@@ -8,7 +8,8 @@ close to a shape, and search for the shortest free path with A*.
 import heapq
 import math
 
-from hmc.world import ROBOT_RADIUS, Point, Robot, Shape, distance
+from hmc import world as hmc_world
+from hmc.world import Point, Robot, Shape, distance
 
 FOLLOW_DISTANCE = 1.5  # metres to keep behind the operator
 GOAL_TOLERANCE = 0.5  # metres, "close enough" for go_to
@@ -17,7 +18,9 @@ CELL = 0.1  # metres, size of one grid cell
 # Extra room, because the robot cuts corners between cells. Small enough that the robot
 # still fits through a 0.915 m door, the width the rulebook recommends.
 SAFETY = 0.1
-INFLATE = ROBOT_RADIUS + SAFETY  # a cell is blocked when a shape is closer than this
+# A cell is blocked when a shape is closer than this. This is the simulation's value:
+# the code reads hmc_world.ROBOT_RADIUS when it runs, so the robot can set its own.
+INFLATE = hmc_world.ROBOT_RADIUS + SAFETY
 MARGIN = 3.0  # metres of grid around the robot and the goal
 REPLAN_EVERY = 0.5  # seconds
 REPLAN_IF_GOAL_MOVED = 0.3  # metres
@@ -37,6 +40,7 @@ def plan_path(start: Point, goal: Point, shapes: list[Shape]) -> list[Point] | N
     If the goal itself is blocked (for example a person we want to walk behind), the
     path ends at the free cell closest to the goal instead.
     """
+    inflate = hmc_world.ROBOT_RADIUS + SAFETY
     x0 = min(start[0], goal[0]) - MARGIN
     y0 = min(start[1], goal[1]) - MARGIN
     width = int((max(start[0], goal[0]) + MARGIN - x0) / CELL) + 1
@@ -55,23 +59,23 @@ def plan_path(start: Point, goal: Point, shapes: list[Shape]) -> list[Point] | N
     blocked: set[Cell] = set()
     for shape in shapes:
         bx0, by0, bx1, by1 = shape.bounds()
-        lo = cell_of((bx0 - INFLATE, by0 - INFLATE))
-        hi = cell_of((bx1 + INFLATE, by1 + INFLATE))
+        lo = cell_of((bx0 - inflate, by0 - inflate))
+        hi = cell_of((bx1 + inflate, by1 + inflate))
         for i in range(max(lo[0], 0), min(hi[0], width - 1) + 1):
             for j in range(max(lo[1], 0), min(hi[1], height - 1) + 1):
-                if shape.clearance(centre((i, j))) < INFLATE:
+                if shape.clearance(centre((i, j))) < inflate:
                     blocked.add((i, j))
 
     # If we ended up inside the safety zone, there would be no way out. So free the cells
     # around us that are no closer to anything than we are now: we may only move away.
     start_cell = cell_of(start)
     here_clear = min((s.clearance(start) for s in shapes), default=math.inf)
-    if here_clear < INFLATE:
-        reach = int(INFLATE / CELL) + 1
+    if here_clear < inflate:
+        reach = int(inflate / CELL) + 1
         for i in range(start_cell[0] - reach, start_cell[0] + reach + 1):
             for j in range(start_cell[1] - reach, start_cell[1] + reach + 1):
                 c = centre((i, j))
-                if distance(c, start) <= INFLATE and all(
+                if distance(c, start) <= inflate and all(
                     s.clearance(c) >= here_clear for s in shapes
                 ):
                     blocked.discard((i, j))
@@ -191,13 +195,14 @@ def free_ahead(robot: Robot, shapes: list[Shape], heading: float) -> float:
         y = robot.y + math.sin(heading) * (free + CELL)
         for shape, now in zip(shapes, here):
             there = shape.clearance((x, y))
-            if there <= ROBOT_RADIUS + STOP_MARGIN and there < now:
+            if there <= hmc_world.ROBOT_RADIUS + STOP_MARGIN and there < now:
                 return free
         free += CELL
     return free
 
 
 def follow_step(navigator: Navigator, robot: Robot, operator_pos: Point,
-                shapes: list[Shape], now: float, dt: float) -> bool:  # fmt: skip
-    """One step of following: close the gap, but stop FOLLOW_DISTANCE away."""
-    return navigator.step(robot, operator_pos, shapes, now, dt, FOLLOW_DISTANCE)
+                shapes: list[Shape], now: float, dt: float,
+                follow_distance: float = FOLLOW_DISTANCE) -> bool:  # fmt: skip
+    """One step of following: close the gap, but stop follow_distance away."""
+    return navigator.step(robot, operator_pos, shapes, now, dt, follow_distance)

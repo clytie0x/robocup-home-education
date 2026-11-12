@@ -3,6 +3,7 @@ import re
 
 import pytest
 
+import hmc.follower
 import hmc.navigation
 import hmc.task
 from hmc.navigation import INFLATE, plan_path
@@ -53,6 +54,9 @@ def test_task_code_never_reads_obstacles_or_people_from_the_world():
         source = inspect.getsource(module)
         assert re.search(r"\.obstacles\b", source) is None
         assert re.search(r"\.people\b", source) is None
+    # The follower learns them only from Senses: it never names the world at all.
+    source = inspect.getsource(hmc.follower)
+    assert re.search(r"(?<!hmc\.)\bworld\b", source, re.IGNORECASE) is None
 
 
 # Perception

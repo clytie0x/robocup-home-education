@@ -33,10 +33,12 @@ class LookMemory:
     """The average look of one person, built from many noisy observations."""
 
     def __init__(self) -> None:
-        self.total = [0.0] * LOOK_SIZE
+        self.total: list[float] = []
         self.count = 0
 
     def add(self, look) -> None:
+        if not self.count:
+            self.total = [0.0] * len(look)  # sized by the first look: any re-ID size works
         self.total = [t + v for t, v in zip(self.total, look)]
         self.count += 1
 
