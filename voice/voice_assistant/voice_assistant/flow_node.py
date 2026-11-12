@@ -9,6 +9,8 @@
 States
   LISTENING        entry: ask "How can I help you?"; no command for `reask_s` -> ask again
   PICKING_BAG      sent carry_bag, waiting for event grab_success
+  ASK_FOLLOW       entry: "I have your bag. Should I follow you?"  yes / follow me -> ANNOUNCE_READY,
+                   no -> LISTENING (keeps the bag), no answer twice -> LISTENING   (param ask_follow, default on)
   ANNOUNCE_READY   entry: say "I am ready to follow you"; when the speech ends and a person is seen -> FOLLOWING
   FOLLOWING        sent follow_me; stop -> LISTENING, drop the bag -> DROPPING_BAG
   DROPPING_BAG     sent drop_bag, waiting for event drop_done
@@ -27,14 +29,18 @@ Fixes vs. the original drawing
   5. timeouts when the robot never answers (grab 30 s / drop 20 s / person 5 s)
 """
 import json
+import re
 import time
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
-LISTENING, PICKING_BAG, ANNOUNCE_READY, FOLLOWING, DROPPING_BAG, ERROR = (
-    'listening', 'picking_bag', 'announce_ready', 'following', 'dropping_bag', 'error')
+LISTENING, PICKING_BAG, ANNOUNCE_READY, FOLLOWING, DROPPING_BAG, ERROR, ASK_FOLLOW = (
+    'listening', 'picking_bag', 'announce_ready', 'following', 'dropping_bag', 'error', 'ask_follow')
+YES = re.compile(r"^\W*(yes|yeah|yep|yup|ya|sure|ok|okay|alright|all right|please|of course|go ahead|let'?s go|"
+                 r"come on|do it|follow)\b", re.I)
+NO = re.compile(r"^\W*(no|nope|nah|not now|not yet|don'?t|wait|later)\b|\b(wait here|stay here)\b", re.I)
 MOTION = {'move_forward', 'move_backward', 'turn', 'go_to', 'look_at'}
 # Other names teammates' nodes may send for the same event (unknown events are only logged, never a crash)
 EVENT_ALIASES = {'drop_success': 'drop_done', 'grab_done': 'grab_success', 'pick_success': 'grab_success',
@@ -47,11 +53,14 @@ class FlowLogic:
 
     def __init__(self, ask_text="How can I help you?", ready_text="I am ready to follow you.",
                  reask_s=10.0, grab_timeout=30.0, drop_timeout=20.0, person_timeout=5.0,
-                 require_person=True, beatbox_file=""):
+                 require_person=True, beatbox_file="", ask_follow=True,
+                 ask_follow_text="I have your bag. Should I follow you?"):
         self.ask_text, self.ready_text = ask_text, ready_text
         self.reask_s, self.grab_timeout, self.drop_timeout = reask_s, grab_timeout, drop_timeout
         self.person_timeout, self.require_person = person_timeout, require_person
         self.beatbox_file = beatbox_file
+        self.ask_follow, self.ask_follow_text = ask_follow, ask_follow_text
+        self.asks = 0                 # how many times ASK_FOLLOW asked without an answer
         self.state = None
         self.carrying = False
         self.person_visible = False
@@ -80,6 +89,9 @@ class FlowLogic:
             self.deadline = now + self.grab_timeout
             out += [("cmd", {"action": "carry_bag", "params": {}})]
             out += self._say(msg or "Okay, picking up the bag.", now)
+        elif state == ASK_FOLLOW:
+            self.asks = 1
+            out += self._say(self.ask_follow_text, now)
         elif state == ANNOUNCE_READY:
             out += self._say(self.ready_text, now)
         elif state == FOLLOWING:
@@ -94,6 +106,11 @@ class FlowLogic:
             out += [("cmd", {"action": "stop", "params": {"arm": False}})]
             out += self._say(self.error_text, now)
         return out
+
+    def _listen_with(self, text, now):
+        """Go back to LISTENING but say `text` instead of the usual "How can I help you?"."""
+        self.state, self.deadline, self.last_activity = LISTENING, None, now
+        return [("state", LISTENING)] + self._say(text, now)
 
     def _speech_done(self, now):
         """True once after the speech we asked for has finished (or TTS never started within 4 s)."""
@@ -150,7 +167,7 @@ class FlowLogic:
             return []
         if ev == 'grab_success' and self.state == PICKING_BAG:
             self.carrying = True
-            return self._goto(ANNOUNCE_READY, now)
+            return self._goto(ASK_FOLLOW if self.ask_follow else ANNOUNCE_READY, now)
         if ev == 'grab_failed' and self.state == PICKING_BAG:
             return self._goto(ERROR, now, f"Sorry. {arm_msg}" if arm_msg else "Sorry, I could not pick up the bag.")
         if ev == 'drop_done' and self.state == DROPPING_BAG:
@@ -192,6 +209,15 @@ class FlowLogic:
                     return self._goto(FOLLOWING, now)
                 if now > self.deadline:
                     return self._goto(ERROR, now, "I can't see you. Please stand in front of me.")
+        elif s == ASK_FOLLOW:
+            if done:
+                self.deadline = now + self.reask_s               # wait for "yes" / "no"
+            elif not self.await_speech and self.deadline is not None and now > self.deadline:
+                if self.asks < 2:
+                    self.asks += 1
+                    self.deadline = None
+                    return self._say("Should I follow you? Please say yes or no.", now)
+                return self._listen_with("Okay, I will wait here. Say follow me when you are ready.", now)
         elif s == ERROR:
             if done:
                 return self._goto(LISTENING, now)
@@ -229,6 +255,17 @@ class FlowLogic:
                 return [("cmd", {"action": a, "params": params})] + (self._say(reply, now) if reply else [])
             return self._say(reply, now) if reply else []       # chat / didn't understand
 
+        if s == ASK_FOLLOW:
+            text = str(intent.get("utterance") or "")
+            if a == "follow_me" or YES.search(text):
+                return self._goto(ANNOUNCE_READY, now)
+            if a == "drop_bag":
+                return self._goto(DROPPING_BAG, now)
+            if NO.search(text):
+                return self._listen_with("Okay, I will wait here. Say follow me when you are ready.", now)
+            self.deadline = None
+            return self._say("Should I follow you? Please say yes or no.", now)
+
         if s == PICKING_BAG and a in ("drop_bag", "cancel"):   # fix 2: cancel, don't fail
             return [("cmd", {"action": "stop", "params": {}}), ("say", "Okay, cancelled.")] + \
                 self._goto(LISTENING, now)
@@ -254,10 +291,12 @@ class FlowNode(Node):
         self.declare_parameter('person_timeout', 5.0)    # no see_person after "ready to follow" -> error
         self.declare_parameter('require_person', True)   # False = follow without waiting for see_person
         self.declare_parameter('beatbox_file', '~/robot_voice/sounds/cat_beatbox.wav')
+        self.declare_parameter('ask_follow', True)       # after picking up: ask "Should I follow you?" first
+        self.declare_parameter('ask_follow_text', 'I have your bag. Should I follow you?')
         p = lambda n: self.get_parameter(n).value
         self.logic = FlowLogic(p('ask_text'), p('ready_text'), float(p('reask_s')), float(p('grab_timeout')),
                                float(p('drop_timeout')), float(p('person_timeout')), bool(p('require_person')),
-                               p('beatbox_file'))
+                               p('beatbox_file'), bool(p('ask_follow')), str(p('ask_follow_text')))
 
         self.pub_text = self.create_publisher(String, '/speech/text', 10)
         self.pub_say = self.create_publisher(String, '/tts/say', 10)

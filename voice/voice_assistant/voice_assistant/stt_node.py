@@ -145,7 +145,7 @@ class SttNode(Node):
         # A transcript of ONE word is dropped unless it is in this list (whisper invents "Go.", "You.", "Okay."
         # from noise / speaker echo). Empty list = keep every transcript.
         self.declare_parameter('single_word_allow',
-                               ['stop', 'halt', 'freeze', 'stops', 'stopped', 'stopping', 'stab', 'stob', 'stup', 'stap', 'top', 'tops', 'stuff', 'wait', 'enough', 'stay', 'hello', 'hi', 'robot', 'yes', 'no', 'thanks', 'beatbox'])
+                               ['stop', 'halt', 'freeze', 'stops', 'stopped', 'stopping', 'stab', 'stob', 'stup', 'stap', 'top', 'tops', 'stuff', 'wait', 'enough', 'stay', 'hello', 'hi', 'robot', 'yes', 'no', 'thanks', 'beatbox', 'yeah', 'yep', 'yup', 'sure', 'okay', 'ok', 'nope', 'nah'])
         # Vocabulary hint for whisper: biases transcription toward robot commands.
         self.declare_parameter('initial_prompt',
                                'Hey robot. Robot voice commands: carry the bag, drop the bag, put the bag down, '
