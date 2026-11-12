@@ -30,6 +30,11 @@ UNITS = {"zero": 0, "one": 1, "a": 1, "an": 1, "two": 2, "three": 3, "four": 4, 
 
 NEG = re.compile(r"\b(don'?t|do not|never|not now)\b", re.I)
 R = lambda p: re.compile(p, re.I)
+# Whole-sentence sound-alikes of a lone "stop" that whisper produced on the real robot
+# ("Tap top.", "Ta-ta.", "Stab.") + natural ways to say stop. Only matched when that is ALL that was said.
+STOP_ALIKE = R(r"^(?:(?:please|robot|hey|okay|ok)\s+)*(?:stop+s?|stops? it|stopped|stopping|stab|stob|stup|top|tops|"
+               r"tap ?tops?|stap|stuff|ta[- ]?ta|tata|that'?s (?:all|it|enough)|that is (?:all|it|enough)|"
+               r"enough|wait|hold on|stay|stay there)(?:\s+(?:please|now|robot))*$")
 RULES = [
     ("stop", R(r"\b(stop|halt|freeze|stay still|don'?t move)\b")),
     ("beatbox", R(r"\b(beat|bit|beet|beats)[\s-]?box(ing)?\b|\bbeatbox|\b(drop|play)\s+(a|the|some)\s+beats?\b|\bplay\s+(some\s+)?music\b")),   # before drop_bag: "drop a beat" is not "drop the bag"
@@ -92,6 +97,11 @@ class RuleParser:
         low = t.lower()
         if NEG.search(low) and not re.search(r"don'?t move", low):
             return "none", {}, "Okay, I won't."
+        bare = " ".join(re.sub(r"[^a-z' -]", " ", low).split())
+        parts = [p.strip() for p in re.split(r"[.!?,]+", low) if p.strip()]
+        if "stop" in self.allowed and parts and all(
+                STOP_ALIKE.match(" ".join(re.sub(r"[^a-z' -]", " ", p).split())) for p in parts):
+            return "stop", {}, "Stopping."
         for action, rx in RULES:
             m = rx.search(low)
             if not m:

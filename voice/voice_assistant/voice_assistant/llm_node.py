@@ -74,6 +74,8 @@ FEW_SHOT = [
 # Fast path: safety-critical / must-not-miss commands are matched by keyword and executed
 # immediately, without waiting for (or trusting) the LLM.
 NEGATION = re.compile(r"\b(don'?t|do not|never|not|no)\b", re.I)
+from voice_assistant.rule_node import STOP_ALIKE   # same "stop" sound-alikes as the rule brain
+
 FAST_RULES = [
     ("stop", re.compile(r"^\W*(?:(?:hey\s+)?robot\W+|please\W+)*(stop|halt|freeze)\b", re.I),
      "Stopping."),
@@ -160,6 +162,10 @@ class LlmNode(Node):
     def _fast_match(self, text: str):
         if not self.fast_commands or NEGATION.search(text):
             return None
+        parts = [q.strip() for q in re.split(r"[.!?,]+", text.lower()) if q.strip()]
+        if "stop" in self.actions and parts and all(
+                STOP_ALIKE.match(" ".join(re.sub(r"[^a-z' -]", " ", q).split())) for q in parts):
+            return "stop", "Stopping."
         for action, rx, reply in FAST_RULES:
             if action in self.actions and rx.search(text):
                 return action, reply
