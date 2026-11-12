@@ -2,13 +2,16 @@
 
 from dataclasses import dataclass
 
-from hmc.world import World, distance
+from hmc.world import CAR_RADIUS, PERSON_RADIUS, ROBOT_RADIUS, World, distance
 
 MAIN, BONUS, PENALTY, DEM, SPECIAL = "main", "bonus", "penalty", "deus_ex", "special"
 
 DEM_CAP = -250  # "Penalties can be applied multiple times up to a total of 250 points"
-CAR_RADIUS = 3.0  # metres, robot counts as "at the car" inside this
 START_RADIUS = 1.0  # metres, robot counts as "at the start" inside this
+FACED = 1.0  # metres; an obstacle this close to the robot counts as "faced"
+QUEUE_JOIN = 2.0  # metres behind the last person to count as "joined"
+QUEUE_STAY = 3.0  # metres; further behind than this and the robot has left the queue
+QUEUE_END_NEAR_START = 2.0  # metres; the queue part of the way back ends here
 
 
 @dataclass(frozen=True)
@@ -45,10 +48,17 @@ MAX_TOTAL = sum(r.points for r in ROWS if r.group in (MAIN, BONUS))
 
 # Rows this simulation never runs (slice 1 scope).
 NOT_RUN = {
-    "avoid_crowd", "avoid_small_object", "avoid_hard_to_see", "avoid_barriers",
-    "queue", "dem_natural", "dem_unnatural", "dem_come_back", "dem_contact",
+    "dem_natural", "dem_unnatural", "dem_come_back", "dem_contact",
     "not_attending", "alt_start_signal", "outstanding",
 }  # fmt: skip
+
+# Which avoid row belongs to which obstacle kind. The crowd is made of people.
+AVOID_ROW = {
+    "small_object": "avoid_small_object",
+    "hard_to_see": "avoid_hard_to_see",
+    "barriers": "avoid_barriers",
+    "crowd": "avoid_crowd",
+}
 
 
 class Scoresheet:
@@ -89,6 +99,10 @@ class Referee:
     def __init__(self, sheet: Scoresheet) -> None:
         self.sheet = sheet
         self._drops_seen = 0
+        self.faced: set[str] = set()  # obstacle kinds the robot came close to
+        self.touched: set[str] = set()  # obstacle kinds the robot collided with
+        self.queue_joined = False
+        self.queue_left = False  # fell back, overtook or touched someone
 
     def _once(self, key: str, condition: bool) -> None:
         if condition and self.sheet.counts.get(key, 0) == 0:
@@ -99,7 +113,15 @@ class Referee:
         bag = world.bags[target]
         robot = world.robot.pos
 
+        at_car_before = self.sheet.counts.get("follow_to_car", 0) > 0
+        if not at_car_before:
+            self._watch_obstacles(world)
         self._once("follow_to_car", distance(robot, world.car) <= CAR_RADIUS)
+        if not at_car_before and self.sheet.counts.get("follow_to_car", 0) > 0:
+            # The obstacles are on the way to the car, so they are judged on arrival.
+            for kind in sorted(self.faced - self.touched):
+                self.sheet.award(AVOID_ROW[kind])
+        self._watch_queue(world)
         self._once("perceive_bag", perceived_bag == target)
         self._once("pick_bag", bag.state == "carried")
 
@@ -116,3 +138,38 @@ class Referee:
         if new_drops > 0:
             self.sheet.award("drop_bag", new_drops)
             self._drops_seen = world.drop_count
+
+    def _watch_obstacles(self, world: World) -> None:
+        robot = world.robot.pos
+        clearances = [(o.kind, o.shape.clearance(robot)) for o in world.obstacles]
+        clearances += [
+            ("crowd", distance(robot, p.pos) - PERSON_RADIUS) for p in world.people
+        ]
+        for kind, clearance in clearances:
+            if clearance <= FACED:
+                self.faced.add(kind)
+            if clearance < ROBOT_RADIUS:
+                self.touched.add(kind)
+
+    def _watch_queue(self, world: World) -> None:
+        """Joining and staying in the queue on the way back to the start."""
+        if self.queue_left or self.sheet.counts.get("queue", 0) > 0:
+            return
+        walking = [p for p in world.people if p.walking]
+        if not walking or self.sheet.counts.get("follow_to_car", 0) == 0:
+            return
+        robot = world.robot.pos
+        tail = walking[-1]  # people start walking in order, so the last one is the end
+        behind = distance(robot, world.start) > distance(tail.pos, world.start)
+        gap = distance(robot, tail.pos)
+        if not self.queue_joined:
+            self.queue_joined = behind and gap <= QUEUE_JOIN
+            return
+        if distance(robot, world.start) <= QUEUE_END_NEAR_START:
+            self.sheet.award("queue")
+            return
+        touched = any(
+            distance(robot, p.pos) - PERSON_RADIUS < ROBOT_RADIUS for p in walking
+        )
+        if not behind or gap > QUEUE_STAY or touched:
+            self.queue_left = True

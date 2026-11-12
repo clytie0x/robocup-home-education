@@ -17,6 +17,8 @@ def test_full_run_visits_states_in_order():
         State.GO_TO_BAG,
         State.PICK,
         State.RETURN,
+        State.JOIN_QUEUE,  # the queue is seen on the way back
+        State.RETURN,  # left the queue near the start
         State.DONE,
     ]
 
@@ -63,5 +65,5 @@ def test_drop_costs_50_and_robot_recovers():
     assert dropped == [True]
     assert result.sheet.counts["drop_bag"] == 1
     assert result.task.state == State.DONE  # it picked the bag up again
-    # 300 + 15 + 100 + 200 - 50
-    assert result.sheet.total() == 565
+    # Everything (1115) minus the drop (50)
+    assert result.sheet.total() == 1065

@@ -12,6 +12,16 @@ Point = tuple[float, float]
 TIME_LIMIT = 300.0  # seconds, the 5:00 limit from the score sheet
 DT = 0.1  # seconds per simulation step
 
+ROBOT_RADIUS = (
+    0.26  # metres; the real base is a 0.40 m square with 0.04 m corners cut off
+)
+PERSON_RADIUS = 0.25  # metres, a person seen from above
+CAR_RADIUS = 3.0  # metres, the robot counts as "at the car" inside this
+QUEUE_DELAY = (
+    2.0  # seconds after the robot reaches the car before the crowd starts to queue
+)
+QUEUE_SPACING = 2.0  # seconds between two people starting to walk, so they form a line
+
 
 def distance(a: Point, b: Point) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
@@ -20,6 +30,63 @@ def distance(a: Point, b: Point) -> float:
 def wrap_angle(angle: float) -> float:
     """Wrap an angle to the range -pi .. pi."""
     return math.atan2(math.sin(angle), math.cos(angle))
+
+
+@dataclass(frozen=True)
+class Circle:
+    x: float
+    y: float
+    r: float
+
+    def clearance(self, p: Point) -> float:
+        """Distance from p to the edge of the circle (negative inside)."""
+        return distance(p, (self.x, self.y)) - self.r
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        return (self.x - self.r, self.y - self.r, self.x + self.r, self.y + self.r)
+
+
+@dataclass(frozen=True)
+class Box:
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
+
+    def clearance(self, p: Point) -> float:
+        """Distance from p to the box (0 inside)."""
+        dx = max(self.x_min - p[0], 0.0, p[0] - self.x_max)
+        dy = max(self.y_min - p[1], 0.0, p[1] - self.y_max)
+        return math.hypot(dx, dy)
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        return (self.x_min, self.y_min, self.x_max, self.y_max)
+
+
+Shape = Circle | Box
+
+
+@dataclass
+class Obstacle:
+    """Something on the ground the robot must not touch."""
+
+    kind: str  # "small_object", "hard_to_see" or "barriers"
+    shape: Shape
+    seen_within: float | None = None  # hard-to-see objects are only seen this close
+
+
+def walk_route(walker, dt: float) -> None:
+    """Move a person (anything with x, y, speed, route) along its route."""
+    if not walker.route:
+        return
+    goal = walker.route[0]
+    left = distance((walker.x, walker.y), goal)
+    move = min(walker.speed * dt, left)
+    if left > 0:
+        walker.x += (goal[0] - walker.x) / left * move
+        walker.y += (goal[1] - walker.y) / left * move
+    if distance((walker.x, walker.y), goal) < 1e-9:
+        walker.route.pop(0)
 
 
 @dataclass
@@ -101,18 +168,37 @@ class Operator:
         if not self.walking:
             return
         if self.route:
-            goal = self.route[0]
-            left = distance(self.pos, goal)
-            move = min(self.speed * dt, left)
-            if left > 0:
-                self.x += (goal[0] - self.x) / left * move
-                self.y += (goal[1] - self.y) / left * move
-            if distance(self.pos, goal) < 1e-9:
-                self.route.pop(0)
+            walk_route(self, dt)
         else:
             self._stopped_for += dt
             if self._stopped_for >= self.point_delay:
                 self.pointing = True
+
+
+@dataclass
+class Person:
+    """One of the crowd. Stands still at first, then walks back to the start in the queue."""
+
+    id: int
+    x: float
+    y: float
+    route: list[Point]
+    speed: float = 0.5  # m/s, a slow queue
+    walking: bool = False
+
+    def __post_init__(self) -> None:
+        self.home = (
+            self.x,
+            self.y,
+        )  # where the person stood in the crowd, for the plot
+
+    @property
+    def pos(self) -> Point:
+        return (self.x, self.y)
+
+    def step(self, dt: float) -> None:
+        if self.walking:
+            walk_route(self, dt)
 
 
 @dataclass
@@ -122,8 +208,11 @@ class World:
     bags: dict[str, Bag]
     start: Point
     car: Point  # the robot is never told this
+    obstacles: list[Obstacle] = field(default_factory=list)
+    people: list[Person] = field(default_factory=list)  # the crowd, later the queue
     time: float = 0.0
     drop_count: int = 0
+    queue_start_time: float | None = None  # set once the robot reaches the car
     trail: list[Point] = field(default_factory=list)
 
     def pointing_ray(self) -> tuple[Point, float] | None:
@@ -142,6 +231,19 @@ class World:
 
     def step(self, dt: float = DT) -> None:
         self.operator.step(dt)
+        # The rulebook: after the robot has reached the car, the crowd returns in a queue.
+        if (
+            self.queue_start_time is None
+            and distance(self.robot.pos, self.car) <= CAR_RADIUS
+        ):
+            self.queue_start_time = self.time + QUEUE_DELAY
+        for i, person in enumerate(self.people):
+            if (
+                self.queue_start_time is not None
+                and self.time >= self.queue_start_time + i * QUEUE_SPACING
+            ):
+                person.walking = True
+            person.step(dt)
         bag = self.carried_bag()
         if bag is not None:  # a carried bag moves with the robot
             bag.x, bag.y = self.robot.pos
@@ -149,7 +251,13 @@ class World:
 
 
 def build_world(target_bag: str = "blue", robot_speed: float = 1.0) -> World:
-    """The default scenario. The car is at (12, 6), three bags lie around it."""
+    """The default scenario.
+
+    The operator walks from the start to the car at (12, 6). On the way there are the four
+    obstacles of the rulebook: a small object (the operator steps over it), a hard-to-see
+    object (the operator walks closely around it), a crowd with gaps too narrow for the
+    robot, and retractable barriers that the operator walks around.
+    """
     start = (0.0, 0.0)
     car = (12.0, 6.0)
     bags = {
@@ -160,8 +268,23 @@ def build_world(target_bag: str = "blue", robot_speed: float = 1.0) -> World:
     operator = Operator(
         x=1.5,  # standing in front of the robot
         y=0.0,
-        route=[(8.0, 0.0), (8.0, 6.0), car],
+        route=[(8.0, 0.0), (8.0, 6.0), (9.0, 7.1), (11.0, 7.1), car],
         target_bag=target_bag,
     )
+    obstacles = [
+        Obstacle("small_object", Circle(4.0, 0.0, 0.12)),
+        Obstacle("hard_to_see", Circle(6.0, 0.35, 0.15), seen_within=1.5),
+        Obstacle("barriers", Box(9.4, 5.2, 10.6, 6.6)),
+    ]
+    # The crowd stands across the operator's path. The gaps fit a person, not the robot.
+    queue_route = [(8.0, -1.0), (-4.0, -1.0)]  # back past the start, then away
+    people = [
+        Person(1, 7.35, 3.0, list(queue_route)),
+        Person(2, 8.65, 3.0, list(queue_route)),
+        Person(3, 9.95, 3.0, list(queue_route)),
+    ]
     robot = Robot(x=start[0], y=start[1], max_speed=robot_speed)
-    return World(robot=robot, operator=operator, bags=bags, start=start, car=car)
+    return World(
+        robot=robot, operator=operator, bags=bags, start=start, car=car,
+        obstacles=obstacles, people=people,
+    )  # fmt: skip

@@ -79,5 +79,5 @@ def test_status_labels():
     sheet.award("pick_bag")
     assert sheet.status("pick_bag") == "awarded"
     assert sheet.status("follow_to_car") == "not-earned"
-    assert sheet.status("queue") == "not-run"
+    assert sheet.status("dem_natural") == "not-run"
     assert ROW_BY_KEY["queue"].points == 300

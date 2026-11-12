@@ -7,7 +7,12 @@ and what perception tells it.
 from enum import Enum
 
 from hmc import hri, manipulation, navigation, perception
-from hmc.world import TIME_LIMIT, World, distance
+from hmc.world import PERSON_RADIUS, TIME_LIMIT, Circle, Shape, World, distance
+
+QUEUE_GAP = 1.0  # metres to keep behind the last person in the queue
+LEAVE_QUEUE_NEAR_START = (
+    2.0  # metres; the queue walks past the start, so we leave it here
+)
 
 
 class State(Enum):
@@ -17,6 +22,7 @@ class State(Enum):
     GO_TO_BAG = "go_to_bag"
     PICK = "pick"
     RETURN = "return"  # carry the bag back to the start
+    JOIN_QUEUE = "join_queue"  # walk back behind the last person of the queue
     DONE = "done"
     TIMEOUT = "timeout"
 
@@ -28,7 +34,8 @@ ALLOWED = {
     State.PERCEIVE_BAG: {State.GO_TO_BAG, State.TIMEOUT},
     State.GO_TO_BAG: {State.PICK, State.TIMEOUT},
     State.PICK: {State.RETURN, State.GO_TO_BAG, State.TIMEOUT},
-    State.RETURN: {State.DONE, State.GO_TO_BAG, State.TIMEOUT},
+    State.RETURN: {State.DONE, State.GO_TO_BAG, State.JOIN_QUEUE, State.TIMEOUT},
+    State.JOIN_QUEUE: {State.RETURN, State.GO_TO_BAG, State.TIMEOUT},
     State.DONE: set(),
     State.TIMEOUT: set(),
 }
@@ -42,8 +49,11 @@ class Task:
         self.history: list[tuple[float, State]] = [(world.time, self.state)]
         self.start = world.robot.pos  # remembered from odometry
         self.tracker = perception.MotionTracker()
+        self.people_trackers: dict[int, perception.MotionTracker] = {}
+        self.navigator = navigation.Navigator()
         self.perceived_bag: str | None = None
         self.last_operator_pos = None
+        self.queue_done = False  # we leave the queue only once
 
     @property
     def finished(self) -> bool:
@@ -61,6 +71,10 @@ class Task:
         if self.world.time >= TIME_LIMIT:
             self._go(State.TIMEOUT)
             return
+        for pid, pos in perception.see_people(self.world).items():
+            self.people_trackers.setdefault(pid, perception.MotionTracker()).update(
+                self.world.time, pos
+            )
 
         handlers = {
             State.ANNOUNCE_READY: self._announce_ready,
@@ -69,6 +83,7 @@ class Task:
             State.GO_TO_BAG: self._go_to_bag,
             State.PICK: self._pick,
             State.RETURN: self._return,
+            State.JOIN_QUEUE: self._join_queue,
         }
         handlers[self.state](dt)
 
@@ -83,7 +98,10 @@ class Task:
             self.tracker.update(self.world.time, operator)
         if self.last_operator_pos is None:
             return
-        navigation.follow_step(self.world.robot, self.last_operator_pos, dt)
+        navigation.follow_step(
+            self.navigator, self.world.robot, self.last_operator_pos,
+            self._shapes(), self.world.time, dt,
+        )  # fmt: skip
 
         # Arrived at the car when the operator stands still and points.
         close = operator is not None and (
@@ -111,9 +129,7 @@ class Task:
         bag_pos = perception.see_bags(self.world).get(self.perceived_bag)
         if bag_pos is None:
             return
-        if navigation.go_to_step(
-            self.world.robot, bag_pos, dt, tolerance=manipulation.PICK_RANGE / 2
-        ):
+        if self._drive_to(bag_pos, dt, manipulation.PICK_RANGE / 2):
             self._go(State.PICK)
 
     def _pick(self, dt: float) -> None:
@@ -126,6 +142,58 @@ class Task:
         if self.world.carried_bag() is None:
             self._go(State.GO_TO_BAG)  # we dropped it, fetch it again
             return
-        if navigation.go_to_step(self.world.robot, self.start, dt):
+        if not self.queue_done and self._queue_tail() is not None:
+            self._go(State.JOIN_QUEUE)  # optional goal: join the queue on the way back
+            return
+        if self._drive_to(self.start, dt, navigation.GOAL_TOLERANCE):
             manipulation.place(self.world)  # allowed by the rules, no penalty
             self._go(State.DONE)
+
+    def _join_queue(self, dt: float) -> None:
+        if self.world.carried_bag() is None:
+            self._go(State.GO_TO_BAG)  # we dropped it, fetch it again
+            return
+        tail = self._queue_tail()
+        if (
+            tail is None
+            or distance(self.world.robot.pos, self.start) <= LEAVE_QUEUE_NEAR_START
+        ):
+            self.queue_done = True
+            self._go(State.RETURN)
+            return
+        self._drive_to(tail, dt, QUEUE_GAP)
+
+    # Helpers
+
+    def _shapes(self) -> list[Shape]:
+        """Everything we must not touch: seen obstacles, other people and the operator."""
+        shapes = list(perception.see_obstacles(self.world))
+        for pos in perception.see_people(self.world).values():
+            shapes.append(Circle(pos[0], pos[1], PERSON_RADIUS))
+        operator = perception.see_operator(self.world)
+        if operator is not None:
+            shapes.append(Circle(operator[0], operator[1], PERSON_RADIUS))
+        return shapes
+
+    def _drive_to(self, goal, dt: float, stop_distance: float) -> bool:
+        return self.navigator.step(
+            self.world.robot, goal, self._shapes(), self.world.time, dt, stop_distance
+        )
+
+    def _queue_tail(self):
+        """The last person of a queue walking back ahead of us, or None.
+
+        A queue is people who are walking. "Ahead of us" means closer to the start than we
+        are. The last person of the queue is the walking person ahead of us who is closest
+        to us. (Not the one farthest from the start: the queue walks on past the start.)
+        """
+        robot = self.world.robot.pos
+        ahead = [
+            pos
+            for pid, pos in perception.see_people(self.world).items()
+            if self.people_trackers[pid].has_moved()
+            and distance(pos, self.start) < distance(robot, self.start)
+        ]
+        if not ahead:
+            return None
+        return min(ahead, key=lambda pos: distance(pos, robot))

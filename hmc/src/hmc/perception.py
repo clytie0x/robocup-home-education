@@ -4,7 +4,7 @@ import math
 from collections import deque
 from typing import NamedTuple
 
-from hmc.world import Point, World, distance, wrap_angle
+from hmc.world import Point, Shape, World, distance, wrap_angle
 
 SENSOR_RANGE = 10.0  # metres
 MAX_POINTING_ERROR = math.radians(15)  # a bag must be this close to the ray
@@ -28,6 +28,25 @@ def see_bags(world: World) -> dict[str, Point]:
         name: bag.pos
         for name, bag in world.bags.items()
         if distance(world.robot.pos, bag.pos) <= SENSOR_RANGE
+    }
+
+
+def see_obstacles(world: World) -> list[Shape]:
+    """Shapes of the obstacles we can see. We do not learn what kind of obstacle it is."""
+    seen = []
+    for obstacle in world.obstacles:
+        reach = obstacle.seen_within or SENSOR_RANGE
+        if obstacle.shape.clearance(world.robot.pos) <= reach:
+            seen.append(obstacle.shape)
+    return seen
+
+
+def see_people(world: World) -> dict[int, Point]:
+    """Positions of the other people (not the operator) in range, by tracker id."""
+    return {
+        person.id: person.pos
+        for person in world.people
+        if distance(world.robot.pos, person.pos) <= SENSOR_RANGE
     }
 
 
@@ -62,6 +81,12 @@ class MotionTracker:
         self._samples.append((time, pos))
         while self._samples and time - self._samples[0][0] > self.window + 1e-9:
             self._samples.popleft()
+
+    def has_moved(self, min_distance: float = 0.3) -> bool:
+        """True when the person moved at least min_distance inside the window."""
+        if len(self._samples) < 2:
+            return False
+        return distance(self._samples[0][1], self._samples[-1][1]) >= min_distance
 
     def is_stationary(self) -> bool:
         if len(self._samples) < 2:

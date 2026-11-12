@@ -28,10 +28,10 @@ python -m hmc.run
 ```
 
 `pytest` must pass and `python -m hmc.run` must end in state `done`.
-If you change the behaviour, update the acceptance-test table in the spec. Then regenerate `docs/evidence/help-me-carry-slice1/` and its `SHA256SUMS`.
+If you change the behaviour, update the acceptance-test table in the spec. Then regenerate the evidence folder for the current slice (`docs/evidence/help-me-carry-slice2/`) and its `SHA256SUMS`.
 
 ## Good to know
 
-- The task code (`task.py`) must never read the car position. A test checks this.
+- The task code (`task.py`) must never read the car position, and neither `task.py` nor `navigation.py` may read obstacles or people from the world. Tests check this.
 - `docs/evidence/` has a `.gitattributes` with `-text`, so git keeps the files byte-for-byte and the checksums stay valid.
 - On some Windows setups Python cannot write to `%TEMP%`, so pytest and pip put temp folders in the current directory. If that happens, run `pytest --basetemp=out/pytest-tmp` and set `TMP` to a writable folder before `pip install`.

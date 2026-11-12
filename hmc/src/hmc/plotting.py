@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from hmc.world import World
+from hmc.world import Box, World
 
 
 def save_trajectory(path: Path, world: World, rows: list[dict]) -> bool:
@@ -23,6 +23,24 @@ def save_trajectory(path: Path, world: World, rows: list[dict]) -> bool:
         "--",
         label="operator",
     )
+    for obstacle in world.obstacles:
+        shape = obstacle.shape
+        if isinstance(shape, Box):
+            patch = plt.Rectangle((shape.x_min, shape.y_min), shape.x_max - shape.x_min,
+                                  shape.y_max - shape.y_min, color="gray", alpha=0.6)  # fmt: skip
+        else:
+            patch = plt.Circle((shape.x, shape.y), shape.r, color="gray", alpha=0.6)
+        ax.add_patch(patch)
+        ax.annotate(obstacle.kind, shape.bounds()[2:], fontsize=7, color="gray")
+    crowd = [person.home for person in world.people]
+    if crowd:
+        ax.plot(
+            *zip(*crowd),
+            "x",
+            color="purple",
+            markersize=8,
+            label="crowd, later the queue",
+        )
     ax.plot(*world.start, "gs", markersize=10, label="start")
     ax.plot(*world.car, "k^", markersize=10, label="car (unknown to robot)")
     for bag in world.bags.values():
@@ -31,7 +49,7 @@ def save_trajectory(path: Path, world: World, rows: list[dict]) -> bool:
     ax.set_aspect("equal")
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
-    ax.set_title("Help Me Carry, slice 1 scenario")
+    ax.set_title("Help Me Carry scenario")
     ax.legend(loc="lower right")
     ax.grid(True, alpha=0.3)
     fig.savefig(path, dpi=100)
