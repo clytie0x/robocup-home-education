@@ -132,9 +132,16 @@ def test_an_obstacle_never_faced_earns_nothing():
 
 
 def test_falling_back_from_the_queue_loses_the_queue_row():
+    joined = []
+
     def fall_back(world, task):
-        # Stand still for 6 s while the queue walks on (it gets 3 m further away).
-        world.robot.max_speed = 0.0 if 40 < world.time < 46 else 1.0
+        # Once in the queue, stand still for 6 s while it walks on (3 m further away).
+        walking = [p for p in world.people if p.walking]
+        if not joined and walking and world.carried_bag() is not None:
+            if distance(world.robot.pos, walking[-1].pos) <= 2.0:
+                joined.append(world.time)
+        held = joined and joined[0] < world.time < joined[0] + 6
+        world.robot.max_speed = 0.0 if held else 1.0
 
     result = run_scenario(on_step=fall_back)
     assert result.task.state == State.DONE

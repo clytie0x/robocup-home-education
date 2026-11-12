@@ -22,6 +22,11 @@ MARGIN = 3.0  # metres of grid around the robot and the goal
 REPLAN_EVERY = 0.5  # seconds
 REPLAN_IF_GOAL_MOVED = 0.3  # metres
 WAYPOINT_REACHED = 0.15  # metres
+# We aim at a waypoint up to this far ahead. The base cannot change its turn rate at
+# once, so aiming at the next cell, just in front of it, would make it wobble.
+AIM_AHEAD = 0.4  # metres
+STOP_MARGIN = 0.02  # metres left between the robot and a shape after a full stop
+LOOK_AHEAD = 1.5  # metres; more than the 1.0 m the robot needs to stop from 1 m/s
 
 Cell = tuple[int, int]
 
@@ -134,15 +139,62 @@ class Navigator:
     ) -> bool:
         """One step toward the goal. Returns True once we are within stop_distance."""
         if distance(robot.pos, goal) <= stop_distance + 1e-9:
+            robot.brake(dt)
             return True
         if self._needs_plan(goal, shapes, now):
             self.path = plan_path(robot.pos, goal, shapes) or []  # no path: wait here
             self._goal, self._shape_count, self._planned_at = goal, len(shapes), now
-        while self.path and distance(robot.pos, self.path[0]) <= WAYPOINT_REACHED:
+        # Keep the last waypoint, the goal itself, until we are there.
+        while len(self.path) > 1 and distance(robot.pos, self.path[0]) <= WAYPOINT_REACHED:
             self.path.pop(0)
         if self.path:
-            robot.drive_toward(self.path[0], dt)
+            aim = self.path[0]
+            for point in self.path:
+                if distance(robot.pos, point) > AIM_AHEAD:
+                    break
+                aim = point
+            # Brake in time for the goal, not for every waypoint on the way. The robot
+            # also needs room to stop when the plan changes (it rolls on while it brakes),
+            # so it slows down when something is close in front of it, both where it
+            # faces now and where it is turning to.
+            free_there = free_ahead(robot, shapes, _heading_to(robot, aim))
+            if free_there == 0.0:
+                # The straight line to the far waypoint cuts too close to something:
+                # aim at the next waypoint instead, the planner says it is free.
+                aim = self.path[0]
+                free_there = free_ahead(robot, shapes, _heading_to(robot, aim))
+            stop_in = min(
+                distance(robot.pos, goal) - stop_distance,
+                free_ahead(robot, shapes, robot.heading),
+                free_there,
+            )
+            robot.drive_toward(aim, dt, stop_in=stop_in)
+        else:
+            robot.brake(dt)
         return distance(robot.pos, goal) <= stop_distance + 1e-9
+
+
+def _heading_to(robot: Robot, point: Point) -> float:
+    return math.atan2(point[1] - robot.y, point[0] - robot.x)
+
+
+def free_ahead(robot: Robot, shapes: list[Shape], heading: float) -> float:
+    """How far the robot can roll straight on in this heading before it gets too close.
+
+    A shape only counts when rolling on brings us closer to it, so we can still drive
+    along a wall or away from something we are already close to (like the planner).
+    """
+    free = 0.0
+    here = [s.clearance(robot.pos) for s in shapes]
+    while free < LOOK_AHEAD:
+        x = robot.x + math.cos(heading) * (free + CELL)
+        y = robot.y + math.sin(heading) * (free + CELL)
+        for shape, now in zip(shapes, here):
+            there = shape.clearance((x, y))
+            if there <= ROBOT_RADIUS + STOP_MARGIN and there < now:
+                return free
+        free += CELL
+    return free
 
 
 def follow_step(navigator: Navigator, robot: Robot, operator_pos: Point,

@@ -42,6 +42,7 @@ def run_scenario(
     seed: int = 0,
     noise: str = "off",
     sensors: str = "ideal",
+    operator_speed: float = 1.2,
 ) -> Result:
     """Run the whole scenario. on_step lets tests poke the world (e.g. drop the bag)."""
     world = MAPS[map_name](target_bag=target_bag, robot_speed=robot_speed)
@@ -49,12 +50,14 @@ def run_scenario(
     give_looks(world, seed)
     world.noise = make_noise(noise, seed)
     world.sensors = sensors
+    world.operator.speed = operator_speed  # the natural walking speed
     speech = hri.Speech()
     task = Task(world, speech)
     sheet = Scoresheet()
     referee = Referee(sheet)
     rows: list[dict] = []
     seen_messages = 0
+    heard_messages = 0  # what the operator has heard so far
     last_state = task.state
     last_logged = -LOG_EVERY
 
@@ -64,6 +67,16 @@ def run_scenario(
         task.step(DT)
         if hri.READY_TEXT in [text for _, text in speech.messages]:
             world.operator.start_walking()  # the operator waits for "ready"
+        # The operator follows the robot's instructions (rulebook 5.1).
+        for _, text in speech.messages[heard_messages:]:
+            pace = hri.asked_pace(text)
+            if pace is not None:  # walk slowly, but never faster than we normally do
+                world.operator.speed = min(world.operator.speed, pace)
+            if text == hri.WAIT_TEXT:
+                world.operator.waiting = True
+            if text == hri.GO_ON_TEXT:
+                world.operator.waiting = False
+        heard_messages = len(speech.messages)
         # Timing out does nothing, so it takes no sim time.
         if task.state != State.TIMEOUT:
             world.step(DT)
@@ -135,12 +148,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--sensors", default="ideal", choices=["ideal", "robot"], help="sensor model"
     )
+    parser.add_argument(
+        "--robot-speed", type=float, default=1.0, help="robot top speed in m/s"
+    )
+    parser.add_argument(
+        "--operator-speed", type=float, default=1.2,
+        help="operator's natural walking speed in m/s",
+    )  # fmt: skip
     parser.add_argument("--bag", default="blue", choices=["red", "blue", "green"],
                         help="bag the operator points at")  # fmt: skip
     args = parser.parse_args(argv)
 
     result = run_scenario(
         target_bag=args.bag,
+        robot_speed=args.robot_speed,
+        operator_speed=args.operator_speed,
         map_name=args.map,
         bystanders=args.bystanders,
         seed=args.seed,

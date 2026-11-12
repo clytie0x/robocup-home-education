@@ -30,6 +30,8 @@ def check(
     bag: str = "blue",
     noise: str = "off",
     sensors: str = "ideal",
+    robot_speed: float = 1.0,
+    operator_speed: float = 1.2,
 ) -> list[str]:
     """Run once. Returns the problems found (an empty list means success)."""
     closest = [float("inf")]
@@ -48,6 +50,8 @@ def check(
         target_bag=bag,
         noise=noise,
         sensors=sensors,
+        robot_speed=robot_speed,
+        operator_speed=operator_speed,
         on_step=record,
     )
     problems = [
@@ -72,19 +76,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--sensors", default="ideal", help="sensor model: ideal or robot"
     )
+    parser.add_argument(
+        "--robot-speed", type=float, default=1.0, help="robot top speed in m/s"
+    )
+    parser.add_argument(
+        "--operator-speed", type=float, default=1.2,
+        help="operator's natural walking speed in m/s",
+    )  # fmt: skip
     args = parser.parse_args(argv)
 
     failures = []
     print(
-        f"{'map':<18} {'ok':>4} / {args.seeds}   ({args.bystanders} passers-by, noise {args.noise}, sensors {args.sensors})"
+        f"{'map':<18} {'ok':>4} / {args.seeds}   ({args.bystanders} passers-by, noise {args.noise}, sensors {args.sensors}, robot {args.robot_speed} m/s)"
     )
     total_ok = 0
     for map_name in MAPS:
         ok = 0
         for seed in range(args.seeds):
             problems = check(
-                map_name, args.bystanders, seed, noise=args.noise, sensors=args.sensors
-            )
+                map_name, args.bystanders, seed, noise=args.noise, sensors=args.sensors,
+                robot_speed=args.robot_speed, operator_speed=args.operator_speed,
+            )  # fmt: skip
             if problems:
                 failures.append(f"{map_name} seed {seed}: " + ", ".join(problems))
             else:

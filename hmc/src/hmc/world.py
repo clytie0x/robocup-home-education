@@ -24,6 +24,13 @@ QUEUE_SPACING = 2.0  # seconds
 KEEP_FROM_ROBOT = ROBOT_RADIUS + PERSON_RADIUS + 0.3
 # While the heading is off by more than this, turn on the spot without driving.
 TURN_ON_SPOT = math.radians(30)
+# While the heading is off by more than this, brake to a stop before turning.
+STOP_TO_TURN = math.radians(90)
+# The base cannot change speed at once. 0.5 m/s^2 is a gentle limit for a wheeled base.
+MAX_ACCEL = 0.5  # m/s^2
+# The same wheel acceleration on a two-wheel base about 0.34 m wide, turning on the spot:
+# each wheel at 0.5 m/s^2 gives 2 * 0.5 / 0.34 = about 3 rad/s^2.
+MAX_TURN_ACCEL = 3.0  # rad/s^2
 
 
 def distance(a: Point, b: Point) -> float:
@@ -116,37 +123,93 @@ class Robot:
     heading: float = 0.0  # radians, 0 = facing +x
     max_speed: float = 1.0  # m/s
     max_turn_rate: float = 2.0  # rad/s
+    speed: float = 0.0  # m/s, how fast the robot drives right now
+    turn_speed: float = 0.0  # rad/s, how fast it turns right now
 
     @property
     def pos(self) -> Point:
         return (self.x, self.y)
 
+    def _turn(self, error: float, dt: float) -> float:
+        """Turn toward a heading error, with the turn acceleration limit. Returns the turn."""
+        # Slow down the turn in time to stop at the heading: v = sqrt(2 * a * angle left).
+        wanted = min(self.max_turn_rate, math.sqrt(2 * MAX_TURN_ACCEL * abs(error)))
+        wanted = math.copysign(wanted, error)
+        self.turn_speed = _ramp(self.turn_speed, wanted, MAX_TURN_ACCEL * dt)
+        turn = self.turn_speed * dt
+        if turn * error > 0 and abs(turn) > abs(error):
+            # We reach the heading within this step: stop there, do not swing past it.
+            turn = error
+            self.turn_speed = error / dt
+        self.heading = wrap_angle(self.heading + turn)
+        return turn
+
     def turn_toward(self, target: Point, dt: float) -> float:
         """Turn on the spot toward the target. Returns the heading error left."""
+        # shortcut: drops any speed left at once; fine while the task only calls this
+        # after the navigator stopped the robot, add braking if that changes.
+        self.speed = 0.0
         wanted = math.atan2(target[1] - self.y, target[0] - self.x)
         error = wrap_angle(wanted - self.heading)
-        turn = max(-self.max_turn_rate * dt, min(self.max_turn_rate * dt, error))
-        self.heading = wrap_angle(self.heading + turn)
-        return error - turn
+        return error - self._turn(error, dt)
 
     def drive_toward(
-        self, target: Point, dt: float, stop_distance: float = 0.0
+        self,
+        target: Point,
+        dt: float,
+        stop_distance: float = 0.0,
+        stop_in: float | None = None,
     ) -> None:
-        """Turn toward the target and drive until stop_distance away from it."""
+        """Turn toward the target and drive until stop_distance away from it.
+
+        stop_in is how far away the robot must stand still (the end of the path, when
+        the target is only the next waypoint). The robot brakes in time for it.
+        """
         remaining = distance(self.pos, target) - stop_distance
         if remaining <= 0:
+            self.speed = 0.0
             return
         wanted = math.atan2(target[1] - self.y, target[0] - self.x)
         error = wrap_angle(wanted - self.heading)
-        turn = max(-self.max_turn_rate * dt, min(self.max_turn_rate * dt, error))
-        self.heading = wrap_angle(self.heading + turn)
+        # The path turned back behind us: stop first, rolling straight on (where the
+        # navigator checked there is room), and only then turn on the spot. Turning while
+        # still rolling would sweep the robot sideways into whatever is next to it.
+        must_stop = abs(error) > STOP_TO_TURN and self.speed > 0
+        turn = self._turn(0.0 if must_stop else error, dt)
         # Turn on the spot first when facing the wrong way (a two-wheel base can do that),
         # then drive slower while still turning. Never drive backwards.
         left = abs(error - turn)
         speed = 0.0 if left > TURN_ON_SPOT else self.max_speed * math.cos(left)
-        step = min(speed * dt, remaining)
+        if stop_in is not None:
+            speed = min(speed, braking_speed(stop_in, dt))
+        self.speed = _ramp(self.speed, speed, MAX_ACCEL * dt)
+        step = min(self.speed * dt, remaining)
         self.x += math.cos(self.heading) * step
         self.y += math.sin(self.heading) * step
+
+    def brake(self, dt: float) -> None:
+        """Nothing to drive to: slow down. The robot still rolls on while it brakes."""
+        self.turn_speed = 0.0  # shortcut: stops turning at once, ramp it if it matters
+        self.speed = _ramp(self.speed, 0.0, MAX_ACCEL * dt)
+        self.x += math.cos(self.heading) * self.speed * dt
+        self.y += math.sin(self.heading) * self.speed * dt
+
+
+def braking_speed(room: float, dt: float) -> float:
+    """The top speed from which the robot can still stop within `room` metres.
+
+    v = sqrt(2 * a * room), less one step of braking because we only brake from the
+    next step on. Close to the end we still creep at one step of braking, so we arrive.
+    """
+    if room <= 0:
+        return 0.0
+    step = MAX_ACCEL * dt
+    return max(math.sqrt(2 * MAX_ACCEL * room) - step, step)
+
+
+def _ramp(now: float, wanted: float, max_change: float) -> float:
+    """Move now toward wanted by at most max_change."""
+    return now + max(-max_change, min(max_change, wanted - now))
 
 
 # Bag states
@@ -180,9 +243,10 @@ class Operator:
     y: float
     route: list[Point]
     target_bag: str
-    speed: float = 0.8  # m/s, a calm walking pace
+    speed: float = 1.2  # m/s, people walk about 1.2 to 1.4 m/s
     point_delay: float = 2.0  # seconds between stopping and pointing
     walking: bool = False
+    waiting: bool = False  # the robot asked us to wait for it
     pointing: bool = False
     _stopped_for: float = 0.0
     _target_pos: Point = (0.0, 0.0)  # filled in by World
@@ -198,7 +262,8 @@ class Operator:
         if not self.walking:
             return
         if self.route:
-            walk_route(self, dt)
+            if not self.waiting:
+                walk_route(self, dt)
         else:
             self._stopped_for += dt
             if self._stopped_for >= self.point_delay:

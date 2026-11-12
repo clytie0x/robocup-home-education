@@ -72,6 +72,13 @@ python -m hmc.robustness --seeds 20 --bystanders 10 --noise realistic
 
 `--bystanders N` adds N passers-by. `--noise off|realistic|hard` adds sensor noise. `--seed` changes both. `hmc.robustness` runs every map with seeds 0 to N-1 and prints how many runs ended in DONE with all 1115 points, without touching anything.
 
+Speeds: `--robot-speed V` sets the robot's top speed in m/s (default 1.0) and `--operator-speed V` the operator's natural walking speed (default 1.2). Both work on `hmc.run` and `hmc.robustness`. The base speeds up and brakes at up to 0.5 m/s^2. At the start the robot asks the operator to walk at 0.8 x its top speed, and when it falls more than 4 m behind it asks them to wait. For example:
+
+```bash
+python -m hmc.run --robot-speed 0.3
+python -m hmc.robustness --seeds 10 --robot-speed 0.15
+```
+
 ## Folder map
 
 | Path | What |
@@ -102,7 +109,7 @@ python -m hmc.robustness --seeds 20 --bystanders 10 --noise realistic
 
 - The scripted run scores **1115 of 1115** on all six maps, for each of the three bags. That is every main and bonus row. The world, the obstacles and the referee are all our own code, so this shows the logic works in our scenario. It does not show that the real robot can do the task.
 - Deus ex Machina, the alternative start signal, restarts and the three tries are not simulated. Not attending and outstanding performance are referee decisions.
-- The robot drives at up to 1.0 m/s in the simulation. The real base is limited to 0.15 m/s, which is too slow to follow a person walking at 0.8 m/s.
+- The robot drives at up to 1.0 m/s by default. The real base is capped at 0.15 m/s today. At that speed the robot asks the operator to walk at 0.12 m/s, but it is too slow to finish most maps in 5:00 and can never keep up with the queue, which walks 0.5 m/s. See WORKLOG.md (2026-11-13) for the measured numbers.
 - By default perception is perfect, except that walls block the view. `--noise realistic` or `--noise hard` adds misses, position errors, pointing errors, tracker id swaps and wrong operator detections. The noise levels are our guess, not measurements from a real camera or lidar.
 - Re-identification is simulated with a random "look" per person. A real robot needs a re-ID model for this, and real people can look much more alike.
 - The walls of the official maps are traced by eye, and most furniture is left out.

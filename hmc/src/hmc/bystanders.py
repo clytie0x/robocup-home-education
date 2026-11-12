@@ -27,7 +27,7 @@ class Bystander:
     y: float
     area: tuple[float, float, float, float]  # x_min, y_min, x_max, y_max to walk in
     rng: random.Random
-    speed: float = 0.8
+    speed: float = 1.2
     route: list[Point] = field(default_factory=list)
     wait: float = 0.0
     walking: bool = True
@@ -101,7 +101,7 @@ def add_bystanders(world: World, count: int, seed: int = 0) -> None:
         spot = _free_spot(world, area, rng)
         if spot is None:
             continue
-        speed = rng.uniform(0.6, 1.2)
+        speed = rng.uniform(1.0, 1.4)  # people walk about 1.0 to 1.4 m/s
         world.bystanders.append(
             Bystander(
                 FIRST_ID + i, spot[0], spot[1], area, random.Random(rng.random()), speed
