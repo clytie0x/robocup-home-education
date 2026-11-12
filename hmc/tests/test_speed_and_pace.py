@@ -97,3 +97,16 @@ def test_robot_never_asks_a_slow_operator_to_wait():
     result = run_scenario(operator_speed=0.4)  # much slower than the robot
     assert not result.speech.has_said(hri.WAIT_TEXT)
     assert result.task.state == State.DONE
+
+
+def test_real_base_limits_are_applied_and_reset():
+    import hmc.world as hmc_world
+    from hmc.run import BASES, use_base
+    from hmc.world import build_world
+
+    world = build_world()
+    use_base(world, "real")
+    assert hmc_world.MAX_ACCEL == BASES["real"]["accel"]
+    assert world.robot.max_turn_rate == BASES["real"]["turn_rate"]
+    use_base(world, "sim")  # the next run must not inherit the real limits
+    assert hmc_world.MAX_ACCEL == BASES["sim"]["accel"]

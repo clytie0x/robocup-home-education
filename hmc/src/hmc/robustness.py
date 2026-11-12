@@ -31,6 +31,7 @@ def check(
     noise: str = "off",
     sensors: str = "ideal",
     odometry: str = "perfect",
+    base: str = "sim",
     robot_speed: float = 1.0,
     operator_speed: float = 1.2,
 ) -> list[str]:
@@ -52,6 +53,7 @@ def check(
         noise=noise,
         sensors=sensors,
         odometry=odometry,
+        base=base,
         robot_speed=robot_speed,
         operator_speed=operator_speed,
         on_step=record,
@@ -86,11 +88,12 @@ def main(argv: list[str] | None = None) -> int:
         "--operator-speed", type=float, default=1.2,
         help="operator's natural walking speed in m/s",
     )  # fmt: skip
+    parser.add_argument("--base", default="sim", help="sim or real (measured limits)")
     args = parser.parse_args(argv)
 
     failures = []
     print(
-        f"{'map':<18} {'ok':>4} / {args.seeds}   ({args.bystanders} passers-by, noise {args.noise}, sensors {args.sensors}, odometry {args.odometry}, robot {args.robot_speed} m/s)"
+        f"{'map':<18} {'ok':>4} / {args.seeds}   ({args.bystanders} passers-by, noise {args.noise}, sensors {args.sensors}, odometry {args.odometry}, robot {args.robot_speed} m/s, base {args.base})"
     )
     total_ok = 0
     for map_name in MAPS:
@@ -98,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         for seed in range(args.seeds):
             problems = check(
                 map_name, args.bystanders, seed, noise=args.noise, sensors=args.sensors,
-                odometry=args.odometry, robot_speed=args.robot_speed,
+                odometry=args.odometry, robot_speed=args.robot_speed, base=args.base,
                 operator_speed=args.operator_speed,
             )  # fmt: skip
             if problems:

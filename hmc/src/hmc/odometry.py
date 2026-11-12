@@ -89,6 +89,9 @@ PRESETS = {
     "perfect": None,
     "wheel": dict(),
     "slam": dict(slam_every=1.0),
+    # The real base after the 2026-11-13 calibration, measured with LiDAR scan matching:
+    # 360-degree turns within 0.3 %, 0.27 m lines within 1 %.
+    "calibrated": dict(scale_error=0.01, turn_error=0.003, heading_walk=0.005),
 }
 
 

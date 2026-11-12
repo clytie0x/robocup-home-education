@@ -1,6 +1,7 @@
 """Scripted scenario. Run it with:  python -m hmc.run --out out"""
 
 import argparse
+import math
 import csv
 import sys
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from hmc.noise import PRESETS, make_noise
 from hmc.odometry import PRESETS as ODOMETRY, make_odometry
 from hmc.scoresheet import MAX_TOTAL, Referee, Scoresheet
 from hmc.task import State, Task
+import hmc.world as hmc_world
 from hmc.world import DT, World
 
 LOG_EVERY = 0.5  # seconds between timeline rows (events always get a row)
@@ -34,6 +36,21 @@ class Result:
     rows: list[dict]
 
 
+# The real base as measured on 2026-11-13: the velocity smoother limits (robot.json
+# nav_accel 0.2 m/s^2 and 40 deg/s^2) and the 15 deg/s turn cap in the navigation config.
+BASES = {
+    "sim": dict(accel=0.5, turn_accel=3.0, turn_rate=2.0),
+    "real": dict(accel=0.2, turn_accel=math.radians(40), turn_rate=math.radians(15)),
+}
+
+
+def use_base(world: World, base: str) -> None:
+    """Set the base's acceleration and turn limits (they are module-wide in world.py)."""
+    limits = BASES[base]
+    hmc_world.MAX_ACCEL, hmc_world.MAX_TURN_ACCEL = limits["accel"], limits["turn_accel"]
+    world.robot.max_turn_rate = limits["turn_rate"]
+
+
 def run_scenario(
     target_bag: str = "blue",
     robot_speed: float = 1.0,
@@ -44,10 +61,12 @@ def run_scenario(
     noise: str = "off",
     sensors: str = "ideal",
     odometry: str = "perfect",
+    base: str = "sim",
     operator_speed: float = 1.2,
 ) -> Result:
     """Run the whole scenario. on_step lets tests poke the world (e.g. drop the bag)."""
     world = MAPS[map_name](target_bag=target_bag, robot_speed=robot_speed)
+    use_base(world, base)
     add_bystanders(world, bystanders, seed)
     give_looks(world, seed)
     world.noise = make_noise(noise, seed)
@@ -153,6 +172,9 @@ def main(argv: list[str] | None = None) -> int:
         "--noise", default="off", choices=list(PRESETS), help="sensor noise"
     )
     parser.add_argument(
+        "--base", default="sim", choices=list(BASES), help="acceleration and turn limits"
+    )
+    parser.add_argument(
         "--odometry", default="perfect", choices=list(ODOMETRY), help="pose estimate"
     )
     parser.add_argument(
@@ -179,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         noise=args.noise,
         sensors=args.sensors,
         odometry=args.odometry,
+        base=args.base,
     )
     write_outputs(result, Path(args.out))
     print(result.sheet.table())
