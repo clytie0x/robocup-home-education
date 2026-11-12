@@ -48,7 +48,7 @@ MAX_TOTAL = sum(r.points for r in ROWS if r.group in (MAIN, BONUS))
 
 # Rows this simulation never runs (slice 1 scope).
 NOT_RUN = {
-    "dem_natural", "dem_unnatural", "dem_come_back", "dem_contact",
+    "dem_natural", "dem_unnatural", "dem_contact",
     "not_attending", "alt_start_signal", "outstanding",
 }  # fmt: skip
 
@@ -103,6 +103,8 @@ class Referee:
         self.touched: set[str] = set()  # obstacle kinds the robot collided with
         self.queue_joined = False
         self.queue_left = False  # fell back, overtook or touched someone
+        self._come_backs_seen = 0
+        self.pending_come_back = 0  # applied only if the robot scores again afterwards
 
     def _once(self, key: str, condition: bool) -> None:
         if condition and self.sheet.counts.get(key, 0) == 0:
@@ -114,6 +116,10 @@ class Referee:
         robot = world.robot.pos
 
         picked_before = self.sheet.counts.get("pick_bag", 0) > 0
+        scored_before = self._scored()
+        # The operator came back because the robot asked (Deus ex Machina).
+        self.pending_come_back += world.operator.came_back - self._come_backs_seen
+        self._come_backs_seen = world.operator.came_back
         if not picked_before:
             self._watch_obstacles(world)
         self._once("follow_to_car", distance(robot, world.car) <= CAR_RADIUS)
@@ -137,10 +143,22 @@ class Referee:
             self.sheet.counts.get("follow_to_car", 0) > 0 and back and bag_home,
         )
 
+        # The rulebook: penalties for human assistance "are only applied if the robot
+        # continues to score after" it. The -250 cap is in Scoresheet.total().
+        if self.pending_come_back and self._scored() > scored_before:
+            self.sheet.award("dem_come_back", self.pending_come_back)
+            self.pending_come_back = 0
+
         new_drops = world.drop_count - self._drops_seen
         if new_drops > 0:
             self.sheet.award("drop_bag", new_drops)
             self._drops_seen = world.drop_count
+
+    def _scored(self) -> int:
+        """How many main and bonus rows have been awarded so far."""
+        return sum(
+            self.sheet.counts.get(r.key, 0) for r in ROWS if r.group in (MAIN, BONUS)
+        )
 
     def _watch_obstacles(self, world: World) -> None:
         robot = world.robot.pos

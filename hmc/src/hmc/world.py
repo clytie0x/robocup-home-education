@@ -31,6 +31,10 @@ MAX_ACCEL = 0.5  # m/s^2
 # The same wheel acceleration on a two-wheel base about 0.34 m wide, turning on the spot:
 # each wheel at 0.5 m/s^2 gives 2 * 0.5 / 0.34 = about 3 rad/s^2.
 MAX_TURN_ACCEL = 3.0  # rad/s^2
+# When the robot asks the operator to come back, they stand this far in front of it,
+# and wait there this long so the robot can see them, before they walk on.
+COME_BACK_DISTANCE = 1.5  # metres
+COME_BACK_WAIT = 2.0  # seconds
 
 
 def distance(a: Point, b: Point) -> float:
@@ -249,6 +253,9 @@ class Operator:
     waiting: bool = False  # the robot asked us to wait for it
     pointing: bool = False
     _stopped_for: float = 0.0
+    coming_back: bool = False  # walking back because the robot asked
+    came_back: int = 0  # how often they came back when asked (for the referee)
+    _wait: float = 0.0
     _target_pos: Point = (0.0, 0.0)  # filled in by World
 
     @property
@@ -258,12 +265,35 @@ class Operator:
     def start_walking(self) -> None:
         self.walking = True
 
+    def come_back(self, robot: "Robot") -> None:
+        """Walk to stand in front of the robot, then back to here and on along the route."""
+        spot = (
+            robot.x + COME_BACK_DISTANCE * math.cos(robot.heading),
+            robot.y + COME_BACK_DISTANCE * math.sin(robot.heading),
+        )
+        # shortcut: walks in a straight line, even through walls; enough for a scripted
+        # volunteer, upgrade to a planned path if a map needs it
+        self.route = [spot, self.pos] + self.route
+        self.coming_back = True
+        self.waiting = False  # coming back overrides an earlier "please wait for me"
+        self.pointing, self._stopped_for = False, 0.0
+
     def step(self, dt: float) -> None:
         if not self.walking:
             return
+        if self._wait > 0:
+            self._wait -= dt
+            return
         if self.route:
             if not self.waiting:
+                before = len(self.route)
                 walk_route(self, dt)
+                if (
+                    self.coming_back and len(self.route) < before
+                ):  # standing in front now
+                    self.coming_back = False
+                    self.came_back += 1
+                    self._wait = COME_BACK_WAIT
         else:
             self._stopped_for += dt
             if self._stopped_for >= self.point_delay:

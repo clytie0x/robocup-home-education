@@ -4,6 +4,7 @@ READY_TEXT = "I am ready to follow you."
 # The rulebook: the referees tell the operator to follow the robot's instructions.
 WAIT_TEXT = "Please wait for me."
 GO_ON_TEXT = "Thank you, please go on."
+COME_BACK_TEXT = "I lost you. Please come back and stand in front of me."
 _SLOW_START = "Please walk slowly, at about "
 _SLOW_END = " metres per second, so I can follow you."
 
