@@ -347,10 +347,10 @@ def test_shapes_are_in_the_odometry_frame(self): ...
 - Produces:
   - `body.Body(p)`: `.robot` is an `hmc.world.Robot` with `max_speed` and `max_turn_rate` from the params; the constructor also sets `hmc.world.MAX_ACCEL`, `MAX_TURN_ACCEL` and `ROBOT_RADIUS` from `accel`, `turn_accel`, `robot_radius`. `.sync(pose)` overwrites `robot.x, y, heading` with odometry and leaves `speed` and `turn_speed`. `.command() -> (v, w)` returns `robot.speed, robot.turn_speed` after the brain's step. `.limit(max_speed)` lowers the cap for this cycle.
   - `safety.braking_distance(v, p) -> float` = `v*v / (2*p["decel"]) + v*p["stop_delay"] + 0.15`.
-  - `safety.must_stop(points_base, v, w, p) -> bool`: true when any point lies in the strip the robot will sweep within the braking distance: `0 < x - 0.20 < braking_distance(v)` and `|y| < robot_half_width + 0.05` for forward motion; for turning on the spot (`v == 0, w != 0`), any point inside radius 0.33 m on the side the front corner swings toward.
+  - `safety.must_stop(points_base, v, w, p) -> bool`: true when any point lies in the strip the robot will sweep within the braking distance: `0 < x - 0.20 < braking_distance(v)` and `|y| < robot_half_width + 0.05` for forward motion; for any turning (`w != 0`, with or without `v`), any point inside radius 0.33 m on either side; NaN input means stop.
   - `safety.speed_cap(depth_points, p) -> float`: `p["max_speed"]` with depth, `min(p["max_speed"], 0.3)` when `depth_points is None`.
 
-- [ ] **Step 1:** Failing tests:
+- [x] **Step 1:** Failing tests:
 
 ```python
 def test_braking_distance_formula(self):
@@ -366,7 +366,7 @@ def test_command_comes_from_the_brain_step(self): ...
 def test_sync_keeps_speed_and_takes_the_measured_pose(self): ...
 ```
 
-- [ ] **Step 2:** Implement, run, pass. Commit.
+- [x] **Step 2:** Implement, run, pass. Commit.
 
 ### Task 8: Link to the Jetson
 
