@@ -147,8 +147,8 @@ class Gates(unittest.TestCase):
   - `wheels.Wheels(p, port=None)`: `.send(v, w) -> bytes`, `.read_odom() -> tuple[float, float, float]`, `.stop()`, `.close()`. A daemon thread resends the last packet every 0.04 s and switches to `S#` after 0.3 s without a new `send` (as `pi-drive/wheels.py` does).
   - `geometry.lidar_to_base(p_xy, params)`, `geometry.base_to_odom(p_xy, pose)`, `geometry.odom_to_base(p_xy, pose)`, `geometry.polar(p_xy) -> (deg, metres)`; `pose` is `(x, y, yaw)`.
 
-- [ ] **Step 1:** Copy `lidar.py`, `test_lidar.py` and `fixtures/` from the Pi (`scp xohm@100.73.128.36:pi-drive/...`). Run `python -m unittest base/pi/tests/test_lidar.py`. Expected: OK.
-- [ ] **Step 2:** Write failing tests for `wheels` and `geometry`:
+- [x] **Step 1:** Copy `lidar.py`, `test_lidar.py` and `fixtures/` from the Pi (`scp xohm@100.73.128.36:pi-drive/...`). Run `python -m unittest base/pi/tests/test_lidar.py`. Expected: OK.
+- [x] **Step 2:** Write failing tests for `wheels` and `geometry`:
 
 ```python
 def test_packet_scales_and_formats(self):
@@ -183,9 +183,9 @@ def test_base_and_odom_frames_round_trip(self):
     self.assertAlmostEqual(geometry.odom_to_base(p, pose)[0], 1.0)
 ```
 
-- [ ] **Step 3:** Implement, run, see them pass.
-- [ ] **Step 4:** Write `base/tools/deploy.sh`: `rsync` (or `scp -r`) `hmc/src/hmc/` to `xohm@100.73.128.36:hmc-base/hmc/`, `base/pi/` and `base/params.json` to `hmc-base/`, and `base/jetson/` to `robotpsu@100.108.202.48:hmc-follow/`. On the Pi create `~/hmc-base/.venv` with `python3 -m venv --system-site-packages` and install numpy, opencv-python-headless and pyserial only if `import` fails. Nothing is deleted on either machine.
-- [ ] **Step 5:** Run `deploy.sh`, then on the Pi `cd ~/hmc-base && .venv/bin/python -m unittest discover -s tests`. Expected: OK with the same test count as on the laptop. Commit.
+- [x] **Step 3:** Implement, run, see them pass.
+- [x] **Step 4:** Write `base/tools/deploy.sh`: `rsync` (or `scp -r`) `hmc/src/hmc/` to `xohm@100.73.128.36:hmc-base/hmc/`, `base/pi/` and `base/params.json` to `hmc-base/`, and `base/jetson/` to `robotpsu@100.108.202.48:hmc-follow/`. On the Pi create `~/hmc-base/.venv` with `python3 -m venv --system-site-packages` and install numpy, opencv-python-headless and pyserial only if `import` fails. Nothing is deleted on either machine.
+- [x] **Step 5:** Run `deploy.sh`, then on the Pi `cd ~/hmc-base && .venv/bin/python -m unittest discover -s tests`. Expected: OK with the same test count as on the laptop. Commit.
 
 ### Task 2 (GATE, robot moves): Speed ladder
 
