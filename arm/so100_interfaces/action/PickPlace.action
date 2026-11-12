@@ -1,0 +1,14 @@
+# Pick an object and put it down somewhere else in one command (ends at the ready pose, jaws open).
+# Both poses are footprint centres on the table (z ignored), any TF frame. See Pick.action.
+geometry_msgs/PoseStamped object_pose
+float32[3] object_size      # [depth, width, height] m
+geometry_msgs/PoseStamped target_pose
+string grasp_mode           # "auto" / "top" / "side"
+---
+bool success
+string error_code           # SUCCESS UNREACHABLE TOO_WIDE MISSED COLLISION BUSY HOLDING HOT STOPPED FAILED
+string message
+---
+string step
+uint8 step_index
+uint8 step_count

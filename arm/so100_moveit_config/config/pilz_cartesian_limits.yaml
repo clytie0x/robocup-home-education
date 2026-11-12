@@ -1,0 +1,6 @@
+# Pilz industrial motion planner: limits for LIN/CIRC (Cartesian) moves. PTP uses joint_limits.yaml.
+cartesian_limits:
+  max_trans_vel: 0.3
+  max_trans_acc: 1.0
+  max_trans_dec: -1.0
+  max_rot_vel: 1.57

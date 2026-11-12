@@ -1,0 +1,61 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 0.05
+      Plane Cell Count: 20
+    - Class: moveit_rviz_plugin/MotionPlanning
+      Name: MotionPlanning
+      Enabled: true
+      Move Group Namespace: ""
+      Robot Description: robot_description
+      Planning Scene Topic: /monitored_planning_scene
+      Scene Geometry:
+        Scene Alpha: 1
+      Scene Robot:
+        Show Robot Visual: true
+        Robot Alpha: 1
+      Planning Request:
+        Planning Group: arm
+        Interactive Marker Size: 0.12
+        Query Goal State: true
+        Query Start State: false
+      Planned Path:
+        Loop Animation: false
+        Show Trail: false
+        State Display Time: 0.05 s
+    - Class: rviz_default_plugins/InteractiveMarkers
+      Name: ของ / จุดวาง (ลากได้)
+      Enabled: true
+      Interactive Markers Namespace: /so100_objects
+      Show Descriptions: false
+      Show Axes: false
+    - Class: rviz_default_plugins/Marker
+      Name: พื้นที่วางของได้ (สีเขียว)
+      Enabled: true
+      Topic:
+        Value: /so100/place_map
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+  Global Options:
+    Fixed Frame: base
+    Background Color: 48; 48; 48
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 0.85
+      Focal Point: {X: 0, Y: -0.2, Z: 0.0}
+      Pitch: 0.4
+      Yaw: 2.4
+Window Geometry:
+  Width: 1600
+  Height: 950

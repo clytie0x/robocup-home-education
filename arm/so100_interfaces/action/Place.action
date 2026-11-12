@@ -1,0 +1,12 @@
+# Put down the object the arm is holding (after Pick). The arm keeps the grasp it used, so a top grasp
+# can turn the object to target yaw; a side grasp cannot (yaw then follows the arm direction).
+# target_pose: centre of the object's footprint at the destination (z ignored), any TF frame.
+geometry_msgs/PoseStamped target_pose
+---
+bool success
+string error_code           # SUCCESS UNREACHABLE NOT_HOLDING COLLISION BUSY HOT STOPPED FAILED
+string message
+---
+string step
+uint8 step_index
+uint8 step_count

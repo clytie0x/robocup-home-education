@@ -1,0 +1,15 @@
+# Pick an object standing on the table and hold it (arm ends at the ready pose).
+# object_pose: centre of the object's footprint. z is ignored (the object stands on the table).
+#   Orientation = object yaw (its own x axis = "depth"). All-zero quaternion = unknown:
+#   the arm then assumes the object faces the arm. Any TF frame; "" or "base" = arm base frame.
+geometry_msgs/PoseStamped object_pose
+float32[3] object_size      # [depth (own x), width (own y), height] in metres
+string grasp_mode           # "auto" (default, ""), "top" or "side"
+---
+bool success
+string error_code           # SUCCESS UNREACHABLE TOO_WIDE MISSED COLLISION BUSY HOLDING HOT STOPPED FAILED
+string message              # English, can be spoken
+---
+string step                 # e.g. "approach"
+uint8 step_index
+uint8 step_count

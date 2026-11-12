@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot name="so_arm100">
+  <group name="arm">
+    <chain base_link="base" tip_link="tcp"/>
+  </group>
+  <group name="gripper">
+    <joint name="gripper"/>
+  </group>
+  <group_state name="rest" group="arm">
+    <joint name="shoulder_pan" value="0"/>
+    <joint name="shoulder_lift" value="0.04"/>
+    <joint name="elbow_flex" value="-0.04"/>
+    <joint name="wrist_flex" value="0"/>
+    <joint name="wrist_roll" value="0"/>
+  </group_state>
+  <group_state name="ready" group="arm">
+    <joint name="shoulder_pan" value="0"/>
+    <joint name="shoulder_lift" value="1.2"/>
+    <joint name="elbow_flex" value="-1.2"/>
+    <joint name="wrist_flex" value="0.3"/>
+    <joint name="wrist_roll" value="0"/>
+  </group_state>
+  <group_state name="open" group="gripper">
+    <joint name="gripper" value="1.2"/>
+  </group_state>
+  <group_state name="close" group="gripper">
+    <joint name="gripper" value="0"/>
+  </group_state>
+  <end_effector name="hand" parent_link="tcp" group="gripper" parent_group="arm"/>
+  <disable_collisions link1="base" link2="shoulder" reason="Adjacent"/>
+  <disable_collisions link1="shoulder" link2="upper_arm" reason="Adjacent"/>
+  <disable_collisions link1="upper_arm" link2="lower_arm" reason="Adjacent"/>
+  <disable_collisions link1="lower_arm" link2="wrist" reason="Adjacent"/>
+  <disable_collisions link1="wrist" link2="gripper" reason="Adjacent"/>
+  <disable_collisions link1="gripper" link2="jaw" reason="Adjacent"/>
+  <!-- folded rest pose: upper arm lies against the base (measured by sampling) -->
+  <disable_collisions link1="base" link2="upper_arm" reason="Default"/>
+</robot>

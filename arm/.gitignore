@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+install/
+log/
+*.zip
+*.bak
+# never commit keys / machine access
+.access/
+*.pem
+id_*

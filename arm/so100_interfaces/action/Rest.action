@@ -1,0 +1,10 @@
+# Close the jaws and fold the arm into the rest pose (collision-checked). Refused while holding an object.
+# The arm also goes there by itself after rest_after_s seconds without a task (see API.md).
+---
+bool success
+string error_code           # SUCCESS HOLDING COLLISION BUSY HOT STOPPED FAILED
+string message
+---
+string step
+uint8 step_index
+uint8 step_count

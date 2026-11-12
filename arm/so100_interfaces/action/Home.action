@@ -1,0 +1,9 @@
+# Move to the ready pose (collision-checked). An object in the jaws stays held.
+---
+bool success
+string error_code           # SUCCESS COLLISION BUSY HOT STOPPED FAILED
+string message
+---
+string step
+uint8 step_index
+uint8 step_count
