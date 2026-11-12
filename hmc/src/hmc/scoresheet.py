@@ -166,7 +166,10 @@ class Referee:
         if not self.queue_joined:
             self.queue_joined = behind and gap <= QUEUE_JOIN
             return
-        if distance(robot, world.start) <= QUEUE_END_NEAR_START:
+        # The queue part ends when the robot or the last person has reached the start
+        # area, or when the last person has walked to the end of their route.
+        near = min(distance(robot, world.start), distance(tail.pos, world.start))
+        if near <= QUEUE_END_NEAR_START or not tail.route:
             self.sheet.award("queue")
             return
         touched = any(

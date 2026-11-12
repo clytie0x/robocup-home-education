@@ -51,8 +51,9 @@ def save_trajectory(path: Path, world: World, rows: list[dict]) -> bool:
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
     ax.set_title("Help Me Carry scenario")
-    ax.legend(loc="lower right")
+    # The legend goes outside the map, so it never hides the car or the bags.
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), fontsize=8)
     ax.grid(True, alpha=0.3)
-    fig.savefig(path, dpi=100)
+    fig.savefig(path, dpi=100, bbox_inches="tight")
     plt.close(fig)
     return True

@@ -10,9 +10,11 @@ from hmc import hri, manipulation, navigation, perception
 from hmc.world import PERSON_RADIUS, TIME_LIMIT, Circle, Shape, World, distance
 
 QUEUE_GAP = 1.0  # metres to keep behind the last person in the queue
-LEAVE_QUEUE_NEAR_START = (
-    2.0  # metres; the queue walks past the start, so we leave it here
-)
+QUEUE_SPOT = 0.3  # metres; close enough to our spot in the line
+# If we lose sight of the last person of the queue (a corner), keep going this long.
+LOST_TAIL_WAIT = 3.0  # seconds
+# The queue walks on past the start, so we leave it this close to the start.
+LEAVE_QUEUE_NEAR_START = 2.0  # metres
 
 
 class State(Enum):
@@ -54,6 +56,7 @@ class Task:
         self.perceived_bag: str | None = None
         self.last_operator_pos = None
         self.queue_done = False  # we leave the queue only once
+        self.last_tail: tuple[float, int] | None = None  # (time, id) we last saw it
 
     @property
     def finished(self) -> bool:
@@ -153,15 +156,27 @@ class Task:
         if self.world.carried_bag() is None:
             self._go(State.GO_TO_BAG)  # we dropped it, fetch it again
             return
+        now = self.world.time
         tail = self._queue_tail()
-        if (
-            tail is None
-            or distance(self.world.robot.pos, self.start) <= LEAVE_QUEUE_NEAR_START
-        ):
+        if tail is not None:
+            self.last_tail = (now, tail)
+        elif self.last_tail is not None and now - self.last_tail[0] <= LOST_TAIL_WAIT:
+            # Hidden for a moment (a corner): keep going where we saw them.
+            tail = self.last_tail[1]
+        robot = self.world.robot.pos
+        if tail is None or distance(robot, self.start) <= LEAVE_QUEUE_NEAR_START:
             self.queue_done = True
             self._go(State.RETURN)
             return
-        self._drive_to(tail, dt, QUEUE_GAP)
+        # Stand QUEUE_GAP behind the last person, in the direction they walk, so we are
+        # in the line and not next to it.
+        tracker = self.people_trackers[tail]
+        x, y = tracker.last()
+        walk = tracker.direction()
+        goal = (x, y)
+        if walk is not None:
+            goal = (x - QUEUE_GAP * walk[0], y - QUEUE_GAP * walk[1])
+        self._drive_to(goal, dt, QUEUE_SPOT)
 
     # Helpers
 
@@ -180,8 +195,8 @@ class Task:
             self.world.robot, goal, self._shapes(), self.world.time, dt, stop_distance
         )
 
-    def _queue_tail(self):
-        """The last person of a queue walking back ahead of us, or None.
+    def _queue_tail(self) -> int | None:
+        """The tracker id of the last person of a queue walking back ahead of us, or None.
 
         A queue is people who are walking. "Ahead of us" means closer to the start than we
         are. The last person of the queue is the walking person ahead of us who is closest
@@ -189,11 +204,11 @@ class Task:
         """
         robot = self.world.robot.pos
         ahead = [
-            pos
+            (pid, pos)
             for pid, pos in perception.see_people(self.world).items()
             if self.people_trackers[pid].has_moved()
             and distance(pos, self.start) < distance(robot, self.start)
         ]
         if not ahead:
             return None
-        return min(ahead, key=lambda pos: distance(pos, robot))
+        return min(ahead, key=lambda seen: distance(seen[1], robot))[0]

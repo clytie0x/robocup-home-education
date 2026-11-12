@@ -13,8 +13,10 @@ from hmc.world import ROBOT_RADIUS, Point, Robot, Shape, distance
 FOLLOW_DISTANCE = 1.5  # metres to keep behind the operator
 GOAL_TOLERANCE = 0.5  # metres, "close enough" for go_to
 
-CELL = 0.2  # metres, size of one grid cell
-SAFETY = 0.15  # metres of extra room, because the robot cuts corners between cells
+CELL = 0.1  # metres, size of one grid cell
+# Extra room, because the robot cuts corners between cells. Small enough that the robot
+# still fits through a 0.915 m door, the width the rulebook recommends.
+SAFETY = 0.1
 INFLATE = ROBOT_RADIUS + SAFETY  # a cell is blocked when a shape is closer than this
 MARGIN = 3.0  # metres of grid around the robot and the goal
 REPLAN_EVERY = 0.5  # seconds
@@ -55,7 +57,19 @@ def plan_path(start: Point, goal: Point, shapes: list[Shape]) -> list[Point] | N
                 if shape.clearance(centre((i, j))) < INFLATE:
                     blocked.add((i, j))
 
+    # If we ended up inside the safety zone, there would be no way out. So free the cells
+    # around us that are no closer to anything than we are now: we may only move away.
     start_cell = cell_of(start)
+    here_clear = min((s.clearance(start) for s in shapes), default=math.inf)
+    if here_clear < INFLATE:
+        reach = int(INFLATE / CELL) + 1
+        for i in range(start_cell[0] - reach, start_cell[0] + reach + 1):
+            for j in range(start_cell[1] - reach, start_cell[1] + reach + 1):
+                c = centre((i, j))
+                if distance(c, start) <= INFLATE and all(
+                    s.clearance(c) >= here_clear for s in shapes
+                ):
+                    blocked.discard((i, j))
     blocked.discard(start_cell)  # we are already here, so we must be able to leave
     goal_cell = cell_of(goal)
     if goal_cell in blocked:

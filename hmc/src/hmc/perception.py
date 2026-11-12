@@ -15,9 +15,38 @@ class Ray(NamedTuple):
     angle: float  # radians
 
 
+def _blocks(box, a: Point, b: Point) -> bool:
+    """True if the straight line from a to b passes through the box (slab method)."""
+    t_in, t_out = 0.0, 1.0
+    for start, delta, low, high in (
+        (a[0], b[0] - a[0], box.x_min, box.x_max),
+        (a[1], b[1] - a[1], box.y_min, box.y_max),
+    ):
+        if abs(delta) < 1e-12:
+            if not low <= start <= high:
+                return False
+            continue
+        t1, t2 = (low - start) / delta, (high - start) / delta
+        t_in, t_out = max(t_in, min(t1, t2)), min(t_out, max(t1, t2))
+        if t_in > t_out:
+            return False
+    return True
+
+
+def can_see(world: World, p: Point) -> bool:
+    """In sensor range, and no wall in between. Only walls block the view."""
+    if distance(world.robot.pos, p) > SENSOR_RANGE:
+        return False
+    return not any(
+        _blocks(o.shape, world.robot.pos, p)
+        for o in world.obstacles
+        if o.kind == "wall"
+    )
+
+
 def see_operator(world: World) -> Point | None:
-    """Operator position, or None when they are out of sensor range."""
-    if distance(world.robot.pos, world.operator.pos) > SENSOR_RANGE:
+    """Operator position, or None when we cannot see them."""
+    if not can_see(world, world.operator.pos):
         return None
     return world.operator.pos
 
@@ -25,9 +54,7 @@ def see_operator(world: World) -> Point | None:
 def see_bags(world: World) -> dict[str, Point]:
     """Positions of the bags inside sensor range, by name."""
     return {
-        name: bag.pos
-        for name, bag in world.bags.items()
-        if distance(world.robot.pos, bag.pos) <= SENSOR_RANGE
+        name: bag.pos for name, bag in world.bags.items() if can_see(world, bag.pos)
     }
 
 
@@ -44,9 +71,7 @@ def see_obstacles(world: World) -> list[Shape]:
 def see_people(world: World) -> dict[int, Point]:
     """Positions of the other people (not the operator) in range, by tracker id."""
     return {
-        person.id: person.pos
-        for person in world.people
-        if distance(world.robot.pos, person.pos) <= SENSOR_RANGE
+        person.id: person.pos for person in world.people if can_see(world, person.pos)
     }
 
 
@@ -87,6 +112,18 @@ class MotionTracker:
         if len(self._samples) < 2:
             return False
         return distance(self._samples[0][1], self._samples[-1][1]) >= min_distance
+
+    def last(self) -> Point:
+        """The last position we saw."""
+        return self._samples[-1][1]
+
+    def direction(self) -> Point | None:
+        """Unit vector of the walking direction inside the window, or None if standing."""
+        if not self.has_moved():
+            return None
+        (x0, y0), (x1, y1) = self._samples[0][1], self._samples[-1][1]
+        length = math.hypot(x1 - x0, y1 - y0)
+        return ((x1 - x0) / length, (y1 - y0) / length)
 
     def is_stationary(self) -> bool:
         if len(self._samples) < 2:

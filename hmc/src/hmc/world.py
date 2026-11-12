@@ -12,15 +12,16 @@ Point = tuple[float, float]
 TIME_LIMIT = 300.0  # seconds, the 5:00 limit from the score sheet
 DT = 0.1  # seconds per simulation step
 
-ROBOT_RADIUS = (
-    0.26  # metres; the real base is a 0.40 m square with 0.04 m corners cut off
-)
+# The real base is a 0.40 m square with 0.04 m corners cut off.
+ROBOT_RADIUS = 0.26  # metres
 PERSON_RADIUS = 0.25  # metres, a person seen from above
 CAR_RADIUS = 3.0  # metres, the robot counts as "at the car" inside this
-QUEUE_DELAY = (
-    2.0  # seconds after the robot reaches the car before the crowd starts to queue
-)
-QUEUE_SPACING = 2.0  # seconds between two people starting to walk, so they form a line
+# After the robot reaches the car, the crowd waits this long, then starts to queue.
+QUEUE_DELAY = 2.0  # seconds
+# Time between two people starting to walk, so they form a line.
+QUEUE_SPACING = 2.0  # seconds
+# While the heading is off by more than this, turn on the spot without driving.
+TURN_ON_SPOT = math.radians(30)
 
 
 def distance(a: Point, b: Point) -> float:
@@ -112,8 +113,10 @@ class Robot:
         error = wrap_angle(wanted - self.heading)
         turn = max(-self.max_turn_rate * dt, min(self.max_turn_rate * dt, error))
         self.heading = wrap_angle(self.heading + turn)
-        # Drive slower while still turning, and never drive backwards.
-        speed = self.max_speed * max(0.0, math.cos(error - turn))
+        # Turn on the spot first when facing the wrong way (a two-wheel base can do that),
+        # then drive slower while still turning. Never drive backwards.
+        left = abs(error - turn)
+        speed = 0.0 if left > TURN_ON_SPOT else self.max_speed * math.cos(left)
         step = min(speed * dt, remaining)
         self.x += math.cos(self.heading) * step
         self.y += math.sin(self.heading) * step
@@ -187,10 +190,8 @@ class Person:
     walking: bool = False
 
     def __post_init__(self) -> None:
-        self.home = (
-            self.x,
-            self.y,
-        )  # where the person stood in the crowd, for the plot
+        # Where the person stood in the crowd, for the plot
+        self.home = (self.x, self.y)
 
     @property
     def pos(self) -> Point:

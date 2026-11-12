@@ -45,7 +45,15 @@ Use `--map` to pick the scenario:
 | Map | What it is |
 |---|---|
 | `default` | A small made-up scenario, about 14 m by 9 m |
-| `eindhoven2024` | The layout of the official Carry My Luggage map of RoboCup 2024 in Eindhoven: team tables, arenas A to C, audience stands and starting point A, about 40 m by 27 m. The official map has no scale and no car, so the scale (5 cm per pixel) and the car position are our own choice. See `src/hmc/maps.py` |
+| `bangkok2022` | Official Carry My Luggage map, RoboCup 2022 Bangkok. The robot starts inside the flat and leaves through the exit door |
+| `bordeaux2023` | Official map, RoboCup 2023 Bordeaux. The robot starts outside, in the entering area |
+| `eindhoven2024` | Official map, RoboCup 2024 Eindhoven: team tables, arenas A to C, audience stands and starting point A, about 40 m by 27 m |
+| `germanopen2024` | Official map, German Open 2024 Kassel (a 10 m flat). The robot starts in the living room and leaves through the exit at the top |
+| `portugalopen2024` | Official map, Portugal Open 2024. The robot starts in the office and leaves through the exit door |
+
+The official maps come from github.com/RoboCupAtHome. They show the flat and the starting point, never the car or the outside, because the rulebook keeps the car location secret. So the scale (only German Open 2024 gives one), the outside part, the car and the obstacles are our own choice. Outside the exit we reuse the course of the `default` map. German Open 2025 is left out, because its official map is a placeholder. See `src/hmc/maps.py`.
+
+The robot is never given a map. It plans only from what it can see, and walls block its view. So inside the flat and outside it works the same way.
 
 | File | What it holds |
 |---|---|
@@ -71,15 +79,16 @@ Use `--map` to pick the scenario:
 | `docs/tasks/5.1-help-me-carry.md` | The task spec, the scoresheet and the acceptance tests |
 | `docs/reference/` | The rulebook and the other inputs |
 | `docs/evidence/help-me-carry-slice1/` | Outputs of slice 1 (615 of 1115), with `SHA256SUMS` |
-| `docs/evidence/help-me-carry-slice2/` | Outputs of slice 2 (1115 of 1115) for both maps, with `SHA256SUMS` |
+| `docs/evidence/help-me-carry-slice2/` | Outputs of slice 2 (1115 of 1115) for every map, with `SHA256SUMS` |
 | `AGENTS.md` | Rules for coding agents |
 | `WORKLOG.md` | Decisions and why we made them |
 
 ## Limits
 
-- The scripted run scores **1115 of 1115** on both maps. That is every main and bonus row. The world, the obstacles and the referee are all our own code, so this shows the logic works in our scenario. It does not show that the real robot can do the task.
+- The scripted run scores **1115 of 1115** on all six maps, for each of the three bags. That is every main and bonus row. The world, the obstacles and the referee are all our own code, so this shows the logic works in our scenario. It does not show that the real robot can do the task.
 - Deus ex Machina, the alternative start signal, restarts and the three tries are not simulated. Not attending and outstanding performance are referee decisions.
 - The robot drives at up to 1.0 m/s in the simulation. The real base is limited to 0.15 m/s, which is too slow to follow a person walking at 0.8 m/s.
-- Perception is perfect and comes straight from the world. There is no camera, lidar or noise.
+- Perception is perfect and comes straight from the world, except that walls block the view. There is no camera, lidar or noise.
+- The walls of the official maps are traced by eye, and most furniture is left out.
 - Picking a bag only sets a flag. There is no arm and no grasp.
 - The operator follows one fixed route, so a passing test does not show that the robot can do the real task.

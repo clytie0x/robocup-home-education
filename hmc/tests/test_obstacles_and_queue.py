@@ -6,12 +6,13 @@ import pytest
 import hmc.navigation
 import hmc.task
 from hmc.navigation import INFLATE, plan_path
-from hmc.perception import see_obstacles
+from hmc.maps import MAPS
+from hmc.perception import see_obstacles, see_operator
 from hmc.run import main, run_scenario
 from hmc.scoresheet import Referee, Scoresheet
 from hmc.task import State
 from hmc.world import (
-    PERSON_RADIUS, ROBOT_RADIUS, TIME_LIMIT, Box, Circle, build_world, distance,
+    PERSON_RADIUS, ROBOT_RADIUS, TIME_LIMIT, Box, Circle, Obstacle, build_world, distance,
 )  # fmt: skip
 
 AVOID_ROWS = [
@@ -161,3 +162,32 @@ def test_eindhoven2024_map_earns_everything_without_touching_anything():
 def test_cli_can_pick_the_map(tmp_path, capsys):
     assert main(["--map", "eindhoven2024", "--out", str(tmp_path)]) == 0
     assert "Awarded 1115 of 1115" in capsys.readouterr().out
+
+
+# Walls and all the official maps
+
+
+def test_a_wall_blocks_the_view():
+    world = build_world()
+    world.robot.x, world.robot.y = 0.0, 0.0
+    world.operator.x, world.operator.y = 4.0, 0.0
+    assert see_operator(world) == (4.0, 0.0)
+    world.obstacles.append(Obstacle("wall", Box(1.9, -1.0, 2.1, 1.0)))
+    assert see_operator(world) is None
+
+
+@pytest.mark.parametrize("map_name", sorted(MAPS))
+@pytest.mark.parametrize("bag", ["red", "blue", "green"])
+def test_every_map_and_bag_earns_everything_without_touching_anything(map_name, bag):
+    closest = []
+
+    def record(world, task):
+        robot = world.robot.pos
+        closest.extend(o.shape.clearance(robot) for o in world.obstacles)
+        closest.extend(distance(robot, p.pos) - PERSON_RADIUS for p in world.people)
+
+    result = run_scenario(map_name=map_name, target_bag=bag, on_step=record)
+    assert result.task.state == State.DONE
+    assert result.sheet.total() == 1115
+    assert result.world.time < TIME_LIMIT
+    assert min(closest) > ROBOT_RADIUS

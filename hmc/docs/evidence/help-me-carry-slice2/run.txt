@@ -18,4 +18,4 @@ Using alternative start signal                        -100        0  not-run
 Outstanding performance                                111        0  not-run
 TOTAL (max 1115 without special rows): 1115
 Awarded 1115 of 1115
-Sim time: 52.9 s (limit 300 s), end state: done
+Sim time: 51.9 s (limit 300 s), end state: done
