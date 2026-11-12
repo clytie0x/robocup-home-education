@@ -415,7 +415,7 @@ def test_send_never_blocks_without_a_server(self): ...   # 100 sends in under 0.
   4. When not locked: if the link is alive and a camera person has `score(look) >= 0.65` and a LiDAR candidate, lock the tracker there and report it. If the link is not alive, never lock: `operator` stays `None`.
   5. `Senses.people` are the other LiDAR candidates between 0.3 m and 4 m (ids by nearest-neighbour continuity). `Senses.obstacles` come from `ObstacleMemory.update` with those people and the operator left out.
 
-- [ ] **Step 1:** Failing tests, one per rule, plus:
+- [x] **Step 1:** Failing tests, one per rule, plus:
 
 ```python
 def test_holding_close_with_no_camera_look_stays_locked(self): ...        # Review Focus 1: 30 s at 0.8 m, answers empty
@@ -425,7 +425,7 @@ def test_relock_needs_a_matching_look(self): ...
 def test_enrol_refuses_two_people_inside_2_5_m(self): ...
 ```
 
-- [ ] **Step 2:** Implement, run, pass. Commit.
+- [x] **Step 2:** Implement, run, pass. Commit.
 
 ### Task 10: The control loop, its log, and replay
 
@@ -439,7 +439,7 @@ def test_enrol_refuses_two_people_inside_2_5_m(self): ...
 - One cycle, at the LiDAR rate (10 Hz):
   1. Read odometry (`ValueError` or a serial error: stop, end the run: Review Focus 5), scan, newest frame, newest answer.
   2. `depth_points`; `body.limit(safety.speed_cap(depth_points, p))`; `body.sync(pose)`.
-  3. `senses.read(...)`; `follower.watch(senses)`; `follower.step(senses, dt)` (watch first, every cycle).
+  3. `senses.read(...)`; `follower.watch(senses)`; `follower.step(senses, dt)` (watch first, every cycle); if `senses.ambiguous`: hold, `v = w = 0` (stop and wait, never guess who the operator is).
   4. `v, w = body.command()`; if `safety.must_stop(scan and depth points, v, w, p)`: `v = w = 0` and `body.robot.speed = 0`.
   5. `wheels.send(v, w)`; send the frame to the Jetson; append the record to `logs/<start time>/log.jsonl`: time, pose, v, w, mode, locked, link alive, operator position, people, obstacle count, nearest obstacle distance, stop reason, cycle time. Every 10th scan and its JPEG are saved too.
 - A cycle longer than 0.4 s stops the wheels and ends the run. Ctrl+C and SIGTERM send `S#` first, and a second signal is ignored while stopping.

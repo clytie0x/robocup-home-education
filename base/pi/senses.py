@@ -1,0 +1,172 @@
+"""Fuse the LiDAR track, the camera people and the obstacles into the brain's Senses.
+
+The LiDAR track says where the operator is; the camera only says who someone is. A camera
+person can start a track, but only when the Jetson link is alive and their look matches.
+"""
+import math
+
+from hmc.follower import Senses
+
+import geometry
+from legs import GATE, LegTracker, candidates
+from shapes import ObstacleMemory
+
+FRESH = 0.5  # s; an older camera answer is dropped, never matched
+MATCH_DEG = 8.0  # a camera person and a LiDAR candidate this close in bearing are the same
+LOOK_MATCH = 0.65  # score a look needs to start a track (hmc.follower.OPERATOR_MATCH)
+CROWDED = 0.35  # m; another candidate this close to the operator makes the cycle ambiguous
+ENROL_RANGE = 2.5  # m
+PEOPLE_RANGE = (0.3, 4.0)  # m from the base
+YAW_KEEP = 2.5  # s of yaw history, enough to correct any answer still used
+LOOK_KEEP = 2.0  # s a camera look can still veto a fix that ends a LiDAR gap
+UNSURE_LATCH = 1.0  # s ambiguous stays True after the last crowded cycle
+LEARNED = 20  # looks the brain must have learned before the camera may re-lock (hmc.follower.OPERATOR_LEARN)
+
+
+class RealSenses:
+    def __init__(self, p):
+        self.p = p
+        self.tracker = self._new_tracker()
+        self.memory = ObstacleMemory(p)
+        self.ambiguous = False  # True: someone else is right at the operator, the caller should hold
+        self._unsure_at = -math.inf  # last cycle the operator was crowded
+        self._answer = None  # newest camera answer, for the look check after a gap
+        self._last_now = None  # time of the previous read (or enrol)
+        self.learned = 0  # the loop sets this to Follower.operator_look.count every cycle
+        self._pose = (0.0, 0.0, 0.0)
+        self._yaws = []  # (time, yaw) from the poses passed to read
+        self._people = {}  # id -> odometry point, last cycle
+        self._next_id = 1
+
+    @property
+    def locked(self):
+        return self.tracker.pos is not None
+
+    def enrol(self, now, scan, answer):
+        """Lock onto the one camera person within 2.5 m. Returns (odometry point, look) or a refusal."""
+        if now - answer.t > FRESH:
+            return "camera answer too old"
+        cands = candidates(scan)
+        close = []
+        for bearing, look in self._fresh(now, answer):
+            c = self._match(bearing, cands)
+            if c is not None and math.hypot(*self._base(c)) <= ENROL_RANGE:
+                close.append((c, look))
+        if len(close) > 1 or (close and self._crowded(close[0][0], cands)):
+            return "more than one person within 2.5 m"
+        if not close:
+            return "nobody in view"
+        c, look = close[0]
+        self.tracker = self._new_tracker()
+        self.tracker.update(scan, now, lock_at=c)
+        self._last_now = now
+        return geometry.base_to_odom(self._base(c), self._pose), look
+
+    def read(self, now, pose, v, w, dt, scan, depth_points, answer, link_alive, score):
+        self._pose = pose
+        self._yaws = [s for s in self._yaws if now - s[0] <= YAW_KEEP] + [(now, pose[2])]
+        if link_alive and answer is not None:
+            self._answer = answer
+        seen = self._fresh(now, answer) if link_alive else []
+        cands = candidates(scan)
+        look = None
+
+        self.tracker.predict(v, w, dt)
+        if self.locked:
+            predicted, last_fix = self.tracker.pos, self.tracker.seen_at
+            pos = self.tracker.update(scan, now)  # coasts (no fix) up to track_coast_max
+            fixed = pos is not None and self.tracker.seen_at == now
+            if fixed and not self._fix_ok(now, pos, predicted, last_fix, cands, score):
+                self.tracker = self._new_tracker()  # lost: only a camera look can lock again (rule 4)
+            elif fixed:
+                at_track = [l for b, l in seen if abs(self._camera_bearing(pos) - b) <= MATCH_DEG]
+                if self._crowded(pos, cands) or len(at_track) > 1:
+                    self._unsure_at = now
+                else:
+                    look = next((l for b, l in seen if self._match(b, cands) == pos), None)
+        unsure = now - self._unsure_at <= UNSURE_LATCH
+        if not self.locked and not unsure and self.learned >= LEARNED:  # before that, only enrol may lock
+            for bearing, l in sorted(seen, key=lambda s: -score(s[1])):
+                c = self._match(bearing, cands)
+                if c is None or score(l) < LOOK_MATCH:
+                    continue
+                if self._crowded(c, cands):
+                    self._unsure_at = now  # never lock onto a spot where two people stand
+                    break
+                self.tracker.update(scan, now, lock_at=c)
+                look = l
+                break
+
+        self.ambiguous = now - self._unsure_at <= UNSURE_LATCH
+        self._last_now = now
+        if self.ambiguous:
+            look = None  # never learn or score a look from a merged scene
+        fixed = self.locked and self.tracker.seen_at == now
+        operator = geometry.base_to_odom(self._base(self.tracker.pos), pose) if fixed else None
+        others = [self._base(c) for c in cands if c != self.tracker.pos]
+        others = [geometry.base_to_odom(b, pose) for b in others if PEOPLE_RANGE[0] <= math.hypot(*b) <= PEOPLE_RANGE[1]]
+        people = self._ids(others)
+        everyone = list(people.values()) + ([operator] if operator is not None else [])
+        obstacles = self.memory.update(now, pose, scan, depth_points, everyone)
+        return Senses(now, operator, look, people, obstacles)
+
+    def _new_tracker(self):
+        return LegTracker(lost_after=self.p["track_coast_max"])
+
+    def _fix_ok(self, now, pos, predicted, last_fix, cands, score):
+        """May the track take this fix? Any jump, or a doubtful fix after a gap, drops the track."""
+        if math.dist(pos, predicted) > self.p["track_jump"]:
+            return False
+        if self._last_now is None or last_fix >= self._last_now:
+            return True  # the previous cycle had a fix too: no gap
+        if pos != min(cands, key=lambda c: math.dist(c, predicted)):
+            return False
+        for bearing, l in self._fresh(now, self._answer, LOOK_KEEP):
+            if abs(self._camera_bearing(pos) - bearing) <= MATCH_DEG and score(l) < LOOK_MATCH:
+                return False  # the camera says the one at the track now is someone else
+        return True
+
+    def _base(self, c):
+        return geometry.lidar_to_base(c, self.p)
+
+    def _camera_bearing(self, c):
+        # Camera bearings are measured at the camera, which is not at the laser: compare in the
+        # base frame, with the candidate's bearing as seen from the camera position.
+        x, y = self._base(c)
+        return math.degrees(math.atan2(y - self.p["camera_y"], x - self.p["camera_x"]))
+
+    def _match(self, bearing, cands):
+        """The LiDAR candidate for a camera bearing, or None."""
+        near = [c for c in cands if abs(self._camera_bearing(c) - bearing) <= MATCH_DEG]
+        if len(near) > 1 and self.tracker.pos is not None:
+            track_range = math.hypot(*self.tracker.pos)
+            return min(near, key=lambda c: abs(math.hypot(*c) - track_range))
+        return min(near, key=lambda c: abs(self._camera_bearing(c) - bearing), default=None)
+
+    def _crowded(self, point, cands):
+        return any(0 < math.dist(c, point) <= CROWDED for c in cands)
+
+    def _fresh(self, now, answer, max_age=FRESH):
+        """(bearing now, look) for each camera person, or [] when the answer is missing or late."""
+        if answer is None or now - answer.t > max_age:
+            return []
+        # shortcut: only the turn is corrected, not the drive; fine for 0.5 s answers, rough for the 2 s look veto.
+        yaws = self._yaws or [(now, 0.0)]  # no read yet: no turn known
+        then = [yaw for t, yaw in yaws if t <= answer.t] or [yaws[0][1]]
+        turn = yaws[-1][1] - then[-1]
+        turn = math.degrees(math.atan2(math.sin(turn), math.cos(turn)))
+        return [(s.bearing_deg - turn, s.look) for s in answer.people]
+
+    def _ids(self, points):
+        """Give each point the id of the nearest person last cycle (within GATE), else a new id."""
+        # shortcut: greedy in list order, not a best global assignment; fine for a few people.
+        old, ids = dict(self._people), {}
+        for pt in points:
+            pid = min(old, key=lambda i: math.dist(old[i], pt), default=None)
+            if pid is None or math.dist(old[pid], pt) > GATE:
+                pid, self._next_id = self._next_id, self._next_id + 1
+            else:
+                del old[pid]
+            ids[pid] = pt
+        self._people = ids
+        return ids

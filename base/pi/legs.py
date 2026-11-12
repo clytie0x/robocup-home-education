@@ -79,7 +79,8 @@ def moved(point, v, w, dt):
 
 
 class LegTracker:
-    def __init__(self):
+    def __init__(self, lost_after=LOST_AFTER):
+        self.lost_after = lost_after
         self.pos = None
         self.seen_at = None
 
@@ -101,6 +102,6 @@ class LegTracker:
         near = [p for p in people if math.dist(p, self.pos) <= gate]
         if near:
             self.pos, self.seen_at = min(near, key=lambda p: math.dist(p, self.pos)), now
-        elif now - self.seen_at > LOST_AFTER:
+        elif now - self.seen_at > self.lost_after:
             self.pos = self.seen_at = None
         return self.pos
