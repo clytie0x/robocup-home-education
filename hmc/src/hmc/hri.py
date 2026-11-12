@@ -1,6 +1,7 @@
 """Human-robot interaction. For now this is only a log of what the robot says."""
 
 READY_TEXT = "I am ready to follow you."
+COME_BACK_TEXT = "I lost you. Please come back and stand in front of me."
 
 
 class Speech:

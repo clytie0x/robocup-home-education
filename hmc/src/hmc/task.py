@@ -9,7 +9,9 @@ from enum import Enum
 
 from hmc import hri, manipulation, navigation, perception
 from hmc.appearance import LookMemory
-from hmc.world import PERSON_RADIUS, TIME_LIMIT, Circle, Point, Shape, World, distance
+from hmc.world import (
+    PERSON_RADIUS, TIME_LIMIT, Circle, Point, Shape, World, distance, wrap_angle,
+)  # fmt: skip
 
 QUEUE_GAP = 1.0  # metres to keep behind the last person in the queue
 QUEUE_SPOT = 0.3  # metres; close enough to our spot in the line
@@ -36,11 +38,16 @@ SAME_PERSON = 0.8  # two looks this similar are taken to be the same person
 LOST_TAIL_WAIT = 3.0  # seconds
 # The queue walks on past the start, so we leave it this close to the start.
 LEAVE_QUEUE_NEAR_START = 2.0  # metres
+# Losing the operator while following (Deus ex Machina in the rulebook).
+LOST_AFTER = 2.0  # seconds without seeing the operator before we start to search
+DRIVE_FOR = 10.0  # seconds at most to reach the last seen spot (it may be blocked)
+LOOK_AROUND = 5.0  # seconds of turning on the spot before we ask them to come back
 
 
 class State(Enum):
     ANNOUNCE_READY = "announce_ready"  # tell the operator we can follow
     FOLLOW = "follow"  # follow the operator towards the unknown car
+    SEARCH = "search"  # we lost the operator: look for them, then ask them back
     PERCEIVE_BAG = "perceive_bag"  # work out which bag is pointed at
     GO_TO_BAG = "go_to_bag"
     PICK = "pick"
@@ -53,7 +60,8 @@ class State(Enum):
 # Which state may follow which. Anything else is a bug.
 ALLOWED = {
     State.ANNOUNCE_READY: {State.FOLLOW, State.TIMEOUT},
-    State.FOLLOW: {State.PERCEIVE_BAG, State.TIMEOUT},
+    State.FOLLOW: {State.PERCEIVE_BAG, State.SEARCH, State.TIMEOUT},
+    State.SEARCH: {State.FOLLOW, State.TIMEOUT},
     State.PERCEIVE_BAG: {State.GO_TO_BAG, State.TIMEOUT},
     State.GO_TO_BAG: {State.PICK, State.TIMEOUT},
     State.PICK: {State.RETURN, State.GO_TO_BAG, State.TIMEOUT},
@@ -91,6 +99,10 @@ class Task:
         # blind closer than 0.6 m, so a low object we pass would vanish without this.
         self.obstacle_memory: set = set()
         self.bag_tracker = perception.MotionTracker()
+        # Searching for the lost operator: when we started to turn, and if we asked.
+        self.search_since = 0.0
+        self.look_since: float | None = None
+        self.asked_back = False
 
     @property
     def finished(self) -> bool:
@@ -117,12 +129,13 @@ class Task:
                 since, spot = self.world.time, pos  # they moved: start counting again
             self.standing[pid] = (since, spot)
         self.operator_now = self._watch_operator()
-        if self.state == State.FOLLOW:
+        if self.state in (State.FOLLOW, State.SEARCH):
             self._remember_crowd()
 
         handlers = {
             State.ANNOUNCE_READY: self._announce_ready,
             State.FOLLOW: self._follow,
+            State.SEARCH: self._search,
             State.PERCEIVE_BAG: self._perceive_bag,
             State.GO_TO_BAG: self._go_to_bag,
             State.PICK: self._pick,
@@ -165,6 +178,11 @@ class Task:
         operator = self.operator_now
         if self.last_operator_pos is None:
             return
+        if self.world.time - self.tracker.last_time > LOST_AFTER:
+            self.search_since, self.look_since = self.world.time, None
+            self.asked_back = False
+            self._go(State.SEARCH)
+            return
         navigation.follow_step(
             self.navigator, self.world.robot, self.last_operator_pos,
             self._shapes(), self.world.time, dt,
@@ -181,6 +199,32 @@ class Task:
             and perception.see_pointing(self.world)
         ):
             self._go(State.PERCEIVE_BAG)
+
+    def _search(self, dt: float) -> None:
+        """We lost the operator. Go where we saw them last, look around, then ask."""
+        now = self.world.time
+        # Found again only with a look that matches the operator (checked in
+        # _watch_operator), so a stranger who walks by is not taken for them.
+        if self.operator_now is not None and perception.see_operator_look(self.world):
+            self._go(State.FOLLOW)
+            return
+        if self.look_since is None:
+            reached = self._drive_to(
+                self.last_operator_pos, dt, navigation.GOAL_TOLERANCE
+            )
+            if reached or now - self.search_since > DRIVE_FOR:
+                self.look_since = now
+            return
+        if now - self.look_since < LOOK_AROUND:
+            # The camera sees only 58 degrees forward, so turn on the spot.
+            robot = self.world.robot
+            robot.heading = wrap_angle(robot.heading + robot.max_turn_rate * dt)
+            return
+        if not self.asked_back:
+            # Costs -150 (Deus ex Machina), but only if we score again afterwards.
+            self.speech.say(now, hri.COME_BACK_TEXT)
+            self.asked_back = True
+        # Then stand still and face forward, where we asked them to stand.
 
     def _perceive_bag(self, dt: float) -> None:
         robot = self.world.robot

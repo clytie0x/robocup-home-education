@@ -72,6 +72,8 @@ python -m hmc.robustness --seeds 20 --bystanders 10 --noise realistic
 
 `--bystanders N` adds N passers-by. `--noise off|realistic|hard` adds sensor noise. `--seed` changes both. `hmc.robustness` runs every map with seeds 0 to N-1 and prints how many runs ended in DONE with all 1115 points, without touching anything.
 
+If the robot does not see the operator for more than 2 s while following, it searches: it drives to where it saw them last, turns on the spot for 5 s, and then says "I lost you. Please come back and stand in front of me." The scripted operator then walks back to stand 1.5 m in front of the robot, waits 2 s and walks on. This is the Deus ex Machina "coming back" row, -150, and the referee applies it only if the robot scores again afterwards.
+
 ## Folder map
 
 | Path | What |
@@ -101,7 +103,7 @@ python -m hmc.robustness --seeds 20 --bystanders 10 --noise realistic
 ## Limits
 
 - The scripted run scores **1115 of 1115** on all six maps, for each of the three bags. That is every main and bonus row. The world, the obstacles and the referee are all our own code, so this shows the logic works in our scenario. It does not show that the real robot can do the task.
-- Deus ex Machina, the alternative start signal, restarts and the three tries are not simulated. Not attending and outstanding performance are referee decisions.
+- Of the four Deus ex Machina rows only "asking the operator to come back" (-150) is simulated. The alternative start signal, restarts and the three tries are not simulated. Not attending and outstanding performance are referee decisions.
 - The robot drives at up to 1.0 m/s in the simulation. The real base is limited to 0.15 m/s, which is too slow to follow a person walking at 0.8 m/s.
 - By default perception is perfect, except that walls block the view. `--noise realistic` or `--noise hard` adds misses, position errors, pointing errors, tracker id swaps and wrong operator detections. The noise levels are our guess, not measurements from a real camera or lidar.
 - Re-identification is simulated with a random "look" per person. A real robot needs a re-ID model for this, and real people can look much more alike.

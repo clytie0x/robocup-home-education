@@ -26,9 +26,11 @@ def test_end_to_end_score_and_time():
 
 def test_out_of_scope_rows_stay_unawarded():
     result = run_scenario()
-    for key in ("dem_natural", "dem_unnatural", "dem_come_back", "dem_contact",
+    for key in ("dem_natural", "dem_unnatural", "dem_contact",
                 "alt_start_signal", "not_attending", "outstanding"):  # fmt: skip
         assert result.sheet.status(key) == "not-run"
+    # The robot never loses the operator in the script, so it never asks them back.
+    assert result.sheet.status("dem_come_back") == "not-earned"
 
 
 def test_scenario_is_deterministic():

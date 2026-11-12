@@ -64,6 +64,8 @@ def run_scenario(
         task.step(DT)
         if hri.READY_TEXT in [text for _, text in speech.messages]:
             world.operator.start_walking()  # the operator waits for "ready"
+        if hri.COME_BACK_TEXT in [text for _, text in speech.messages[seen_messages:]]:
+            world.operator.come_back(world.robot)  # the robot asked them back
         # Timing out does nothing, so it takes no sim time.
         if task.state != State.TIMEOUT:
             world.step(DT)
