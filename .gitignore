@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+build/
+install/
+log/
+# models / large binaries (download with voice/scripts/install_jetson.sh)
+*.gguf
+*.bin
+*.onnx
+*.onnx.json
+models/
+# machine-specific overrides
+.robot_voice_local.yaml
+# audio clips with unclear copyright (keep locally)
+voice/sounds/cat_beatbox.wav
