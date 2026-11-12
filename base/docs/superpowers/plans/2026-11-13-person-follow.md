@@ -320,7 +320,7 @@ def test_two_people_side_by_side_then_apart_does_not_switch(self):
   - `depth_obstacles.points(depth, p) -> numpy.ndarray | None`: `(N, 2)` base-frame x, y of pixels whose height above the floor is between 0.05 m and `p["robot_height"]` and whose range is under 3 m, thinned to one point per 5 cm cell. Returns `None` when fewer than 5 % of the pixels have a depth (the sunlight case): `None` means "no depth", an empty array means "nothing there".
   - `shapes.ObstacleMemory(p)`: `.update(now, pose, scan, depth_points, people: list[Point]) -> list[Circle]`, in the odometry frame. LiDAR points (after `usable`) are circles of radius 0.05 m, one per 0.1 m cell, valid for this scan only. Depth points are circles of radius 0.05 m kept for 10 s after last seen. Points within 0.45 m of any point in `people` are left out (people are added by the brain as person circles).
 
-- [ ] **Step 1:** Failing tests:
+- [x] **Step 1:** Failing tests:
 
 ```python
 def test_floor_is_not_an_obstacle_and_a_box_is(self): ...
@@ -334,7 +334,7 @@ def test_shapes_are_in_the_odometry_frame(self): ...
     # the same wall seen from two poses gives circles at the same odometry coordinates within 5 cm
 ```
 
-- [ ] **Step 2:** Implement with numpy, run, pass.
+- [x] **Step 2:** Implement with numpy, run, pass.
 - [ ] **Step 3:** On the Pi (wheels closed): a box 0.12 m high at 1.0 m and a chair at 1.5 m. Save a top-down PNG of LiDAR circles, depth circles and the robot to `~/hmc-base/logs/`. Report whether the box appears and whether the bare floor is clear. Report `hmc.navigation.plan_path` time on the Pi for that scene (median and worst of 50). If the worst is over 150 ms, say so; Task 10 then plans in a worker thread. Commit.
 
 ### Task 7: Body and last-resort stop
