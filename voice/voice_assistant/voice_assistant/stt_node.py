@@ -58,7 +58,7 @@ class LoudnessGate:
         return ok, level, noise, snr
 
 
-BARGE_RX = re.compile(r"\b(stop|halt|freeze)\b", re.I)
+BARGE_RX = re.compile(r"\b(stop|halt|freeze)\b|^\W*(?:robot\W+|please\W+)*(finish(?:ed)?|pause|end)\W*$", re.I)   # finish/pause/end only as the whole sentence
 
 
 class BargeInDetector:
@@ -145,11 +145,11 @@ class SttNode(Node):
         # A transcript of ONE word is dropped unless it is in this list (whisper invents "Go.", "You.", "Okay."
         # from noise / speaker echo). Empty list = keep every transcript.
         self.declare_parameter('single_word_allow',
-                               ['stop', 'halt', 'freeze', 'stops', 'stopped', 'stopping', 'stab', 'stob', 'stup', 'stap', 'top', 'tops', 'stuff', 'wait', 'enough', 'stay', 'hello', 'hi', 'robot', 'yes', 'no', 'thanks', 'beatbox', 'yeah', 'yep', 'yup', 'sure', 'okay', 'ok', 'nope', 'nah'])
+                               ['stop', 'halt', 'freeze', 'stops', 'stopped', 'stopping', 'stab', 'stob', 'stup', 'stap', 'top', 'tops', 'stuff', 'wait', 'enough', 'stay', 'finish', 'finished', 'pause', 'end', 'hello', 'hi', 'robot', 'yes', 'no', 'thanks', 'beatbox', 'yeah', 'yep', 'yup', 'sure', 'okay', 'ok', 'nope', 'nah'])
         # Vocabulary hint for whisper: biases transcription toward robot commands.
         self.declare_parameter('initial_prompt',
                                'Hey robot. Robot voice commands: carry the bag, drop the bag, put the bag down, '
-                               'follow me, stop, stay here, move forward, go back, turn left, turn right, do a beatbox.')
+                               'follow me, stop, stay here, pause, finish, move forward, go back, turn left, turn right, do a beatbox.')
 
         p = lambda n: self.get_parameter(n).value
         self.url = p('whisper_url')

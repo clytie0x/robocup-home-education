@@ -35,7 +35,10 @@ R = lambda p: re.compile(p, re.I)
 # ("Tap top.", "Ta-ta.", "Stab.") + natural ways to say stop. Only matched when that is ALL that was said.
 STOP_ALIKE = R(r"^(?:(?:please|robot|hey|okay|ok)\s+)*(?:stop+s?|stops? it|stopped|stopping|stab|stob|stup|top|tops|"
                r"tap ?tops?|stap|stuff|ta[- ]?ta|tata|that'?s (?:all|it|enough)|that is (?:all|it|enough)|"
-               r"enough|wait|hold on|stay|stay there)(?:\s+(?:please|now|robot))*$")
+               r"enough|wait|hold on|stay|stay there|stay here|"
+               r"finish(?:ed)?|finish (?:it|that|the task)|pause|pause (?:it|that)|end|end (?:it|that|the task)|the end)"
+               r"(?:\s+(?:please|now|robot|here))*$")
+# finish / pause / end count as stop only when they are the whole sentence ("go to the end of the hall" is not stop)
 # Fuzzy fallback for the few commands the robot really needs. Whisper often writes them slightly wrong
 # ("Dopting the bag", "Hollow me", "Keep up the bag"); if no rule matched, a SHORT sentence that sounds
 # close enough to exactly one of these phrases is taken as that command.
@@ -46,7 +49,8 @@ COMMAND_PHRASES = {
     'drop_bag': ["drop the bag", "drop this bag", "drop it", "put the bag down", "put down the bag",
                  "release the bag", "let go of the bag"],
     'follow_me': ["follow me", "follow me please", "come with me", "please follow me"],
-    'stop': ["stop", "robot stop", "please stop", "stop here", "stay here", "stay there", "wait here", "stay"],
+    'stop': ["stop", "robot stop", "please stop", "stop here", "stay here", "stay there", "wait here", "stay",
+             "finish", "pause", "end", "robot finish", "robot pause"],
 }
 
 

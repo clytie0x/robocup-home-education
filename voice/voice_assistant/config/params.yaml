@@ -17,10 +17,10 @@ stt_node:
     barge_in: true            # say "stop" while the robot is talking -> it stops at once
     barge_ratio: 2.0          # your voice must be 2x louder than the robot's voice at the mic (lower = easier, more false triggers)
     echo_guard_s: 0.8         # mic stays muted this long after the robot stops talking (raise if it hears its own echo)
-    single_word_allow: ["stop", "halt", "freeze", "stops", "stopped", "stopping", "stab", "stob", "stup", "stap", "top", "tops", "stuff", "wait", "enough", "stay", "hello", "hi", "robot", "yes", "no", "thanks", "beatbox", "yeah", "yep", "yup", "sure", "okay", "ok", "nope", "nah"]   # other 1-word transcripts are dropped as noise
+    single_word_allow: ["stop", "halt", "freeze", "stops", "stopped", "stopping", "stab", "stob", "stup", "stap", "top", "tops", "stuff", "wait", "enough", "stay", "finish", "finished", "pause", "end", "hello", "hi", "robot", "yes", "no", "thanks", "beatbox", "yeah", "yep", "yup", "sure", "okay", "ok", "nope", "nah"]   # other 1-word transcripts are dropped as noise
     wake_word: ""             # leave empty: the wake word is handled by dialog_node
     language: "en"
-    initial_prompt: "Hello. Hey robot. Robot voice commands: carry the bag, drop the bag, put the bag down, follow me, stop, stay here, move forward, go back, turn left, turn right, do a beatbox."
+    initial_prompt: "Hello. Hey robot. Robot voice commands: carry the bag, drop the bag, put the bag down, follow me, stop, stay here, pause, finish, move forward, go back, turn left, turn right, do a beatbox."
 
 flow_node:                     # task state machine (no wake word). Robot events come in on /robot/event
   ros__parameters:
