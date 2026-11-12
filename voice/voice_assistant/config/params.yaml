@@ -1,0 +1,91 @@
+/**:                           # shared by every node
+  ros__parameters:
+    robot_name: "Predictably Slightly Unpredictable"
+    beatbox_file: "~/robot_voice/sounds/cat_beatbox.wav"   # 16-bit .wav played for "do a beatbox"
+
+stt_node:
+  ros__parameters:
+    whisper_url: "http://127.0.0.1:8080/inference"
+    mic_device: ""            # run: python3 -m sounddevice  -> pick name or index
+    mic_rate: 16000           # set 48000 if your USB mic does not support 16 kHz
+    vad_aggressiveness: 2
+    silence_ms: 700
+    min_speech_ms: 300
+    max_utterance_s: 12.0
+    min_snr: 2.0              # volume gate: speech must be 2x louder than the room background (0 = off; lower if it ignores you)
+    min_rms: 0                # optional absolute minimum level, 0 = off (log shows "level xN" for each sentence)
+    barge_in: true            # say "stop" while the robot is talking -> it stops at once
+    barge_ratio: 2.0          # your voice must be 2x louder than the robot's voice at the mic (lower = easier, more false triggers)
+    echo_guard_s: 0.8         # mic stays muted this long after the robot stops talking (raise if it hears its own echo)
+    single_word_allow: ["stop", "halt", "freeze", "hello", "hi", "robot", "yes", "no", "thanks", "beatbox"]   # other 1-word transcripts are dropped as noise
+    wake_word: ""             # leave empty: the wake word is handled by dialog_node
+    language: "en"
+    initial_prompt: "Hello. Hey robot. Robot voice commands: carry the bag, drop the bag, put the bag down, follow me, stop, move forward, go back, turn left, turn right, do a beatbox."
+
+flow_node:                     # task state machine (no wake word). Robot events come in on /robot/event
+  ros__parameters:
+    ask_text: "How can I help you?"
+    ready_text: "I am ready to follow you."
+    reask_s: 10.0              # in LISTENING, ask again after this many seconds of silence
+    grab_timeout: 30.0         # no grab_success within this -> error (SO-100 pick takes 12-18 s)
+    drop_timeout: 20.0         # no drop_done within this -> error (SO-100 place takes 8-12 s)
+    person_timeout: 5.0        # no see_person after "I am ready to follow you" -> error
+    require_person: true       # false = start following without waiting for see_person
+
+dialog_node:                   # NOT launched any more (wake-word version, kept for reference)
+  ros__parameters:
+    require_wake_word: true    # false = every sentence goes straight to the LLM (old behaviour)
+    wake_words: ["robot", "robert", "rowboat", "hello"]   # add what whisper hears when you say "robot" (see log: heard ...)
+    fuzzy_words: ["robot"]     # only these also match similar-sounding words (robo, roboto, ro bot)
+    start_only_words: ["hello"]   # wake only when said at the START of a sentence ("say hello to him" won't wake)
+    wake_fuzzy: 0.78           # 0 = exact only
+    awake_timeout: 15.0        # seconds of silence (after the robot stops talking) before sleeping again
+    greeting: "Hi! I'm {name}. How can I help you?"     # {name} = robot_name
+    capabilities: "I can carry your bag, drop the bag, follow you, move forward or backward, turn left or right, do a beatbox, and stop."
+    farewell: "Okay. Just say hello if you need me."
+    wake_chime: "~/robot_voice/sounds/wake_chime.wav"     # "ding" when it wakes (after the first intro). "" = speak instead
+    sleep_chime: "~/robot_voice/sounds/sleep_chime.wav"   # played when it goes back to sleep. "" = silent
+    intro_once: true           # full spoken intro only on the first wake after start
+    sleep_message: ""          # e.g. "Call me if you need anything." ('' = go to sleep silently)
+
+llm_node:
+  ros__parameters:
+    llm_url: "http://127.0.0.1:8081/v1/chat/completions"
+    allowed_actions: ["none", "move_forward", "move_backward", "turn", "stop", "go_to", "follow_me", "look_at", "drop_bag", "carry_bag", "beatbox"]
+    history_turns: 4
+    max_tokens: 128
+    temperature: 0.3
+    fast_commands: true      # "stop" / "drop the bag" by keyword, no LLM wait
+
+rule_node:                     # used with: ros2 launch ... brain:=rules  (no LLM)
+  ros__parameters:
+    capabilities: "I can carry your bag, drop the bag, follow you, move forward or backward, turn left or right, do a beatbox, and stop."
+
+arm_action_bridge:              # used with: ros2 launch ... arm:=actions   (SO-100 API /arm/pick, /arm/place)
+  ros__parameters:
+    pick_forward: 0.20           # fixed TEST pick point, metres in front of the arm's base axis (until the camera works)
+    pick_left: 0.0               # metres to the arm's left (negative = right)
+    object_size: [0.03, 0.03, 0.05]   # [depth, width, height] m; gripper opens ~6.5 cm max
+    grasp_mode: "auto"           # auto | top | side
+    place_forward: 0.20          # fixed drop point
+    place_left: -0.10
+    object_pose_topic: "/object/pose"  # a PoseStamped here (e.g. from the camera, any TF frame) overrides the fixed point
+    place_pose_topic: "/place/pose"
+    pose_max_age: 5.0            # seconds a received pose stays valid
+
+tts_node:
+  ros__parameters:
+    voice_model: "/opt/robot_voice/models/piper/en_US-lessac-medium.onnx"
+    speaker_device: ""
+    volume: 1.0
+
+command_bridge_node:
+  ros__parameters:
+    cmd_vel_topic: "/cmd_vel"
+    default_speed: 0.15
+    max_speed: 0.3
+    turn_speed: 0.6
+    max_distance: 2.0
+    arm_stop_service: "/arm/stop"   # "stop" also freezes the SO-100 arm ("" = wheels only)
+    drop_topic: "/robot/drop_bag"    # std_msgs/Empty sent when the user says "drop the bag"
+    carry_topic: "/robot/carry_bag"  # std_msgs/Empty sent when the user says "carry this bag"

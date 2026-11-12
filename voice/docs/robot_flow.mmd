@@ -1,0 +1,44 @@
+stateDiagram-v2
+    direction TB
+    [*] --> Listening
+
+    Listening: listening
+    Listening: entry / ask "How can I help you?"
+    Picking: picking bag
+    Picking: entry / send carry_bag
+    Announce: announce ready
+    Announce: entry / say "I am ready to follow you"
+    Following: following
+    Following: entry / send follow_me
+    Dropping: drop bag
+    Dropping: entry / stop + send drop_bag
+    Error: error / failed
+    Error: entry / stop + say the reason
+
+    Listening --> Listening: no command [10 s] / ask again<br/>move / turn / beatbox / chat / do it + reply
+    Listening --> Picking: "help me carry this bag" [no bag]
+    Listening --> Announce: "follow me"
+    Listening --> Dropping: "drop the bag" [has bag]
+    Listening --> Error: "drop the bag" [no bag] / "I don't have a bag"
+
+    Picking --> Announce: grab_success
+    Picking --> Error: grab_failed / timeout 20 s
+    Picking --> Listening: "drop the bag" or "stop" / cancel  ②
+
+    Announce --> Following: speech done [see person]
+    Announce --> Error: no person within 5 s / "I can't see you"
+
+    Following --> Listening: "stop"
+    Following --> Dropping: "drop the bag" [has bag]
+    Following --> Error: lost_person / "I lost you"
+    Following --> Error: bag_lost / "I think I dropped the bag"  ①
+
+    Dropping --> Listening: drop_done / "Here is your bag"
+    Dropping --> Error: drop_failed / timeout 10 s
+
+    Error --> Listening: speech done  ③
+
+    note right of Listening
+        "stop" from ANY state → stop the robot → listening  ④
+        every waiting state has a timeout  ⑤
+    end note
