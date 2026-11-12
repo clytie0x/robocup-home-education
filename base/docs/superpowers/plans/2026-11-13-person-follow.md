@@ -294,8 +294,8 @@ def test_search_turns_again_every_ten_seconds_when_asked_to(): ...
 **Interfaces:**
 - Produces: `legs.clusters(scan) -> list[Point]`, `legs.candidates(scan) -> list[Point]` (lidar frame, legs within 0.5 m merged), `legs.moved(point, v, w, dt) -> Point`, `legs.LegTracker` with `.pos`, `.seen_at`, `.predict(v, w, dt)`, `.update(scan, now, lock_at: Point | None = None) -> Point | None`. `update` takes the lock point as a lidar-frame point instead of a camera dict.
 
-- [ ] **Step 1:** Copy, adapt the signature, run the copied tests. Expected: the 7 candidate and tracker tests pass.
-- [ ] **Step 2:** Add the Review Focus 2 test and make it pass:
+- [x] **Step 1:** Copy, adapt the signature, run the copied tests. Expected: the 7 candidate and tracker tests pass.
+- [x] **Step 2:** Add the Review Focus 2 test and make it pass:
 
 ```python
 def test_two_people_side_by_side_then_apart_does_not_switch(self):
