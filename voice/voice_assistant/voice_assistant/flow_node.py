@@ -237,7 +237,9 @@ class FlowLogic:
         if s in (PICKING_BAG, DROPPING_BAG, ANNOUNCE_READY):
             return self._say("Please wait a moment.", now)
         if s == FOLLOWING:
-            return self._say("I'm following you right now.", now)
+            if a == "carry_bag" and self.carrying:
+                return self._say("I already have your bag. Say stop, or drop the bag.", now)
+            return self._say("I'm following you. Say stop, or drop the bag.", now)
         return []
 
 
