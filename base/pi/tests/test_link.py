@@ -9,7 +9,8 @@ import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "jetson"))  # for server.py
+for jetson_dir in ("..", "jetson"), ("..", "..", "jetson"):  # for server.py: ../jetson on the Pi, ../../jetson on the laptop
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), *jetson_dir))
 
 import link  # noqa: E402
 import server  # noqa: E402
