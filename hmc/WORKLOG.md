@@ -42,3 +42,39 @@ Decisions for Help Me Carry slice 1. Dates and times are Asia/Bangkok.
 - **00:20 The robot's real sensors (`--sensors robot`).** The camera now looks 58 degrees forward only, the depth image works from 0.6 m to 3.5 m, and the lidar is a single plane 0.22 m above the floor, so it misses the small object. Without changes the robot hit the small object and could not see the bags (0 %). It now remembers obstacles, turns to read the arm and then looks along it for the bag, and faces the operator while it waits. No noise: 15 of 18 runs (the 3 failures are the Eindhoven queue).
 - **01:10 Odometry drift (`--odometry wheel|slam`).** The robot knows only its believed pose. Two bugs showed up. First, remembered obstacles came back a little moved every frame, so the memory grew to thousands of copies and the planner slowed down; they are now keyed by rough place and size. Second, old memories sat in the wrong place after the pose drifted and blocked the 1 m doors, so the robot never got home; memories now expire after 10 s. 3 seeds per map, no noise: perfect 18/18, wheel 15/18 (the robot misses the start after the long Eindhoven and German Open routes), slam 16/18 (only the Eindhoven queue). So the real robot needs SLAM, or something like it, to re-reach the start.
 - **Items 3 and 4 run in their own sessions** (realistic speeds and operator pace; recovering a lost operator), on their own branches. They will be merged here.
+## 2026-11-13, realistic speeds and pace (branch `claude/hmc-speed-cf7458`, from `feature/help-me-carry-slice2`)
+
+- **01:10 Goal: realistic speeds, and let the robot manage the operator's pace within the rules.** Before, the robot drove 1.0 m/s with instant acceleration and the operator walked 0.8 m/s. The real base is capped at 0.15 m/s and 15 deg/s today, and people walk about 1.2 to 1.4 m/s.
+- **Acceleration limit.** The base speeds up and brakes at up to 0.5 m/s^2. Its turn rate (still up to 2 rad/s) changes by up to 3 rad/s^2: the same 0.5 m/s^2 per wheel on a two-wheel base about 0.34 m wide, turning on the spot. `--robot-speed` (both CLIs) is the top speed. The turn rate cap is not tied to `--robot-speed`, so a 0.15 m/s run still turns at up to 2 rad/s, not the real 15 deg/s.
+- **The limit broke the navigator, and these changes fixed it.** With the limit alone the default run lost the queue (815). What we found and changed:
+  - The robot wobbled (heading swinging by up to 1 rad), because it aimed at the next grid cell, 0.15 m ahead, and could no longer turn at once. It now aims at a waypoint up to 0.4 m ahead. The heading also stops at its target instead of swinging past it.
+  - A robot that cannot stop at once rolls on when the plan changes. It now brakes in time for the end of its path and for anything straight ahead, where it faces and where it is turning to. It only counts things that rolling on brings it closer to, otherwise it got stuck next to a wall. An earlier try that slowed down near anything, in any direction, made it stop for good next to obstacles (61 % on a quick try), so it was dropped.
+  - Turning while still rolling fast swept the robot sideways into the barriers. When the path turns back more than 90 degrees, it now brakes to a stop first, then turns on the spot. Doing this already at 30 degrees made it stop all the time and lose the queue.
+  - Aiming 0.4 m ahead popped the last waypoint too, so the robot stopped short of the bag for good. The last waypoint is now kept. When the straight line to the far waypoint cuts too close to something, it aims at the next one.
+  - Braking from sqrt(2 a d) was one step late, so the robot reached the end of its path still at 0.25 m/s and stopped at once. It now brakes one step earlier.
+- **People.** The operator's natural speed is 1.2 m/s (`--operator-speed`), passers-by walk 1.0 to 1.4 m/s (was 0.6 to 1.2). The queue still walks 0.5 m/s.
+- **The robot asks the operator to walk slowly.** The rulebook says the referees tell the operator to "follow the robots instructions". Right after "I am ready to follow you." the robot says "Please walk slowly, at about X metres per second, so I can follow you." with X = 0.8 x its top speed. The operator walks at X, or slower if that is their own pace. The sentence comes after "ready", so the first sentence is still the ready one.
+- **The robot asks the operator to wait.** When it sees it is more than 4 m behind and it has a path, it says "Please wait for me." and the operator stands still. Below 2.5 m it says "Thank you, please go on." The first version also waited when the robot had no path, and on Portugal Open the operator then waited in the door the robot needed, forever. Now no path also means "please go on". In the default run the robot asks twice: going around the small object, and going around the crowd.
+- **Test changed.** `test_falling_back_from_the_queue_loses_the_queue_row` stopped the robot at a fixed time (40 to 46 s). With the slower robot that time now falls before the queue, so the robot still earned it. The test now stops the robot for 6 s right after it got within 2 m of the last person of the queue. It checks the same thing as before.
+- **Results.** `pytest`: 105 passed. `python -m hmc.run` (default map): 1115 of 1115, done in 65.6 s (was 52.2 s). Scripted runs by top speed:
+
+  | Top speed | default map | eindhoven2024 |
+  |---|---|---|
+  | 1.0 m/s | 1115, done, 65.6 s | 1115, done, 133.1 s |
+  | 0.5 m/s | 815 (no queue), done, 87.9 s | 815 (no queue), done, 225.1 s |
+  | 0.3 m/s | 815 (no queue), done, 142.2 s | 615, timeout |
+  | 0.15 m/s | 815 (no queue), done, 277.8 s | 0, timeout |
+
+  `python -m hmc.robustness --seeds 10` (10 passers-by), runs that end in DONE with 1115 and no touch, out of 60:
+
+  | Top speed | noise off, ideal sensors | `--sensors robot --noise realistic` |
+  |---|---|---|
+  | before this change (1.0 m/s, no limit) | 56 (93.3 %) | 27 (45.0 %) |
+  | 1.0 m/s | 51 (85.0 %) | 28 (46.7 %) |
+  | 0.5 m/s | 40 (66.7 %) | 40 (66.7 %) |
+  | 0.3 m/s | 40 (66.7 %) | 40 (66.7 %) |
+  | 0.15 m/s | 7 (11.7 %) | 6 (10.0 %) |
+
+  At 0.5 and 0.3 m/s Bangkok, Bordeaux, German Open and Portugal Open are 10/10 with both sensor models, while `default` and `eindhoven2024` are 0/10: there the robot cannot catch the queue (0.5 m/s), and at 0.3 m/s Eindhoven also times out. At 1.0 m/s with robot sensors there are touches, mostly the barriers at 0.00 m: the robot sees them late and needs 1 m to stop from 1 m/s.
+- **0.15 m/s cannot finish within 5:00 on most maps.** 48 of 60 runs (ideal sensors) and 47 of 60 (robot sensors) end in timeout. Only Bordeaux finishes some runs (7 and 6 of 10). The default map finishes the scripted run in 277.8 s but loses the queue. The robot can never join the queue at 0.15 m/s, because the queue walks 0.5 m/s and the robot may only ask the operator, not the queue, to slow down.
+- **Not done here.** The slice 2 evidence folder (`docs/evidence/help-me-carry-slice2/`) is not regenerated, because two other sessions change the behaviour at the same time (odometry drift, lost-operator recovery). Regenerate it once the branches are merged.

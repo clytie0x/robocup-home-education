@@ -39,6 +39,10 @@ SAME_PERSON = 0.8  # two looks this similar are taken to be the same person
 LOST_TAIL_WAIT = 3.0  # seconds
 # The queue walks on past the start, so we leave it this close to the start.
 LEAVE_QUEUE_NEAR_START = 2.0  # metres
+# Pace. We ask the operator to walk a bit slower than we can drive, so we keep up.
+PACE_SHARE = 0.8  # the pace we ask for, as a share of our top speed
+WAIT_GAP = 4.0  # metres; further behind than this, we ask the operator to wait
+GO_ON_GAP = 2.5  # metres; once we are this close again, we ask them to go on
 
 
 class State(Enum):
@@ -95,6 +99,7 @@ class Task:
         # blind closer than 0.6 m, so a low object we pass would vanish without this.
         self.obstacle_memory: dict = {}  # rough place and size -> (time, shape)
         self.bag_tracker = perception.MotionTracker()
+        self.asked_to_wait = False
 
     @property
     def finished(self) -> bool:
@@ -137,6 +142,8 @@ class Task:
 
     def _announce_ready(self, dt: float) -> None:
         self.speech.say(self.world.time, hri.READY_TEXT)
+        pace = PACE_SHARE * self.world.robot.max_speed
+        self.speech.say(self.world.time, hri.walk_slowly_text(pace))
         self._go(State.FOLLOW)
 
     def _watch_operator(self) -> Point | None:
@@ -176,6 +183,17 @@ class Task:
         if near:
             # Waiting behind the operator: face them, so the camera keeps them in view.
             self.body.turn_toward(self.last_operator_pos, dt)
+
+        # Too far behind (a detour around the crowd): ask the operator to wait for us.
+        # Without a path (the operator stands in a door we need) they must go on instead.
+        gap = distance(self.world.robot.pos, self.last_operator_pos)
+        has_path = bool(self.navigator.path)
+        if not self.asked_to_wait and gap > WAIT_GAP and has_path:
+            self.speech.say(self.world.time, hri.WAIT_TEXT)
+            self.asked_to_wait = True
+        elif self.asked_to_wait and (gap < GO_ON_GAP or not has_path):
+            self.speech.say(self.world.time, hri.GO_ON_TEXT)
+            self.asked_to_wait = False
 
         # Arrived at the car when the operator stands still and points.
         close = operator is not None and (

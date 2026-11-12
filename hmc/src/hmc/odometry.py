@@ -121,13 +121,31 @@ class RobotView:
         robot = self.world.robot
         return robot.heading if self._odo is None else self._odo.belief[2]
 
+    @property
+    def x(self) -> float:
+        return self.pos[0]
+
+    @property
+    def y(self) -> float:
+        return self.pos[1]
+
+    @property
+    def max_speed(self) -> float:
+        return self.world.robot.max_speed
+
+    @property
+    def speed(self) -> float:
+        """How fast the wheels drive now (the robot knows this from its motors)."""
+        return self.world.robot.speed
+
     def _true(self, p: Point) -> Point:
         return p if self._odo is None else self._odo.to_true(p, self.world.robot)
 
-    def drive_toward(
-        self, target: Point, dt: float, stop_distance: float = 0.0
-    ) -> None:
-        self.world.robot.drive_toward(self._true(target), dt, stop_distance)
+    def drive_toward(self, target: Point, dt: float, **options) -> None:
+        self.world.robot.drive_toward(self._true(target), dt, **options)
+
+    def brake(self, dt: float) -> None:
+        self.world.robot.brake(dt)
 
     def turn_toward(self, target: Point, dt: float) -> float:
         return self.world.robot.turn_toward(self._true(target), dt)
