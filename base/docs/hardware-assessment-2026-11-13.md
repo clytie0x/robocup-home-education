@@ -91,3 +91,37 @@ Recorded here because none of it is in git.
   `--keep-going`, `--no-recall` and ignores a second Ctrl+C while stopping
   (original: `main.py.before-keep-going-20261113`). 111 unit tests pass.
 - 205 unused items moved from `~` to `~/archive-xohm-20261113/` (6.88 GB, nothing deleted).
+
+## Task 3: sensor geometry, measured 2026-11-13 (wheels off)
+
+The owner was at the robot. Camera stand hinge and base fixed firmly (owner). Camera on
+the bottom deck, tilted up, in its present position; the owner may move it later, and
+after any change to the mount the pitch must be measured again
+(`tools/sensor_check.py --wall` or `--object H`) before the depth layer is trusted.
+
+| Item | Value | Source |
+|---|---|---|
+| Camera lens to turning centre, x | 0.205 m (20 to 21 cm) | Owner, tape |
+| Camera lens sideways, y | 0.045 m to the robot's left (lens pair 4 to 5 cm left of the Xtion stand, which is on the centre line) | Owner, tape |
+| Camera lens height | 0.07 m | Owner, tape. Not cross-checked: the floor fit failed (below) |
+| Robot height | 0.24 m, floor to the real top | Owner, tape, confirmed as the highest point |
+| Depth stream | 320 x 240, 74.8 % of pixels valid in this room; rows 196 to 239 are zero in every frame | Measured |
+| Camera pitch | **Not measured to the required precision.** Estimates from this room range from 11 to 17 degrees up: two near vertical surfaces 12.0 and 12.7, a 23 cm bottle top at 1.5 m about 14, the wall at 3.7 m 14.5 to 17 (`--wall`: median 15.76, spread 15.12 to 16.65, inlier share 0.10, warns "do not trust"). The far wall is quantised in about 4 cm depth steps. `camera_pitch_deg` stays null, so the depth layer stays off | Measured, inconclusive |
+| Floor fit | Failed: about 300 floor pixels per frame (needs about 1000). With the camera tilted up, almost no floor is in view | Measured |
+| LiDAR front | The robot's own four posts: front pair at +109.24 and -112.88 degrees, rear pair at +144.58 and -147.33 degrees (49 scans). If the posts are symmetric about the drive axis, the true front lies 1.6 degrees right of the present front, so `lidar_front_deg` would be about 180.3. The two-bottle check of 2026-11-07 put it 0.4 degrees the other way. Not resolved; `lidar_front_deg` stays 178.7 | Measured, inconclusive |
+| LiDAR and a 23 cm bottle | The LiDAR at 0.22 m does not see a 23 cm bottle at 1.5 m. Objects for checks must be taller than about 0.35 m and opaque | Measured |
+| Mirror | Image right is the robot's left; an object 15 to 25 degrees left at 1.4 to 1.75 m appears on the image's right half in both colour and depth | Measured |
+
+What closes the two open values: a flat vertical board about 1.2 to 1.5 m in front of the
+lens (pitch, `--wall`), and an opaque object taller than 0.35 m 1.5 m straight ahead on a
+floor-tile line through the middle of the robot (LiDAR front, `--yaw`). About five minutes
+with the owner.
+
+Power (owner, 2026-11-13): one power bank, 145 W, 25,000 mAh, feeds everything on the
+robot, Pi and motors. The Jetson stays off the robot until more parts arrive, because the
+power is probably not enough; until then the Jetson link is Wi-Fi only.
+
+Design risk (to decide with the owner once the pitch is known): with the lens 7 cm above
+the floor and about 45 degrees of vertical view, a level camera sees a person only up to
+about 0.9 m at 2 m range and 1.3 m at 3 m. Re-identification needs the torso. The owner
+chose the bottom deck, tilted up, for now.

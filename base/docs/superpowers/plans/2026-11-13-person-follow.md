@@ -215,9 +215,9 @@ def test_base_and_odom_frames_round_trip(self):
   - `camera.Camera()`: `.start()`, `.latest() -> Frame | None` (newest, at most once each), `.error`, `.stop()`. The OpenNI2 ctypes capture is taken from `~/pi-drive/person.py:_capture_color_and_depth`, with the depth buffer read by `numpy.frombuffer` instead of `struct.unpack`.
   - `sensor_check.fit_floor(depth, hfov_deg) -> (camera_height, pitch_deg, inlier_share)`.
 
-- [ ] **Step 1:** Failing test: a synthetic depth image of a flat floor seen from 0.20 m with 8° of down pitch gives `fit_floor` within 1 cm and 0.5°. Implement with a RANSAC plane fit on the lower half of the image, pass.
-- [ ] **Step 2:** `sensor_check.py --floor`: 30 frames on an empty floor, median height and pitch, inlier share. `sensor_check.py --yaw`: the owner puts a bottle 1.5 m straight ahead on a floor-tile line that runs through the middle of the robot; report the bottle's bearing in the scan (its centre from `legs.clusters`) and in the image (darkest-depth blob centre). The scan bearing error is the correction to `lidar_front_deg`; the image bearing must then agree within 2°.
-- [ ] **Step 3 (owner at the robot, wheels off):** Run both. The owner measures with a tape: camera lens to the turning centre along x (`camera_x`), robot height to its highest point (`robot_height`), and the battery voltage and type for the assessment.
+- [x] **Step 1:** Failing test: a synthetic depth image of a flat floor seen from 0.20 m with 8° of down pitch gives `fit_floor` within 1 cm and 0.5°. Implement with a RANSAC plane fit on the lower half of the image, pass.
+- [x] **Step 2:** `sensor_check.py --floor`: 30 frames on an empty floor, median height and pitch, inlier share. `sensor_check.py --yaw`: the owner puts a bottle 1.5 m straight ahead on a floor-tile line that runs through the middle of the robot; report the bottle's bearing in the scan (its centre from `legs.clusters`) and in the image (darkest-depth blob centre). The scan bearing error is the correction to `lidar_front_deg`; the image bearing must then agree within 2°.
+- [x] **Step 3 (owner at the robot, wheels off):** Run both. The owner measures with a tape: camera lens to the turning centre along x (`camera_x`), robot height to its highest point (`robot_height`), and the battery voltage and type for the assessment.
 - [ ] **Step 4:** Fill `camera_x`, `camera_height`, `camera_pitch_deg`, `robot_height`, `lidar_front_deg` in `base/params.json`. Record the numbers in the hardware assessment. Commit.
 
 ### Task 4: One brain: extract `Follower` in `hmc`
