@@ -157,11 +157,14 @@ class LinkTests(unittest.TestCase):
         good = framed({"seq": 2, "t": 9.0, "people": []})
         port = raw_server([framed({"seq": 1}), good], stop)
         jl = self.make_link(port)
+        errors = set()  # .error is overwritten by later problems, so note each value as it appears
+
         def got_answer():
+            errors.add(jl.error)
             jl.send(make_frame(9.0))
             return jl.latest() is not None
         self.assertTrue(wait_for(got_answer, 5.0))
-        self.assertIn("KeyError", jl.error)
+        self.assertTrue(any(e and "KeyError" in e for e in errors), errors)
 
     def test_oversized_reply_length_drops_the_connection(self):
         stop = threading.Event()
