@@ -382,7 +382,7 @@ def test_sync_keeps_speed_and_takes_the_measured_pose(self): ...
   - `link.JetsonLink(host, port, hfov_deg)`: `.start()`, `.send(frame)` (never blocks; replaces a frame still waiting), `.latest() -> Answer | None` (each answer once), `.alive(now, silence) -> bool`, `.stop()`. Reconnects by itself every 1 s.
   - `server.py --fake` answers every frame with one person in the middle and a fixed look, for tests.
 
-- [ ] **Step 1:** Failing tests, against a server thread on `127.0.0.1`:
+- [x] **Step 1:** Failing tests, against a server thread on `127.0.0.1`:
 
 ```python
 def test_round_trip_keeps_the_capture_time(self): ...
@@ -394,7 +394,7 @@ def test_bearing_sign_image_right_is_robot_left(self):
 def test_send_never_blocks_without_a_server(self): ...   # 100 sends in under 0.1 s
 ```
 
-- [ ] **Step 2:** Implement, run, pass.
+- [x] **Step 2:** Implement, run, pass.
 - [ ] **Step 3:** Deploy. Run `server.py --fake` on the Jetson and a 60 s stream from the Pi camera. Report frames sent per second, answers per second, and round-trip time median and 95th percentile over Wi-Fi. Commit.
 
 ### Task 9: Fusion into `Senses`
