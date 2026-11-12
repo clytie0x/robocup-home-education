@@ -17,5 +17,5 @@ Not attending                                         -500        0  not-run
 Using alternative start signal                        -100        0  not-run
 Outstanding performance                                111        0  not-run
 TOTAL (max 1115 without special rows): 1115
-Sim time: 61.3 s
+Sim time: 61.8 s
 End state: done

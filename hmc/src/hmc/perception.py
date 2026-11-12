@@ -15,47 +15,113 @@ class Ray(NamedTuple):
     angle: float  # radians
 
 
-def _blocks(box, a: Point, b: Point) -> bool:
-    """True if the straight line from a to b passes through the box (slab method)."""
-    t_in, t_out = 0.0, 1.0
-    for start, delta, low, high in (
-        (a[0], b[0] - a[0], box.x_min, box.x_max),
-        (a[1], b[1] - a[1], box.y_min, box.y_max),
-    ):
-        if abs(delta) < 1e-12:
-            if not low <= start <= high:
-                return False
-            continue
-        t1, t2 = (low - start) / delta, (high - start) / delta
-        t_in, t_out = max(t_in, min(t1, t2)), min(t_out, max(t1, t2))
-        if t_in > t_out:
-            return False
-    return True
-
-
 def can_see(world: World, p: Point) -> bool:
     """In sensor range, and no wall in between. Only walls block the view."""
     if distance(world.robot.pos, p) > SENSOR_RANGE:
         return False
     return not any(
-        _blocks(o.shape, world.robot.pos, p)
-        for o in world.obstacles
-        if o.kind == "wall"
+        o.shape.blocks(world.robot.pos, p) for o in world.obstacles if o.kind == "wall"
     )
+
+
+def _frame(world: World) -> dict:
+    """What the sensors report in this time step: operator, people, bags, pointing.
+
+    Without noise this is the truth. With noise (see noise.py) it is computed once per
+    time step, so every function below sees the same, slightly wrong, picture.
+    """
+    noise = world.noise
+    if noise is not None and noise.frame_time == world.time:
+        return noise.frame
+    robot = world.robot.pos
+    op = world.operator
+    operator = op.pos if can_see(world, op.pos) else None
+    everyone = list(world.people) + list(world.bystanders)
+    visible = {p.id: p for p in everyone if can_see(world, p.pos)}
+    people = {pid: p.pos for pid, p in visible.items()}
+    looks = {pid: getattr(p, "look", None) for pid, p in visible.items()}
+    operator_look = getattr(op, "look", None) if operator is not None else None
+    bags = {n: b.pos for n, b in world.bags.items() if can_see(world, b.pos)}
+    ray = world.pointing_ray() if operator is not None else None
+    if noise is None:
+        return {
+            "operator": operator, "operator_look": operator_look, "people": people,
+            "looks": looks, "bags": bags, "ray": ray,
+        }  # fmt: skip
+
+    # Tracker id swaps between two people passing close to each other. They stay.
+    for pid in people:
+        noise.ids.setdefault(pid, pid)
+    close = sorted(people)
+    for i, a in enumerate(close):
+        for b in close[i + 1 :]:
+            near = distance(people[a], people[b]) <= noise.swap_radius
+            if near and noise.rng.random() < noise.swap_rate:
+                noise.ids[a], noise.ids[b] = noise.ids[b], noise.ids[a]
+
+    def seen_look(look):
+        if look is None:
+            return None
+        return tuple(v + noise.rng.gauss(0.0, noise.look_sigma) for v in look)
+
+    seen_people, seen_looks = {}, {}
+    for pid, pos in people.items():
+        if not noise.missed(distance(robot, pos)):
+            seen_people[noise.ids[pid]] = noise.jitter(pos, noise.position_sigma)
+            # The look belongs to the real person, even when the tracker id was swapped.
+            seen_looks[noise.ids[pid]] = seen_look(looks[pid])
+    if operator is not None:
+        others = [
+            p
+            for p in visible.values()
+            if distance(p.pos, operator) <= noise.confuse_radius
+        ]
+        if others and noise.rng.random() < noise.confuse_rate:
+            # Someone else is taken for the operator this frame. Their look comes too.
+            operator, operator_look = others[0].pos, getattr(others[0], "look", None)
+        if noise.missed(distance(robot, operator)):
+            operator, operator_look = None, None
+        else:
+            operator = noise.jitter(operator, noise.position_sigma)
+            operator_look = seen_look(operator_look)
+    seen_bags = {
+        n: noise.jitter(pos, noise.bag_sigma)
+        for n, pos in bags.items()
+        if not noise.missed(distance(robot, pos))
+    }
+    if ray is not None and operator is not None:
+        ray = (
+            ray[0],
+            ray[1] + math.radians(noise.rng.gauss(0.0, noise.pointing_sigma_deg)),
+        )
+    else:
+        ray = None
+    noise.frame_time = world.time
+    noise.frame = {
+        "operator": operator, "operator_look": operator_look, "people": seen_people,
+        "looks": seen_looks, "bags": seen_bags, "ray": ray,
+    }  # fmt: skip
+    return noise.frame
 
 
 def see_operator(world: World) -> Point | None:
     """Operator position, or None when we cannot see them."""
-    if not can_see(world, world.operator.pos):
-        return None
-    return world.operator.pos
+    return _frame(world)["operator"]
+
+
+def see_operator_look(world: World):
+    """The look (re-ID vector) of whoever is reported as the operator, or None."""
+    return _frame(world)["operator_look"]
+
+
+def see_looks(world: World) -> dict:
+    """The look (re-ID vector) of every person in see_people, by tracker id."""
+    return dict(_frame(world)["looks"])
 
 
 def see_bags(world: World) -> dict[str, Point]:
-    """Positions of the bags inside sensor range, by name."""
-    return {
-        name: bag.pos for name, bag in world.bags.items() if can_see(world, bag.pos)
-    }
+    """Positions of the bags we can see, by name."""
+    return dict(_frame(world)["bags"])
 
 
 def see_obstacles(world: World) -> list[Shape]:
@@ -69,17 +135,16 @@ def see_obstacles(world: World) -> list[Shape]:
 
 
 def see_people(world: World) -> dict[int, Point]:
-    """Positions of the other people (not the operator) in range, by tracker id."""
-    return {
-        person.id: person.pos for person in world.people if can_see(world, person.pos)
-    }
+    """Positions of the other people (not the operator) we can see, by tracker id.
+
+    The crowd, the queue and the passers-by all look the same to the robot.
+    """
+    return dict(_frame(world)["people"])
 
 
 def see_pointing(world: World) -> Ray | None:
     """The pointing ray, only if we can see the operator."""
-    if see_operator(world) is None:
-        return None
-    ray = world.pointing_ray()
+    ray = _frame(world)["ray"]
     return Ray(*ray) if ray else None
 
 
@@ -95,11 +160,16 @@ def choose_pointed_bag(ray: Ray, bags: dict[str, Point]) -> str | None:
 
 
 class MotionTracker:
-    """Remembers recent positions so we can tell when a person stood still."""
+    """Remembers recent positions of one person (or bag) and smooths out the noise.
 
-    def __init__(self, window: float = 2.0, tolerance: float = 0.1):
-        self.window = window
-        self.tolerance = tolerance
+    Every answer uses averages over SMOOTH seconds, never a single noisy sample.
+    """
+
+    SMOOTH = 0.5  # seconds averaged for "where is it now" and "where was it then"
+
+    def __init__(self, window: float = 2.0, tolerance: float = 0.2):
+        self.window = window  # seconds of history we keep
+        self.tolerance = tolerance  # metres; moving less than this is standing still
         self._samples: deque[tuple[float, Point]] = deque()
 
     def update(self, time: float, pos: Point) -> None:
@@ -107,31 +177,50 @@ class MotionTracker:
         while self._samples and time - self._samples[0][0] > self.window + 1e-9:
             self._samples.popleft()
 
-    def has_moved(self, min_distance: float = 0.3) -> bool:
-        """True when the person moved at least min_distance inside the window."""
-        if len(self._samples) < 2:
-            return False
-        return distance(self._samples[0][1], self._samples[-1][1]) >= min_distance
+    @property
+    def seen(self) -> bool:
+        return bool(self._samples)
+
+    @property
+    def last_time(self) -> float:
+        """When we last saw it."""
+        return self._samples[-1][0]
+
+    def _mean(self, samples) -> Point:
+        return (
+            sum(p[0] for _, p in samples) / len(samples),
+            sum(p[1] for _, p in samples) / len(samples),
+        )
 
     def last(self) -> Point:
-        """The last position we saw."""
-        return self._samples[-1][1]
+        """Where it is now: the average of the last SMOOTH seconds."""
+        end = self._samples[-1][0]
+        return self._mean([s for s in self._samples if s[0] >= end - self.SMOOTH])
+
+    def _first(self) -> Point:
+        """Where it was at the start of the window: the average of the first samples."""
+        begin = self._samples[0][0]
+        return self._mean([s for s in self._samples if s[0] <= begin + self.SMOOTH])
+
+    def _covered(self) -> float:
+        return self._samples[-1][0] - self._samples[0][0] if self._samples else 0.0
+
+    def has_moved(self, min_distance: float = 0.3) -> bool:
+        """True when it moved at least min_distance inside the window."""
+        if self._covered() < 2 * self.SMOOTH:
+            return False
+        return distance(self._first(), self.last()) >= min_distance
 
     def direction(self) -> Point | None:
         """Unit vector of the walking direction inside the window, or None if standing."""
         if not self.has_moved():
             return None
-        (x0, y0), (x1, y1) = self._samples[0][1], self._samples[-1][1]
+        (x0, y0), (x1, y1) = self._first(), self.last()
         length = math.hypot(x1 - x0, y1 - y0)
         return ((x1 - x0) / length, (y1 - y0) / length)
 
     def is_stationary(self) -> bool:
-        if len(self._samples) < 2:
-            return False
-        first_time, first_pos = self._samples[0]
-        last_time, last_pos = self._samples[-1]
-        if last_time - first_time < self.window - 1e-9:
-            return False  # not enough history yet
-        return all(
-            distance(first_pos, pos) <= self.tolerance for _, pos in self._samples
-        )
+        """True when it stood still for the whole window."""
+        if self._covered() < self.window - 0.2 - 1e-9:
+            return False  # not enough history yet (a few frames may be missed)
+        return distance(self._first(), self.last()) <= self.tolerance

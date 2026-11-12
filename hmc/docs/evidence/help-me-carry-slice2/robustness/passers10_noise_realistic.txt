@@ -1,0 +1,27 @@
+map                  ok / 20   (10 passers-by, noise realistic)
+default              18 / 20
+bangkok2022          18 / 20
+bordeaux2023         20 / 20
+eindhoven2024         8 / 20
+germanopen2024       19 / 20
+portugalopen2024     18 / 20
+all                 101 / 120  (84.2 %)
+  failed: default seed 9: lost queue
+  failed: default seed 16: lost queue
+  failed: bangkok2022 seed 3: lost queue
+  failed: bangkok2022 seed 7: lost queue
+  failed: eindhoven2024 seed 0: lost queue
+  failed: eindhoven2024 seed 4: lost queue
+  failed: eindhoven2024 seed 5: lost queue
+  failed: eindhoven2024 seed 6: lost queue
+  failed: eindhoven2024 seed 7: lost queue
+  failed: eindhoven2024 seed 8: lost queue
+  failed: eindhoven2024 seed 9: lost queue
+  failed: eindhoven2024 seed 11: lost queue
+  failed: eindhoven2024 seed 12: lost queue
+  failed: eindhoven2024 seed 14: lost queue
+  failed: eindhoven2024 seed 17: lost queue
+  failed: eindhoven2024 seed 18: lost queue
+  failed: germanopen2024 seed 1: lost queue
+  failed: portugalopen2024 seed 6: lost queue, touched something (0.23 m)
+  failed: portugalopen2024 seed 19: lost queue

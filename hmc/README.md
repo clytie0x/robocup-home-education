@@ -61,6 +61,17 @@ The robot is never given a map. It plans only from what it can see, and walls bl
 | `timeline.csv` | one row every 0.5 s and one per event |
 | `trajectory.png` | the paths of the robot and the operator, the obstacles and the crowd |
 
+## Harder runs
+
+The rulebook allows other people to walk around during the whole test, and real sensors make mistakes. Try:
+
+```bash
+python -m hmc.run --map eindhoven2024 --bystanders 10 --noise realistic --seed 3
+python -m hmc.robustness --seeds 20 --bystanders 10 --noise realistic
+```
+
+`--bystanders N` adds N passers-by. `--noise off|realistic|hard` adds sensor noise. `--seed` changes both. `hmc.robustness` runs every map with seeds 0 to N-1 and prints how many runs ended in DONE with all 1115 points, without touching anything.
+
 ## Folder map
 
 | Path | What |
@@ -74,6 +85,10 @@ The robot is never given a map. It plans only from what it can see, and walls bl
 | `src/hmc/scoresheet.py` | The scoresheet and the referee that fills it in |
 | `src/hmc/plotting.py` | Draws `trajectory.png` |
 | `src/hmc/maps.py` | The scenario maps you can pick with `--map` |
+| `src/hmc/bystanders.py` | Passers-by who walk around outside (`--bystanders N`) |
+| `src/hmc/noise.py` | Sensor noise: misses, position error, id swaps (`--noise`) |
+| `src/hmc/appearance.py` | Looks for re-identification (re-ID) of people |
+| `src/hmc/robustness.py` | Runs every map many times and counts the successes |
 | `src/hmc/run.py` | The scripted scenario CLI |
 | `tests/` | pytest tests |
 | `docs/tasks/5.1-help-me-carry.md` | The task spec, the scoresheet and the acceptance tests |
@@ -88,7 +103,8 @@ The robot is never given a map. It plans only from what it can see, and walls bl
 - The scripted run scores **1115 of 1115** on all six maps, for each of the three bags. That is every main and bonus row. The world, the obstacles and the referee are all our own code, so this shows the logic works in our scenario. It does not show that the real robot can do the task.
 - Deus ex Machina, the alternative start signal, restarts and the three tries are not simulated. Not attending and outstanding performance are referee decisions.
 - The robot drives at up to 1.0 m/s in the simulation. The real base is limited to 0.15 m/s, which is too slow to follow a person walking at 0.8 m/s.
-- Perception is perfect and comes straight from the world, except that walls block the view. There is no camera, lidar or noise.
+- By default perception is perfect, except that walls block the view. `--noise realistic` or `--noise hard` adds misses, position errors, pointing errors, tracker id swaps and wrong operator detections. The noise levels are our guess, not measurements from a real camera or lidar.
+- Re-identification is simulated with a random "look" per person. A real robot needs a re-ID model for this, and real people can look much more alike.
 - The walls of the official maps are traced by eye, and most furniture is left out.
 - Picking a bag only sets a flag. There is no arm and no grasp.
 - The operator follows one fixed route, so a passing test does not show that the robot can do the real task.

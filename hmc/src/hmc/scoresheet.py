@@ -8,7 +8,7 @@ MAIN, BONUS, PENALTY, DEM, SPECIAL = "main", "bonus", "penalty", "deus_ex", "spe
 
 DEM_CAP = -250  # "Penalties can be applied multiple times up to a total of 250 points"
 START_RADIUS = 1.0  # metres, robot counts as "at the start" inside this
-FACED = 1.0  # metres; an obstacle this close to the robot counts as "faced"
+FACED = 1.5  # metres; an obstacle this close to the robot counts as "faced"
 QUEUE_JOIN = 2.0  # metres behind the last person to count as "joined"
 QUEUE_STAY = 3.0  # metres; further behind than this and the robot has left the queue
 QUEUE_END_NEAR_START = 2.0  # metres; the queue part of the way back ends here
@@ -113,18 +113,20 @@ class Referee:
         bag = world.bags[target]
         robot = world.robot.pos
 
-        at_car_before = self.sheet.counts.get("follow_to_car", 0) > 0
-        if not at_car_before:
+        picked_before = self.sheet.counts.get("pick_bag", 0) > 0
+        if not picked_before:
             self._watch_obstacles(world)
         self._once("follow_to_car", distance(robot, world.car) <= CAR_RADIUS)
-        if not at_car_before and self.sheet.counts.get("follow_to_car", 0) > 0:
-            # The obstacles are on the way to the car, so they are judged on arrival.
-            for kind in sorted(self.faced - self.touched):
-                if kind in AVOID_ROW:  # walls and tables have no row of their own
-                    self.sheet.award(AVOID_ROW[kind])
         self._watch_queue(world)
         self._once("perceive_bag", perceived_bag == target)
         self._once("pick_bag", bag.state == "carried")
+        if not picked_before and self.sheet.counts.get("pick_bag", 0) > 0:
+            # The obstacles are on the way out. The way out ends when the bag is picked
+            # (not when the robot is near the car: going around people, it may get near
+            # the car before it passes the last obstacle).
+            for kind in sorted(self.faced - self.touched):
+                if kind in AVOID_ROW:  # walls and tables have no row of their own
+                    self.sheet.award(AVOID_ROW[kind])
 
         # Re-reaching the start only counts after the robot was at the car,
         # and here we also require the target bag to come with it.
@@ -164,7 +166,9 @@ class Referee:
         behind = distance(robot, world.start) > distance(tail.pos, world.start)
         gap = distance(robot, tail.pos)
         if not self.queue_joined:
-            self.queue_joined = behind and gap <= QUEUE_JOIN
+            # Joining counts only on the way back, so with the bag.
+            carrying = world.carried_bag() is not None
+            self.queue_joined = carrying and behind and gap <= QUEUE_JOIN
             return
         # The queue part ends when the robot or the last person has reached the start
         # area, or when the last person has walked to the end of their route.

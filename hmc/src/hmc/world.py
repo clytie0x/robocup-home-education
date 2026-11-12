@@ -20,6 +20,8 @@ CAR_RADIUS = 3.0  # metres, the robot counts as "at the car" inside this
 QUEUE_DELAY = 2.0  # seconds
 # Time between two people starting to walk, so they form a line.
 QUEUE_SPACING = 2.0  # seconds
+# A person in the queue does not walk closer than this to the robot (centre to centre).
+KEEP_FROM_ROBOT = ROBOT_RADIUS + PERSON_RADIUS + 0.3
 # While the heading is off by more than this, turn on the spot without driving.
 TURN_ON_SPOT = math.radians(30)
 
@@ -62,6 +64,23 @@ class Box:
 
     def bounds(self) -> tuple[float, float, float, float]:
         return (self.x_min, self.y_min, self.x_max, self.y_max)
+
+    def blocks(self, a: Point, b: Point) -> bool:
+        """True if the straight line from a to b passes through the box (slab method)."""
+        t_in, t_out = 0.0, 1.0
+        for start, delta, low, high in (
+            (a[0], b[0] - a[0], self.x_min, self.x_max),
+            (a[1], b[1] - a[1], self.y_min, self.y_max),
+        ):
+            if abs(delta) < 1e-12:
+                if not low <= start <= high:
+                    return False
+                continue
+            t1, t2 = (low - start) / delta, (high - start) / delta
+            t_in, t_out = max(t_in, min(t1, t2)), min(t_out, max(t1, t2))
+            if t_in > t_out:
+                return False
+        return True
 
 
 Shape = Circle | Box
@@ -197,9 +216,17 @@ class Person:
     def pos(self) -> Point:
         return (self.x, self.y)
 
-    def step(self, dt: float) -> None:
-        if self.walking:
-            walk_route(self, dt)
+    def step(self, dt: float, robot: Point) -> None:
+        if not self.walking or not self.route:
+            return
+        # A person in the queue waits rather than walk into the robot in front of them.
+        goal = self.route[0]
+        ahead = (goal[0] - self.x) * (robot[0] - self.x) + (goal[1] - self.y) * (
+            robot[1] - self.y
+        )
+        if ahead > 0 and distance(self.pos, robot) < KEEP_FROM_ROBOT:
+            return
+        walk_route(self, dt)
 
 
 @dataclass
@@ -211,6 +238,8 @@ class World:
     car: Point  # the robot is never told this
     obstacles: list[Obstacle] = field(default_factory=list)
     people: list[Person] = field(default_factory=list)  # the crowd, later the queue
+    bystanders: list = field(default_factory=list)  # passers-by, see bystanders.py
+    noise: object = None  # sensor noise, see noise.py (None = perfect sensors)
     time: float = 0.0
     drop_count: int = 0
     queue_start_time: float | None = None  # set once the robot reaches the car
@@ -244,7 +273,9 @@ class World:
                 and self.time >= self.queue_start_time + i * QUEUE_SPACING
             ):
                 person.walking = True
-            person.step(dt)
+            person.step(dt, self.robot.pos)
+        for bystander in self.bystanders:
+            bystander.step(dt, self)
         bag = self.carried_bag()
         if bag is not None:  # a carried bag moves with the robot
             bag.x, bag.y = self.robot.pos

@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Callable
 
 from hmc import hri, plotting
+from hmc.appearance import give_looks
+from hmc.bystanders import add_bystanders
 from hmc.maps import MAPS
+from hmc.noise import PRESETS, make_noise
 from hmc.scoresheet import MAX_TOTAL, Referee, Scoresheet
 from hmc.task import State, Task
 from hmc.world import DT, World
@@ -35,9 +38,15 @@ def run_scenario(
     robot_speed: float = 1.0,
     on_step: Callable[[World, Task], None] | None = None,
     map_name: str = "default",
+    bystanders: int = 0,
+    seed: int = 0,
+    noise: str = "off",
 ) -> Result:
     """Run the whole scenario. on_step lets tests poke the world (e.g. drop the bag)."""
     world = MAPS[map_name](target_bag=target_bag, robot_speed=robot_speed)
+    add_bystanders(world, bystanders, seed)
+    give_looks(world, seed)
+    world.noise = make_noise(noise, seed)
     speech = hri.Speech()
     task = Task(world, speech)
     sheet = Scoresheet()
@@ -114,11 +123,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--map", default="default", choices=sorted(MAPS), help="scenario map"
     )
+    parser.add_argument("--bystanders", type=int, default=0, help="passers-by outside")
+    parser.add_argument(
+        "--seed", type=int, default=0, help="seed for passers-by and noise"
+    )
+    parser.add_argument(
+        "--noise", default="off", choices=list(PRESETS), help="sensor noise"
+    )
     parser.add_argument("--bag", default="blue", choices=["red", "blue", "green"],
                         help="bag the operator points at")  # fmt: skip
     args = parser.parse_args(argv)
 
-    result = run_scenario(target_bag=args.bag, map_name=args.map)
+    result = run_scenario(
+        target_bag=args.bag,
+        map_name=args.map,
+        bystanders=args.bystanders,
+        seed=args.seed,
+        noise=args.noise,
+    )
     write_outputs(result, Path(args.out))
     print(result.sheet.table())
     print(f"Awarded {result.sheet.total()} of {MAX_TOTAL}")
