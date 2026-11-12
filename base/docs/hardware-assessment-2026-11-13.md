@@ -166,3 +166,11 @@ Top speed without a depth image (owner decision 5): the plan's 0.3 m/s cap is ab
 the base can do, so it never acts; at 0.12 m/s the braking distance (0.295 m) is far inside
 what the LiDAR alone sees ahead. Measured choice, 2026-11-13: no separate no-depth cap is
 needed while `max_speed` is 0.12.
+
+## Task 8: link to the Jetson over Wi-Fi, measured 2026-11-13
+
+`base/jetson/server.py --fake` on the Jetson (192.168.31.137:5601), 60 s stream of real
+Pi camera frames (320 x 240, JPEG) through `link.JetsonLink`: 29.42 frames sent per second,
+29.42 answers per second (1765 answers), round trip median 16.5 ms, 95th percentile
+22.3 ms, no link error. Pi to Jetson ping 1.7 to 4.9 ms. The fake server answers at once,
+so this is the link alone; the detector's time adds to it (Task 11).

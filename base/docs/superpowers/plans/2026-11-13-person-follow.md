@@ -395,7 +395,7 @@ def test_send_never_blocks_without_a_server(self): ...   # 100 sends in under 0.
 ```
 
 - [x] **Step 2:** Implement, run, pass.
-- [ ] **Step 3:** Deploy. Run `server.py --fake` on the Jetson and a 60 s stream from the Pi camera. Report frames sent per second, answers per second, and round-trip time median and 95th percentile over Wi-Fi. Commit.
+- [x] **Step 3:** Deploy. Run `server.py --fake` on the Jetson and a 60 s stream from the Pi camera. Report frames sent per second, answers per second, and round-trip time median and 95th percentile over Wi-Fi. Commit.
 
 ### Task 9: Fusion into `Senses`
 
