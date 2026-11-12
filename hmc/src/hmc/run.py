@@ -41,12 +41,14 @@ def run_scenario(
     bystanders: int = 0,
     seed: int = 0,
     noise: str = "off",
+    sensors: str = "ideal",
 ) -> Result:
     """Run the whole scenario. on_step lets tests poke the world (e.g. drop the bag)."""
     world = MAPS[map_name](target_bag=target_bag, robot_speed=robot_speed)
     add_bystanders(world, bystanders, seed)
     give_looks(world, seed)
     world.noise = make_noise(noise, seed)
+    world.sensors = sensors
     speech = hri.Speech()
     task = Task(world, speech)
     sheet = Scoresheet()
@@ -130,6 +132,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--noise", default="off", choices=list(PRESETS), help="sensor noise"
     )
+    parser.add_argument(
+        "--sensors", default="ideal", choices=["ideal", "robot"], help="sensor model"
+    )
     parser.add_argument("--bag", default="blue", choices=["red", "blue", "green"],
                         help="bag the operator points at")  # fmt: skip
     args = parser.parse_args(argv)
@@ -140,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
         bystanders=args.bystanders,
         seed=args.seed,
         noise=args.noise,
+        sensors=args.sensors,
     )
     write_outputs(result, Path(args.out))
     print(result.sheet.table())

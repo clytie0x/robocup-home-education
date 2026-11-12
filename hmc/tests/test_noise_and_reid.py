@@ -112,3 +112,39 @@ def test_robustness_check_reports_no_problem_for_a_clean_run():
     from hmc.robustness import check
 
     assert check("default", bystanders=0, seed=0) == []
+
+
+# The robot's real sensors (--sensors robot)
+
+
+def test_robot_camera_sees_only_forward():
+    from hmc.sensors import camera_sees
+
+    world = build_world()
+    world.robot.x, world.robot.y, world.robot.heading = 0.0, 0.0, 0.0
+    assert camera_sees(world, (3.0, 0.0))
+    assert not camera_sees(world, (-3.0, 0.0))  # behind
+    assert not camera_sees(world, (0.0, 3.0))  # to the side, outside 58 degrees
+
+
+def test_lidar_does_not_see_the_small_object_and_depth_is_blind_up_close():
+    from hmc.perception import see_obstacles
+
+    world = build_world()
+    world.sensors = "robot"
+    small = next(o for o in world.obstacles if o.kind == "small_object")
+    world.robot.x, world.robot.y, world.robot.heading = (
+        2.5,
+        0.0,
+        0.0,
+    )  # 1.4 m, facing it
+    assert small.shape in see_obstacles(world)
+    world.robot.x = 3.6  # 0.28 m from its edge: too close for the depth image
+    assert small.shape not in see_obstacles(world)
+
+
+def test_every_map_with_robot_sensors_and_no_noise():
+    for map_name in ("default", "bangkok2022", "germanopen2024"):
+        result = run_scenario(map_name=map_name, sensors="robot")
+        assert result.task.state == State.DONE
+        assert result.sheet.total() == 1115

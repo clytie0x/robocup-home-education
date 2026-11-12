@@ -4,6 +4,7 @@ The task never reads the car position. It only knows where it started,
 and what perception tells it.
 """
 
+import math
 from enum import Enum
 
 from hmc import hri, manipulation, navigation, perception
@@ -23,6 +24,8 @@ STAND_STILL = 0.3  # metres; moving less than this is standing in one place
 OPERATOR_JUMP = 0.5  # metres a detection may be off from where we expect the operator
 PERSON_MAX_SPEED = 2.0  # m/s; a detection further than this could walk is someone else
 BAG_VOTES = 5  # frames that must point at the same bag (and 3 more than at any other)
+RAY_FRAMES = 5  # frames of the pointing arm we average before we look for the bag
+LOOK_ALONG_RAY = 2.0  # metres; to find the bag we look at this point along the arm
 REMEMBER_FOR = 1.0  # seconds we still avoid a person the detector missed
 # Re-identification by look (see appearance.py).
 OPERATOR_LEARN = 20  # frames of the operator's look we learn at the start
@@ -82,6 +85,11 @@ class Task:
         self.operator_look = LookMemory()
         self.standing: dict[int, tuple[float, tuple]] = {}  # id: (since when, where)
         self.bag_votes: dict[str, int] = {}
+        self.rays: list = []  # pointing rays seen, averaged into self.pointing
+        self.pointing = None
+        # Obstacles we saw before. The camera looks forward only and the depth image is
+        # blind closer than 0.6 m, so a low object we pass would vanish without this.
+        self.obstacle_memory: set = set()
         self.bag_tracker = perception.MotionTracker()
 
     @property
@@ -175,9 +183,30 @@ class Task:
             self._go(State.PERCEIVE_BAG)
 
     def _perceive_bag(self, dt: float) -> None:
-        ray = perception.see_pointing(self.world)
-        if ray is None:
-            return
+        robot = self.world.robot
+        if self.pointing is None:
+            # First read the arm: face the operator and average a few frames.
+            ray = perception.see_pointing(self.world)
+            if ray is None:
+                robot.turn_toward(self.last_operator_pos, dt)
+                return
+            self.rays.append(ray)
+            if len(self.rays) < RAY_FRAMES:
+                return
+            x = sum(r.origin[0] for r in self.rays) / len(self.rays)
+            y = sum(r.origin[1] for r in self.rays) / len(self.rays)
+            angle = math.atan2(
+                sum(math.sin(r.angle) for r in self.rays),
+                sum(math.cos(r.angle) for r in self.rays),
+            )
+            self.pointing = perception.Ray((x, y), angle)
+        # Then look along the arm to find the bag (the camera looks forward only).
+        ray = self.pointing
+        spot = (
+            ray.origin[0] + LOOK_ALONG_RAY * math.cos(ray.angle),
+            ray.origin[1] + LOOK_ALONG_RAY * math.sin(ray.angle),
+        )
+        robot.turn_toward(spot, dt)
         name = perception.choose_pointed_bag(ray, perception.see_bags(self.world))
         if name is None:
             return  # not clear which bag, look again next step
@@ -262,7 +291,8 @@ class Task:
 
     def _shapes(self) -> list[Shape]:
         """Everything we must not touch: seen obstacles, other people and the operator."""
-        shapes = list(perception.see_obstacles(self.world))
+        self.obstacle_memory.update(perception.see_obstacles(self.world))
+        shapes = list(self.obstacle_memory)
         now = self.world.time
         # People we saw a moment ago are still there, even if this frame missed them.
         trackers = list(self.people_trackers.values())

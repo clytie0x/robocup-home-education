@@ -121,6 +121,14 @@ class Robot:
     def pos(self) -> Point:
         return (self.x, self.y)
 
+    def turn_toward(self, target: Point, dt: float) -> float:
+        """Turn on the spot toward the target. Returns the heading error left."""
+        wanted = math.atan2(target[1] - self.y, target[0] - self.x)
+        error = wrap_angle(wanted - self.heading)
+        turn = max(-self.max_turn_rate * dt, min(self.max_turn_rate * dt, error))
+        self.heading = wrap_angle(self.heading + turn)
+        return error - turn
+
     def drive_toward(
         self, target: Point, dt: float, stop_distance: float = 0.0
     ) -> None:
@@ -240,6 +248,8 @@ class World:
     people: list[Person] = field(default_factory=list)  # the crowd, later the queue
     bystanders: list = field(default_factory=list)  # passers-by, see bystanders.py
     noise: object = None  # sensor noise, see noise.py (None = perfect sensors)
+    sensors: str = "ideal"  # "ideal": see all round to 10 m; "robot": see sensors.py
+    sensor_state: dict = field(default_factory=dict)  # e.g. the lidar's operator track
     time: float = 0.0
     drop_count: int = 0
     queue_start_time: float | None = None  # set once the robot reaches the car

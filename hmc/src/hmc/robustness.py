@@ -24,7 +24,12 @@ SCORED_ROWS = [
 
 
 def check(
-    map_name: str, bystanders: int, seed: int, bag: str = "blue", noise: str = "off"
+    map_name: str,
+    bystanders: int,
+    seed: int,
+    bag: str = "blue",
+    noise: str = "off",
+    sensors: str = "ideal",
 ) -> list[str]:
     """Run once. Returns the problems found (an empty list means success)."""
     closest = [float("inf")]
@@ -42,6 +47,7 @@ def check(
         seed=seed,
         target_bag=bag,
         noise=noise,
+        sensors=sensors,
         on_step=record,
     )
     problems = [
@@ -63,17 +69,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--noise", default="off", help="sensor noise: off, realistic, hard"
     )
+    parser.add_argument(
+        "--sensors", default="ideal", help="sensor model: ideal or robot"
+    )
     args = parser.parse_args(argv)
 
     failures = []
     print(
-        f"{'map':<18} {'ok':>4} / {args.seeds}   ({args.bystanders} passers-by, noise {args.noise})"
+        f"{'map':<18} {'ok':>4} / {args.seeds}   ({args.bystanders} passers-by, noise {args.noise}, sensors {args.sensors})"
     )
     total_ok = 0
     for map_name in MAPS:
         ok = 0
         for seed in range(args.seeds):
-            problems = check(map_name, args.bystanders, seed, noise=args.noise)
+            problems = check(
+                map_name, args.bystanders, seed, noise=args.noise, sensors=args.sensors
+            )
             if problems:
                 failures.append(f"{map_name} seed {seed}: " + ", ".join(problems))
             else:

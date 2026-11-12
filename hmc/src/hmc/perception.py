@@ -4,6 +4,7 @@ import math
 from collections import deque
 from typing import NamedTuple
 
+from hmc import sensors
 from hmc.world import Point, Shape, World, distance, wrap_angle
 
 SENSOR_RANGE = 10.0  # metres
@@ -35,14 +36,42 @@ def _frame(world: World) -> dict:
         return noise.frame
     robot = world.robot.pos
     op = world.operator
-    operator = op.pos if can_see(world, op.pos) else None
     everyone = list(world.people) + list(world.bystanders)
-    visible = {p.id: p for p in everyone if can_see(world, p.pos)}
+    if world.sensors == "robot":
+        # Camera: people with their look, bags, pointing. Lidar: legs, no look.
+        state = world.sensor_state
+        on_camera = sensors.camera_sees(world, op.pos)
+        tracked = (
+            world.time - state.get("operator_track", -1e9) <= sensors.LEG_TRACK_GAP
+        )
+        if on_camera or (tracked and sensors.lidar_sees(world, op.pos)):
+            state["operator_track"] = world.time
+            operator = op.pos
+        else:
+            operator = None
+        operator_look = getattr(op, "look", None) if on_camera else None
+        visible = {
+            p.id: p
+            for p in everyone
+            if sensors.camera_sees(world, p.pos) or sensors.lidar_sees(world, p.pos)
+        }
+        looks = {
+            pid: getattr(p, "look", None) if sensors.camera_sees(world, p.pos) else None
+            for pid, p in visible.items()
+        }
+        bags = {
+            n: b.pos for n, b in world.bags.items() if sensors.camera_sees(world, b.pos)
+        }
+        near = on_camera and distance(robot, op.pos) <= sensors.POINTING_RANGE
+        ray = world.pointing_ray() if near else None
+    else:
+        operator = op.pos if can_see(world, op.pos) else None
+        visible = {p.id: p for p in everyone if can_see(world, p.pos)}
+        looks = {pid: getattr(p, "look", None) for pid, p in visible.items()}
+        operator_look = getattr(op, "look", None) if operator is not None else None
+        bags = {n: b.pos for n, b in world.bags.items() if can_see(world, b.pos)}
+        ray = world.pointing_ray() if operator is not None else None
     people = {pid: p.pos for pid, p in visible.items()}
-    looks = {pid: getattr(p, "look", None) for pid, p in visible.items()}
-    operator_look = getattr(op, "look", None) if operator is not None else None
-    bags = {n: b.pos for n, b in world.bags.items() if can_see(world, b.pos)}
-    ray = world.pointing_ray() if operator is not None else None
     if noise is None:
         return {
             "operator": operator, "operator_look": operator_look, "people": people,
@@ -126,11 +155,35 @@ def see_bags(world: World) -> dict[str, Point]:
 
 def see_obstacles(world: World) -> list[Shape]:
     """Shapes of the obstacles we can see. We do not learn what kind of obstacle it is."""
+    if world.sensors == "robot":
+        return _robot_sees_obstacles(world)
     seen = []
     for obstacle in world.obstacles:
         reach = obstacle.seen_within or SENSOR_RANGE
         if obstacle.shape.clearance(world.robot.pos) <= reach:
             seen.append(obstacle.shape)
+    return seen
+
+
+def _robot_sees_obstacles(world: World) -> list[Shape]:
+    robot = world.robot.pos
+    seen = []
+    for obstacle in world.obstacles:
+        shape = obstacle.shape
+        if obstacle.kind == "wall":
+            if shape.clearance(robot) <= sensors.LIDAR_RANGE:
+                seen.append(shape)  # the lidar sees walls
+        elif obstacle.kind == "barriers":
+            if sensors.depth_sees(world, shape):
+                seen.append(shape)  # the depth image sees the belt between the posts
+            else:
+                posts = sensors.barrier_posts(shape)
+                seen += [p for p in posts if sensors.lidar_sees(world, (p.x, p.y))]
+        else:
+            # Too low (small object) or hard to see: only the depth image, close by.
+            reach = obstacle.seen_within or sensors.DEPTH_MAX
+            if sensors.depth_sees(world, shape, reach):
+                seen.append(shape)
     return seen
 
 
