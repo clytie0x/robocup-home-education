@@ -68,7 +68,7 @@ arm_action_bridge:              # used with: ros2 launch ... arm:=actions   (SO-
     object_size: [0.03, 0.03, 0.05]   # [depth, width, height] m; gripper opens ~6.5 cm max
     grasp_mode: "auto"           # auto | top | side
     place_forward: 0.20          # fixed drop point
-    place_left: -0.10
+    place_left: 0.0          # m left (neg = right). -0.10 was UNREACHABLE on the real arm while holding
     object_pose_topic: "/object/pose"  # a PoseStamped here (e.g. from the camera, any TF frame) overrides the fixed point
     place_pose_topic: "/place/pose"
     pose_max_age: 5.0            # seconds a received pose stays valid
