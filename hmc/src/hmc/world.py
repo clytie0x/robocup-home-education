@@ -250,6 +250,9 @@ class World:
     noise: object = None  # sensor noise, see noise.py (None = perfect sensors)
     sensors: str = "ideal"  # "ideal": see all round to 10 m; "robot": see sensors.py
     sensor_state: dict = field(default_factory=dict)  # e.g. the lidar's operator track
+    odometry: object = (
+        None  # where the robot thinks it is, see odometry.py (None: exact)
+    )
     time: float = 0.0
     drop_count: int = 0
     queue_start_time: float | None = None  # set once the robot reaches the car
@@ -270,6 +273,8 @@ class World:
         return None
 
     def step(self, dt: float = DT) -> None:
+        if self.odometry is not None:
+            self.odometry.update(self.robot, self.time)
         self.operator.step(dt)
         # The rulebook: after the robot has reached the car, the crowd returns in a queue.
         if (

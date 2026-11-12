@@ -12,6 +12,7 @@ from hmc.appearance import give_looks
 from hmc.bystanders import add_bystanders
 from hmc.maps import MAPS
 from hmc.noise import PRESETS, make_noise
+from hmc.odometry import PRESETS as ODOMETRY, make_odometry
 from hmc.scoresheet import MAX_TOTAL, Referee, Scoresheet
 from hmc.task import State, Task
 from hmc.world import DT, World
@@ -42,6 +43,7 @@ def run_scenario(
     seed: int = 0,
     noise: str = "off",
     sensors: str = "ideal",
+    odometry: str = "perfect",
 ) -> Result:
     """Run the whole scenario. on_step lets tests poke the world (e.g. drop the bag)."""
     world = MAPS[map_name](target_bag=target_bag, robot_speed=robot_speed)
@@ -49,6 +51,9 @@ def run_scenario(
     give_looks(world, seed)
     world.noise = make_noise(noise, seed)
     world.sensors = sensors
+    world.odometry = make_odometry(odometry, seed)
+    if world.odometry is not None:
+        world.odometry.start(world.robot)
     speech = hri.Speech()
     task = Task(world, speech)
     sheet = Scoresheet()
@@ -133,6 +138,9 @@ def main(argv: list[str] | None = None) -> int:
         "--noise", default="off", choices=list(PRESETS), help="sensor noise"
     )
     parser.add_argument(
+        "--odometry", default="perfect", choices=list(ODOMETRY), help="pose estimate"
+    )
+    parser.add_argument(
         "--sensors", default="ideal", choices=["ideal", "robot"], help="sensor model"
     )
     parser.add_argument("--bag", default="blue", choices=["red", "blue", "green"],
@@ -146,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         noise=args.noise,
         sensors=args.sensors,
+        odometry=args.odometry,
     )
     write_outputs(result, Path(args.out))
     print(result.sheet.table())

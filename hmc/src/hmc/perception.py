@@ -5,7 +5,7 @@ from collections import deque
 from typing import NamedTuple
 
 from hmc import sensors
-from hmc.world import Point, Shape, World, distance, wrap_angle
+from hmc.world import Box, Circle, Point, Shape, World, distance, wrap_angle
 
 SENSOR_RANGE = 10.0  # metres
 MAX_POINTING_ERROR = math.radians(15)  # a bag must be this close to the ray
@@ -25,7 +25,7 @@ def can_see(world: World, p: Point) -> bool:
     )
 
 
-def _frame(world: World) -> dict:
+def _frame_true(world: World) -> dict:
     """What the sensors report in this time step: operator, people, bags, pointing.
 
     Without noise this is the truth. With noise (see noise.py) it is computed once per
@@ -133,6 +133,44 @@ def _frame(world: World) -> dict:
     return noise.frame
 
 
+def _frame(world: World) -> dict:
+    """This step's frame, in the robot's believed frame (see odometry.py)."""
+    frame = _frame_true(world)
+    odo = world.odometry
+    if odo is None:
+        return frame
+
+    def belief(p):
+        return None if p is None else odo.to_belief(p, world.robot)
+
+    ray = frame["ray"]
+    if ray is not None:
+        ray = (belief(ray[0]), ray[1] + odo.heading_offset(world.robot))
+    return {
+        **frame,
+        "operator": belief(frame["operator"]),
+        "people": {pid: belief(p) for pid, p in frame["people"].items()},
+        "bags": {n: belief(p) for n, p in frame["bags"].items()},
+        "ray": ray,
+    }
+
+
+def _shape_in_belief(world: World, shape):
+    odo = world.odometry
+    if odo is None:
+        return shape
+    if isinstance(shape, Circle):
+        x, y = odo.to_belief((shape.x, shape.y), world.robot)
+        return Circle(x, y, shape.r)
+    corners = [
+        odo.to_belief(c, world.robot)
+        for c in ((shape.x_min, shape.y_min), (shape.x_min, shape.y_max),
+                  (shape.x_max, shape.y_min), (shape.x_max, shape.y_max))
+    ]  # fmt: skip
+    xs, ys = [c[0] for c in corners], [c[1] for c in corners]
+    return Box(min(xs), min(ys), max(xs), max(ys))
+
+
 def see_operator(world: World) -> Point | None:
     """Operator position, or None when we cannot see them."""
     return _frame(world)["operator"]
@@ -156,7 +194,13 @@ def see_bags(world: World) -> dict[str, Point]:
 def see_obstacles(world: World) -> list[Shape]:
     """Shapes of the obstacles we can see. We do not learn what kind of obstacle it is."""
     if world.sensors == "robot":
-        return _robot_sees_obstacles(world)
+        seen = _robot_sees_obstacles(world)
+    else:
+        seen = _ideal_sees_obstacles(world)
+    return [_shape_in_belief(world, shape) for shape in seen]
+
+
+def _ideal_sees_obstacles(world: World) -> list[Shape]:
     seen = []
     for obstacle in world.obstacles:
         reach = obstacle.seen_within or SENSOR_RANGE

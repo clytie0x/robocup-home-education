@@ -148,3 +148,40 @@ def test_every_map_with_robot_sensors_and_no_noise():
         result = run_scenario(map_name=map_name, sensors="robot")
         assert result.task.state == State.DONE
         assert result.sheet.total() == 1115
+
+
+# Odometry (--odometry perfect|wheel|slam)
+
+
+def test_belief_and_truth_frames_are_inverse():
+    from hmc.odometry import Odometry
+
+    world = build_world()
+    odo = Odometry()
+    odo.start(world.robot)
+    odo.belief = [0.3, -0.2, 0.1]  # pretend we drifted
+    p = (4.0, 2.0)
+    back = odo.to_true(odo.to_belief(p, world.robot), world.robot)
+    assert distance(back, p) < 1e-9
+
+
+def test_wheel_odometry_drifts_and_slam_keeps_it_small():
+    errors = {}
+    for mode in ("perfect", "wheel", "slam"):
+        result = run_scenario(odometry=mode)
+        world = result.world
+        if world.odometry is None:
+            errors[mode] = 0.0
+        else:
+            b = world.odometry.belief
+            errors[mode] = distance(world.robot.pos, (b[0], b[1]))
+    assert errors["perfect"] == 0.0
+    assert errors["wheel"] > 0.05
+    assert errors["slam"] < 0.2
+
+
+def test_every_odometry_mode_finishes_the_default_map():
+    for mode in ("perfect", "wheel", "slam"):
+        result = run_scenario(odometry=mode)
+        assert result.task.state == State.DONE
+        assert result.sheet.total() == 1115

@@ -9,6 +9,7 @@ from enum import Enum
 
 from hmc import hri, manipulation, navigation, perception
 from hmc.appearance import LookMemory
+from hmc.odometry import RobotView
 from hmc.world import PERSON_RADIUS, TIME_LIMIT, Circle, Point, Shape, World, distance
 
 QUEUE_GAP = 1.0  # metres to keep behind the last person in the queue
@@ -27,6 +28,8 @@ BAG_VOTES = 5  # frames that must point at the same bag (and 3 more than at any 
 RAY_FRAMES = 5  # frames of the pointing arm we average before we look for the bag
 LOOK_ALONG_RAY = 2.0  # metres; to find the bag we look at this point along the arm
 REMEMBER_FOR = 1.0  # seconds we still avoid a person the detector missed
+MEMORY_CELL = 0.3  # metres; obstacles closer than this in place and size are the same
+MEMORY_KEEP = 10.0  # seconds we remember an obstacle we no longer see
 # Re-identification by look (see appearance.py).
 OPERATOR_LEARN = 20  # frames of the operator's look we learn at the start
 OPERATOR_MATCH = 0.65  # a detection must look at least this much like the operator
@@ -70,7 +73,8 @@ class Task:
         self.speech = speech
         self.state = State.ANNOUNCE_READY
         self.history: list[tuple[float, State]] = [(world.time, self.state)]
-        self.start = world.robot.pos  # remembered from odometry
+        self.body = RobotView(world)  # our pose as we believe it (odometry)
+        self.start = self.body.pos  # remembered from odometry
         self.tracker = perception.MotionTracker()
         self.people_trackers: dict[int, perception.MotionTracker] = {}
         self.navigator = navigation.Navigator()
@@ -89,7 +93,7 @@ class Task:
         self.pointing = None
         # Obstacles we saw before. The camera looks forward only and the depth image is
         # blind closer than 0.6 m, so a low object we pass would vanish without this.
-        self.obstacle_memory: set = set()
+        self.obstacle_memory: dict = {}  # rough place and size -> (time, shape)
         self.bag_tracker = perception.MotionTracker()
 
     @property
@@ -165,14 +169,17 @@ class Task:
         operator = self.operator_now
         if self.last_operator_pos is None:
             return
-        navigation.follow_step(
-            self.navigator, self.world.robot, self.last_operator_pos,
+        near = navigation.follow_step(
+            self.navigator, self.body, self.last_operator_pos,
             self._shapes(), self.world.time, dt,
         )  # fmt: skip
+        if near:
+            # Waiting behind the operator: face them, so the camera keeps them in view.
+            self.body.turn_toward(self.last_operator_pos, dt)
 
         # Arrived at the car when the operator stands still and points.
         close = operator is not None and (
-            distance(self.world.robot.pos, self.last_operator_pos)
+            distance(self.body.pos, self.last_operator_pos)
             <= navigation.FOLLOW_DISTANCE + 0.5
         )
         if (
@@ -183,7 +190,7 @@ class Task:
             self._go(State.PERCEIVE_BAG)
 
     def _perceive_bag(self, dt: float) -> None:
-        robot = self.world.robot
+        robot = self.body
         if self.pointing is None:
             # First read the arm: face the operator and average a few frames.
             ray = perception.see_pointing(self.world)
@@ -265,7 +272,7 @@ class Task:
                 self.last_tail = (now, self.last_tail[1])
             if seen or now - self.last_tail[0] <= LOST_TAIL_WAIT:
                 tail = self.last_tail[1]
-        robot = self.world.robot.pos
+        robot = self.body.pos
         # Leave when there is no queue, when we are near the start, or when the person
         # we follow has stopped walking (the queue has arrived).
         stopped = tail is not None and self.people_trackers[tail].is_stationary()
@@ -291,8 +298,23 @@ class Task:
 
     def _shapes(self) -> list[Shape]:
         """Everything we must not touch: seen obstacles, other people and the operator."""
-        self.obstacle_memory.update(perception.see_obstacles(self.world))
-        shapes = list(self.obstacle_memory)
+        for shape in perception.see_obstacles(self.world):
+            # The same obstacle comes back a little moved every frame (our own pose
+            # drifts), so we key it by its rough place and size and keep the newest.
+            x0, y0, x1, y1 = shape.bounds()
+            key = (
+                round((x0 + x1) / 2 / MEMORY_CELL), round((y0 + y1) / 2 / MEMORY_CELL),
+                round((x1 - x0) / MEMORY_CELL), round((y1 - y0) / MEMORY_CELL),
+            )  # fmt: skip
+            self.obstacle_memory[key] = (self.world.time, shape)
+        # Forget what we have not seen for a while: our own pose drifts, so an old
+        # memory is in the wrong place, and could block a door that is really open.
+        self.obstacle_memory = {
+            key: (seen, shape)
+            for key, (seen, shape) in self.obstacle_memory.items()
+            if self.world.time - seen <= MEMORY_KEEP
+        }
+        shapes = [shape for _, shape in self.obstacle_memory.values()]
         now = self.world.time
         # People we saw a moment ago are still there, even if this frame missed them.
         trackers = list(self.people_trackers.values())
@@ -306,12 +328,12 @@ class Task:
 
     def _drive_to(self, goal, dt: float, stop_distance: float) -> bool:
         return self.navigator.step(
-            self.world.robot, goal, self._shapes(), self.world.time, dt, stop_distance
+            self.body, goal, self._shapes(), self.world.time, dt, stop_distance
         )
 
     def _remember_crowd(self) -> None:
         """Remember people standing in a group near us: that is the crowd."""
-        robot = self.world.robot.pos
+        robot = self.body.pos
         now = self.world.time
         standing = {
             pid: pos
@@ -354,7 +376,7 @@ class Task:
         of them closest to us. (Not the one farthest from the start: the queue walks on
         past the start.)
         """
-        robot = self.world.robot.pos
+        robot = self.body.pos
         looks = perception.see_looks(self.world)
         ahead = [
             (pid, pos)
