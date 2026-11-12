@@ -7,7 +7,8 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
+from launch_ros.actions import ComposableNodeContainer, Node
+from launch_ros.descriptions import ComposableNode
 from moveit_configs_utils import MoveItConfigsBuilder
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -87,6 +88,8 @@ def setup(context):
                                        'calibration': os.path.expanduser(
                                            LaunchConfiguration('calibration').perform(context)) if hw == 'real' else ''}]))
         rviz_cfg = f'{share}/config/moveit.rviz'
+        if LaunchConfiguration('camera').perform(context) == 'true':
+            nodes += camera_nodes(float(LaunchConfiguration('table_z').perform(context)))
     if rviz:
         nodes.append(Node(package='so100_driver', executable='control_panel'))
         nodes.append(Node(package='rviz2', executable='rviz2', arguments=['-d', rviz_cfg],
@@ -95,11 +98,36 @@ def setup(context):
     return nodes
 
 
+def camera_nodes(table_z):
+    """ASUS Xtion (openni2) -> /camera/depth_registered/points, plus the camera test node.
+    The camera's own TF tree is not used: camera_test publishes base -> camera frame after calibration."""
+    container = ComposableNodeContainer(
+        name='container', namespace='camera', package='rclcpp_components', executable='component_container',
+        output='screen', composable_node_descriptions=[
+            ComposableNode(package='openni2_camera', plugin='openni2_wrapper::OpenNI2Driver', name='driver',
+                           namespace='camera',
+                           parameters=[{'depth_registration': True, 'use_device_time': False,
+                                        'rgb_frame_id': 'camera_rgb_optical_frame',
+                                        'depth_frame_id': 'camera_depth_optical_frame'}],
+                           remappings=[('depth/image', 'depth_registered/image_raw')]),
+            ComposableNode(package='depth_image_proc', plugin='depth_image_proc::PointCloudXyzrgbNode',
+                           name='points_xyzrgb', namespace='camera', parameters=[{'queue_size': 10}],
+                           remappings=[('rgb/image_rect_color', 'rgb/image_raw'),
+                                       ('depth_registered/image_rect', 'depth_registered/image_raw'),
+                                       ('points', 'depth_registered/points')]),
+        ])
+    test = Node(package='so100_driver', executable='camera_test', output='screen',
+                parameters=[{'table_z': table_z}])
+    return [container, test]
+
+
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('hardware', default_value='real', choices=['real', 'sim']),
         DeclareLaunchArgument('mode', default_value='moveit', choices=['moveit', 'sliders']),
         DeclareLaunchArgument('rviz', default_value='true'),
+        DeclareLaunchArgument('camera', default_value='false',
+                              description='ASUS Xtion camera test: finds objects, /camera_test/pick (MoveIt mode)'),
         DeclareLaunchArgument('calibration', default_value='~/so100_ws/calibration.json'),
         DeclareLaunchArgument('table_z', default_value='-0.075',
                               description='table top below the arm base (m): base sits on a ~7 cm platform, measured 2026-11-07'),

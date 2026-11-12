@@ -18,5 +18,6 @@ setup(
         'pick_place = so100_driver.pick_place_node:main',
         'arm_cli = so100_driver.arm_client:main',
         'api_selftest = so100_driver.api_selftest:main',
+        'camera_test = so100_driver.camera_test:main',
     ]},
 )

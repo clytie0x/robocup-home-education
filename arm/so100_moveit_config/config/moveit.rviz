@@ -43,6 +43,45 @@ Visualization Manager:
         Depth: 1
         Durability Policy: Volatile
         Reliability Policy: Reliable
+    - Class: rviz_default_plugins/PointCloud2
+      Name: กล้อง (point cloud)
+      Enabled: true
+      Topic:
+        Value: /camera/depth_registered/points
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: RGB8
+      Decay Time: 0
+    - Class: rviz_default_plugins/Image
+      Name: ภาพระยะจากกล้อง (ดำ = วัดไม่ได้)
+      Enabled: true
+      Topic:
+        Value: /camera/depth_registered/image_raw
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+      Normalize Range: false
+      Min Value: 0
+      Max Value: 1.5
+    - Class: rviz_default_plugins/Image
+      Name: ภาพสีจากกล้อง
+      Enabled: true
+      Topic:
+        Value: /camera/rgb/image_raw
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+    - Class: rviz_default_plugins/MarkerArray
+      Name: ของที่กล้องเห็น (ส้ม)
+      Enabled: true
+      Topic:
+        Value: /camera_test/markers
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
   Global Options:
     Fixed Frame: base
     Background Color: 48; 48; 48
