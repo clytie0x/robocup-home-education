@@ -3,7 +3,7 @@ import unittest
 import params
 import wheels
 
-P = params.load()
+P = dict(params.load(), linear_cmd_scale=None, max_speed=0.15, odom_distance_scale=0.902)  # the plan's test values, not the measured ones
 
 
 class FakePort:

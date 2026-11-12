@@ -125,3 +125,44 @@ Design risk (to decide with the owner once the pitch is known): with the lens 7 
 the floor and about 45 degrees of vertical view, a level camera sees a person only up to
 about 0.9 m at 2 m range and 1.3 m at 3 m. Re-identification needs the torso. The owner
 chose the bottom deck, tilted up, for now.
+
+## Task 2: speed ladder, measured 2026-11-13
+
+The owner was at the robot and approved every run in chat. ROS stopped (`~/robot-pi stop`).
+`tools/base_check.py`, straight lines, real distance and speeds by LiDAR scan matching.
+Logs: `~/hmc-base/logs/base-check/` on the Pi.
+
+| Run (log) | Packet | Asked | Real cruise | Real dist | Odom dist | After S# | Drift | Yaw scan/odom | stop_delay | Stop |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 053826-line-0.15 | F015 | 0.15 | 0.120 (s 2-10; 0.112 middle s) | 1.304 m | 1.277 m | 0.079 m | +2.0 cm/m | 2.4 / 1.3° | 0.27 s | emergency (object came 0.35 m ahead; correct) |
+| 054734-line-0.15 | F015 | 0.15 | 0.122 | 1.232 m | 1.213 m | 0.081 m | +1.9 cm/m | 1.2 / 0.7° | 0.18 s | time limit |
+| 054957-line-0.15 | F015 | 0.15 | 0.131 | 1.235 m | 1.202 m | 0.074 m | +1.3 cm/m | 1.0 / 0.7° | 0.12 s | time limit |
+| 055346-line-0.3 | F037 | 0.3 (scale 1.25) | 0.119 | 0.795 m | 0.781 m | 0.084 m | +2.1 cm/m | 1.0 / 0.7° | 0.22 s | time limit |
+| 055742-line-0.08 | F008 | 0.08 | 0.080 | 0.663 m | 0.645 m | 0.050 m | -2.7 cm/m | -3.2 / -3.3° | 0.22 s | target |
+
+Run 1's numbers were recomputed after a tool fix (its first scan was a partial
+revolution). Drift carries the unresolved `lidar_front_deg` error (about 3 cm per m).
+
+Findings:
+- **The base does not go faster than about 0.12 to 0.13 m/s.** `F015` and `F037` both
+  give 0.12 to 0.13 m/s; `F008` gives 0.080. Below the cap the linear command is true
+  (`linear_cmd_scale` 1.0). The cause is below the Pi (firmware limit or motor supply,
+  the power bank feeds everything); the owner expects this is the base's speed. The
+  ladder above 0.15 m/s was therefore not run: there is no faster rung to measure.
+- Braking: 5 to 8.4 cm of coast after `S#`, well inside the 0.4 m limit; drift 1.3 to
+  2.7 cm per m, inside 5 cm per m.
+- Odometry reads 1.5 to 2.7 % short (mean 2.2 %) against the scans, so
+  `odom_distance_scale` goes from 0.902 to 0.882.
+- Turns not measured: the 180° turn at 0.26 rad/s was refused by its clearance check
+  (an object 0.41 m from the turning centre). `odom_yaw_scale` 0.862 and
+  `angular_cmd_scale` 0.862 stay as measured earlier today.
+
+Values written to `base/params.json`: `linear_cmd_scale` 1.0, `max_speed` 0.12 (the real
+cap), `decel` 0.064 m/s² (v² / (2 × coast), lowest run, the 0.08 m/s one), `stop_delay`
+0.27 s (highest run), `odom_distance_scale` 0.882. Braking distance by the plan's formula
+at 0.12 m/s: 0.113 + 0.032 + 0.15 = 0.295 m.
+
+Top speed without a depth image (owner decision 5): the plan's 0.3 m/s cap is above what
+the base can do, so it never acts; at 0.12 m/s the braking distance (0.295 m) is far inside
+what the LiDAR alone sees ahead. Measured choice, 2026-11-13: no separate no-depth cap is
+needed while `max_speed` is 0.12.
