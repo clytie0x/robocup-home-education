@@ -36,11 +36,14 @@ class Result:
     rows: list[dict]
 
 
-# The real base as measured on 2026-11-13: the velocity smoother limits (robot.json
-# nav_accel 0.2 m/s^2 and 40 deg/s^2) and the 15 deg/s turn cap in the navigation config.
+# The real base as the person-follow stack drives it (base/params.json, 2026-11-13):
+# accel 0.25 m/s^2, turn accel 0.7 rad/s^2, turn rate 0.49 rad/s (28 deg/s). These are
+# the limits the software sends; the turn rate itself is not measured on the base yet.
+# The real robot also stops closer to the operator: 0.6 m from its front edge, so 0.8 m
+# centre to centre (base/params.json follow_gap).
 BASES = {
-    "sim": dict(accel=0.5, turn_accel=3.0, turn_rate=2.0),
-    "real": dict(accel=0.2, turn_accel=math.radians(40), turn_rate=math.radians(15)),
+    "sim": dict(accel=0.5, turn_accel=3.0, turn_rate=2.0, follow_distance=1.5),
+    "real": dict(accel=0.25, turn_accel=0.7, turn_rate=0.49, follow_distance=0.8),
 }
 
 
@@ -77,6 +80,7 @@ def run_scenario(
     world.operator.speed = operator_speed  # the natural walking speed
     speech = hri.Speech()
     task = Task(world, speech)
+    task.follower.follow_distance = BASES[base]["follow_distance"]
     sheet = Scoresheet()
     referee = Referee(sheet)
     rows: list[dict] = []
