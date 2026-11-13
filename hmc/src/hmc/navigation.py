@@ -23,6 +23,10 @@ SAFETY = 0.1
 INFLATE = hmc_world.ROBOT_RADIUS + SAFETY
 MARGIN = 3.0  # metres of grid around the robot and the goal
 REPLAN_EVERY = 0.5  # seconds
+# Plan again as soon as the number of shapes changes. On the robot its noisy LiDAR changes it
+# nearly every cycle, so it planned every 0.1 s at 0.12 s a plan on the Pi and ran out of time;
+# there it waits for REPLAN_EVERY (must_stop and free_ahead still check every cycle).
+REPLAN_ON_NEW_SHAPES = True
 REPLAN_IF_GOAL_MOVED = 0.3  # metres
 WAYPOINT_REACHED = 0.15  # metres
 # We aim at a waypoint up to this far ahead. The base cannot change its turn rate at
@@ -296,7 +300,7 @@ class Navigator:
         return (
             self._goal is None
             or distance(goal, self._goal) > REPLAN_IF_GOAL_MOVED
-            or len(shapes) != self._shape_count  # we just saw something new
+            or (REPLAN_ON_NEW_SHAPES and len(shapes) != self._shape_count)  # we just saw something new
             or now - self._planned_at >= REPLAN_EVERY - 1e-9
         )
 

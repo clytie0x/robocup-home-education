@@ -22,6 +22,9 @@ class BodyTest(unittest.TestCase):
         self.assertEqual(world.MAX_DECEL, P["decel"])
         self.assertEqual(world.STOP_DELAY, P["stop_delay"])
         self.assertAlmostEqual(world.HEADING_DEADBAND, math.radians(4))
+        from hmc import navigation
+        self.assertTrue(navigation.CLOSE_PLAN)
+        self.assertFalse(navigation.REPLAN_ON_NEW_SHAPES)
 
     def test_command_comes_from_the_brain_step(self):
         b = body.Body(P)

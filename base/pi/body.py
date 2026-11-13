@@ -17,6 +17,7 @@ class Body:
         world.STOP_DELAY = p["stop_delay"]
         world.HEADING_DEADBAND = math.radians(HEADING_DEADBAND_DEG)
         navigation.CLOSE_PLAN = True  # plan through gaps the 0.40 m body fits, checked with its outline
+        navigation.REPLAN_ON_NEW_SHAPES = False  # the Pi cannot plan every cycle (0.12 s a plan)
         self.robot = world.Robot(max_speed=p["max_speed"], max_turn_rate=p["max_turn_rate"])
 
     def sync(self, pose):
