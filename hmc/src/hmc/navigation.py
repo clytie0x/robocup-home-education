@@ -305,6 +305,8 @@ class Navigator:
         self._shape_count = -1
         self._planned_at = -math.inf
         self.tight = False  # the path came from the close plan (LAST_PLAN_TIGHT)
+        global _tight_skip
+        _tight_skip = 0  # a new run starts without the last run's cooldown (the ladder runs many in one process)
 
     def _needs_plan(self, goal: Point, shapes: list[Shape], now: float) -> bool:
         return (
