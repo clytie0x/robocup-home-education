@@ -86,26 +86,45 @@ parity or framing error drops the message it is in. `\r` and `\n` are ignored.
 
 - MCU: a Blue Pill module (STM32F103C8 class) on a carrier board marked "Designed by
   NT+KS". The chip marking is not read yet: it may be a GD32 or CKS32 clone.
-- USB: the robot's cable goes to a small CH340 USB-serial module on the carrier, not to
-  the Blue Pill's own USB.
-- Motor driver: a red L298N module. Motor supply terminal labelled 12V; other terminals
-  "EStop", "Motor1", "Motor2". The L298N drops about 2 V or more, so the motors see less
-  than the supply (one possible part of the 0.12 m/s cap, to check with a multimeter).
+- USB: the robot's cable goes to a purple CH340E module (USB-C; pins GND, +5V, TXD, RXD,
+  DTR, 3V3) on the carrier, not to the Blue Pill's own USB.
+- Motor driver: a red L298N module with 6 control wires (likely ENA, IN1 to IN4, ENB, so
+  PWM on the enable pins). Motor supply terminal labelled 12V; other terminals "EStop",
+  "Motor1", "Motor2". Datasheet drop 1.8 V typical, 3.2 V worst at 1 A, up to 4.9 V at
+  2 A: the motors see about 8.8 to 10.2 V (one possible part of the 0.12 m/s cap, to check
+  with a multimeter).
 - A 4-pin SWD header at the Blue Pill's end, and yellow jumpers on BOOT0/BOOT1.
-- Headers "PWMEXP2", "I2CExpansion", "ADCExpansion", "GND 5V", and an HV/LV level shifter.
+- Headers "ENCODER1" and "ENCODER2" (4 pin each), "PWMEXP2", "I2CExpansion",
+  "ADCExpansion", "GND 5V", an HV/LV level shifter, LEDs on PC14 and PC15.
 - The original ROS driver (gitlab.com/robotcitizens, `rct_ahr_driver`, `nodes/driver.py`)
-  uses the same text protocol, including `R#`. No firmware source was found there.
+  uses the same text protocol, including `R#` (reset odometry). No firmware source was
+  found there. Their URDF puts the wheels at +-0.1295 m (track 0.259 m, a model value),
+  which disagrees with the owner's 0.31 m: calibration step 4.3 of the design settles it.
+
+### Flashing without an ST-Link, if the wiring allows
+
+The STM32F103 ROM bootloader listens on USART1 (PA9 TX, PA10 RX) at 8E1 with BOOT0 high,
+the same framing as the protocol. If the CH340E is wired to PA9/PA10, the Pi can read and
+write the flash with `stm32flash` over the existing cable: the owner moves the BOOT0
+jumper and presses RESET. Not checked yet: that wiring, and whether DTR reaches RESET.
+The backup of the old firmware (design section 1) comes first either way.
+
+### Clone check before any write
+
+A chip marked STM32 can be a clone (CKS32 answers SWD id `0x2ba01477`, OpenOCD then needs
+`set CPUTAPID`; GD32 and APM32 differ again). Read the SWD IDCODE and `DBGMCU_IDCODE` and
+record them before flashing.
 
 ## What the board photos must still show
 
 - The chip marking on the Blue Pill (STM32F103C8T6, a clone, or the 128 KB C8/CB part).
 - The SWD header's pin labels (`SWDIO`, `SWCLK`, `GND`, `3V3`).
-- Which Blue Pill pins the CH340's TX and RX reach. On PA9/PA10 (USART1) the ROM serial
-  bootloader can be used with BOOT0 high; on another UART only SWD can flash.
+- Which Blue Pill pins the CH340E's TXD, RXD and DTR reach (PA9/PA10 and RESET would allow
+  flashing over the existing cable, see above).
 - The L298N wiring: which Blue Pill pins drive ENA/ENB (they must be timer PWM pins) and
   IN1 to IN4, and whether the ENA/ENB jumpers are still on (then PWM goes on the IN pins).
-- The encoder wiring: wires per motor, which Blue Pill pins they reach (they must land on
-  TIM2, TIM3 or TIM4 channels 1 and 2 for hardware encoder mode), and the encoder supply
-  voltage (5 V encoders need 5 V tolerant pins or the level shifter).
+- The ENCODER1/ENCODER2 wiring: which Blue Pill pins the two signal wires reach (they must
+  land on TIM2, TIM3 or TIM4 channels 1 and 2 for hardware encoder mode), and the encoder
+  supply voltage (5 V encoders need 5 V tolerant pins or the level shifter).
 - The motor label (rated voltage, rpm, gear ratio) and the L298N output voltage under
   load.

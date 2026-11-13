@@ -8,8 +8,8 @@
 
 /* ---- Geometry ---- */
 
-/* Wheel to wheel, centre of contact. The owner's number; refine with two 360 deg turns
- * against LiDAR scan matching (design 4.3). */
+/* Wheel to wheel, centre of contact. The owner's number; the original team's URDF says
+ * 0.259 m. MEASURE ON THE BOARD: two 360 deg turns against LiDAR scan matching (design 4.3). */
 #define TRACK_M 0.31f
 
 /* MEASURE ON THE BOARD. Tyres are marked 6X1.5 (6 in = 0.152 m). Refine by driving a
