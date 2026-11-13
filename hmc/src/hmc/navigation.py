@@ -97,8 +97,9 @@ def _close_plan(start: Point, goal: Point, shapes: list[Shape], near_side: bool,
     # The goal itself (the operator we follow) is not checked: the robot stops short of it anyway.
     others = [s for s in shapes if s.clearance(goal) > 0]
     budget = [CHECK_BUDGET]
+    marked: dict = {}
     for _ in range(TIGHT_ROUNDS):
-        path = _grid_path(start, goal, shapes, near_side, hmc_world.INSCRIBED + TIGHT_SLACK, avoid)
+        path = _grid_path(start, goal, shapes, near_side, hmc_world.INSCRIBED + TIGHT_SLACK, avoid, marked)
         if path is None:
             return None
         bad = path_clear(path, start, heading, others, OUTLINE_MARGIN, budget)
@@ -189,8 +190,12 @@ def path_clear(path: list[Point], start: Point, start_heading: float | None,
 
 
 def _grid_path(start: Point, goal: Point, shapes: list[Shape], near_side: bool,
-               inflate: float, avoid: list[Point]) -> list[Point] | None:  # fmt: skip
-    """A* on a grid whose cells closer than inflate to a shape, or holding an avoid point, are blocked."""
+               inflate: float, avoid: list[Point], marked: dict | None = None) -> list[Point] | None:  # fmt: skip
+    """A* on a grid whose cells closer than inflate to a shape, or holding an avoid point, are blocked.
+
+    marked, if given, keeps the cells the shapes block between calls with the same shapes and
+    inflate (the close plan's rounds), so they are worked out once.
+    """
     x0 = min(start[0], goal[0]) - MARGIN
     y0 = min(start[1], goal[1]) - MARGIN
     width = int((max(start[0], goal[0]) + MARGIN - x0) / CELL) + 1
@@ -207,14 +212,19 @@ def _grid_path(start: Point, goal: Point, shapes: list[Shape], near_side: bool,
 
     # Mark blocked cells. Only look at the cells near each shape, which keeps it fast.
     blocked: set[Cell] = set()
-    for shape in shapes:
-        bx0, by0, bx1, by1 = shape.bounds()
-        lo = cell_of((bx0 - inflate, by0 - inflate))
-        hi = cell_of((bx1 + inflate, by1 + inflate))
-        for i in range(max(lo[0], 0), min(hi[0], width - 1) + 1):
-            for j in range(max(lo[1], 0), min(hi[1], height - 1) + 1):
-                if shape.clearance(centre((i, j))) < inflate:
-                    blocked.add((i, j))
+    if marked is not None and "cells" in marked:
+        blocked = set(marked["cells"])
+    else:
+        for shape in shapes:
+            bx0, by0, bx1, by1 = shape.bounds()
+            lo = cell_of((bx0 - inflate, by0 - inflate))
+            hi = cell_of((bx1 + inflate, by1 + inflate))
+            for i in range(max(lo[0], 0), min(hi[0], width - 1) + 1):
+                for j in range(max(lo[1], 0), min(hi[1], height - 1) + 1):
+                    if shape.clearance(centre((i, j))) < inflate:
+                        blocked.add((i, j))
+        if marked is not None:
+            marked["cells"] = set(blocked)
     blocked.update(cell_of(p) for p in avoid)
 
     # If we ended up inside the safety zone, there would be no way out. So free the cells
