@@ -22,7 +22,10 @@ LOOK_KEEP = 2.0  # s a camera look can still veto a fix that ends a LiDAR gap
 UNSURE_LATCH = 1.0  # s ambiguous stays True after the last crowded cycle
 LEARNED = 20  # looks the brain must have learned before the camera may re-lock (hmc.follower.OPERATOR_LEARN)
 COMPANY = MAX_WIDTH  # m; someone this close to the operator can become one LiDAR object with them
-COMPANY_MIN = 0.3  # s next to the operator before it counts: a leg the pairing missed for a scan or two does not
+# s an id must live before its vanishing or appearing next to the operator counts. In a review fuzz
+# (600 runs, link down) 0.3 and 0.6 s both left 2 silent stranger follows, but a lone walker's own
+# stride (a sine-leg model, not real data) dropped the track in 51 of 96 gaits at 0.3 s, 6 at 0.6 s.
+COMPANY_MIN = 0.6
 
 
 class RealSenses:
@@ -39,7 +42,7 @@ class RealSenses:
         self._yaws = []  # (time, yaw) from the poses passed to read
         self._people = {}  # id -> odometry point, last cycle
         self._next_id = 1
-        self._company = {}  # id -> since when that person stands within COMPANY of the operator
+        self._born = {}  # id -> when that person was first seen
 
     @property
     def locked(self):
@@ -52,6 +55,8 @@ class RealSenses:
         """
         if now - answer.t > FRESH:
             return "camera answer too old"
+        if self.ambiguous:
+            return "someone is right at the operator: wait"  # a fresh enrol has no look to check
         cands = candidates(scan)
         close = []
         for bearing, look in self._fresh(now, answer):
@@ -111,7 +116,7 @@ class RealSenses:
         others = [self._base(c) for c in cands if c != self.tracker.pos]
         others = [geometry.base_to_odom(b, pose) for b in others if PEOPLE_RANGE[0] <= math.hypot(*b) <= PEOPLE_RANGE[1]]
         people = self._ids(others)
-        if self._company_vanished(now, operator, people):
+        if self._mixed_up(now, operator, people):
             # They may now be one LiDAR object; when it splits, nobody can say which piece is the
             # operator (spec criterion 4). Drop the track and hold: only a camera look may lock again.
             self.tracker = self._new_tracker()
@@ -126,20 +131,35 @@ class RealSenses:
         obstacles = self.memory.update(now, pose, scan, depth_points, everyone)
         return Senses(now, operator, look, people, obstacles)
 
-    def _company_vanished(self, now, operator, people):
-        """True when someone who stood next to the operator is gone from the scan.
+    def _mixed_up(self, now, operator, people):
+        """True when the LiDAR may have mixed the operator up with someone next to them.
 
-        Walking away keeps their id (they move less than GATE per scan); merging into the
-        operator's object, or hiding behind them, makes the id disappear.
+        Vanished: someone within COMPANY of the operator is gone from the scan. They merged into
+        the operator's object or hid behind them; walking away keeps the id (less than GATE a scan).
+        Split: someone appeared within COMPANY of the operator and stayed. An object that was the
+        two of them came apart, and the track may be on either piece.
+        Both need an id alive COMPANY_MIN, so a leg the pairing missed for a scan or two does not count.
         """
-        if operator is None:
-            return False  # no fix this cycle: keep what we knew, judge on the next fix
-        gone = any(pid not in people and now - since >= COMPANY_MIN for pid, since in self._company.items())
-        near = [pid for pid, pt in people.items() if math.dist(pt, operator) <= COMPANY]
-        self._company = {} if gone else {pid: self._company.get(pid, now) for pid in near}
-        return gone
+        for pid in people:
+            self._born.setdefault(pid, now)
+        doubt = False
+        if operator is not None:  # no fix this cycle: keep what we knew, judge on the next fix
+            near = {pid for pid, pt in people.items() if math.dist(pt, operator) <= COMPANY}
+            if self._fixed_before:  # the first fix of a track has nothing to compare with
+                self._born_near |= {pid for pid in near if self._born[pid] == now}
+            old = [pid for pid, t in self._born.items() if now - t >= COMPANY_MIN]
+            vanished = any(pid not in people for pid in self._company if pid in old)
+            split = any(pid in people for pid in self._born_near if pid in old)
+            doubt = vanished or split
+            self._company, self._fixed_before = near, True
+            self._born_near = {pid for pid in self._born_near if pid in people}
+        self._born = {pid: t for pid, t in self._born.items() if pid in people or pid in self._company}
+        return doubt
 
     def _new_tracker(self):
+        self._company = set()  # ids within COMPANY of the operator at the last fix
+        self._born_near = set()  # ids that first appeared within COMPANY of the operator
+        self._fixed_before = False
         return LegTracker(lost_after=self.p["track_coast_max"])
 
     def _fix_ok(self, now, pos, predicted, last_fix, cands, score):

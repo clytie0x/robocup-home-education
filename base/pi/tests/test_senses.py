@@ -296,7 +296,7 @@ class Merge(unittest.TestCase):
             got = read(s, t, scan_of(sum((person(*p) for p in people), [])), answer_for(t, people),
                        link_alive=answer_for(t, people) is not None)
             stranger_y = people[1][1] if len(people) > 1 else None
-            if stranger_y is not None and s.locked and got.operator is not None:
+            if stranger_y is not None and s.locked and got.operator is not None and not s.ambiguous:  # driving
                 self.assertLess(abs(s.tracker.pos[1] - people[0][1]), abs(s.tracker.pos[1] - stranger_y),
                                 "following the stranger at %.1f s" % t)
 
@@ -319,11 +319,33 @@ class Merge(unittest.TestCase):
                     t = round(0.1 * (i + 1), 1)
                     cam = Answer(t, [seen(*real[0], OPERATOR), seen(*real[1], OTHER)])
                     got = read(s, t, scan_of(sum((person(*p) for p in lidar_people), [])), cam)
-                    if got.operator is not None and len(lidar_people) > 1:
+                    if got.operator is not None and len(lidar_people) > 1 and not s.ambiguous:  # driving, not holding
                         self.assertLess(abs(s.tracker.pos[1] - real[0][1]), abs(s.tracker.pos[1] - real[1][1]),
                                         "following the stranger at %.1f s" % t)
                 self.assertTrue(s.locked)
                 self.assertAlmostEqual(s.tracker.pos[1], phases[-1][1][0][1], delta=0.1)  # the operator
+
+    def test_a_stranger_who_walks_up_fast_is_not_forgotten(self):
+        # Review finding: counted from entering the 0.6 m zone, someone arriving at 0.75 m/s merged
+        # before the count was full, and the robot rode the stranger. Now the id's age counts.
+        for step in (0.075,):
+            with self.subTest(speed=step * 10):
+                ys, y = [], -1.2
+                while y < -0.45 - 1e-9:  # walks in at constant speed, the last step onto -0.45
+                    ys.append(y)
+                    y += step
+                ys.append(-0.45)
+                approach = [[(1.5, 0.0), (1.5, y)] for y in ys]
+                split = self.splits()["operator walks on, stranger stays"]
+                frames = approach + [[(1.5, -0.225)]] * 20 + split
+                self.check_never_on_the_stranger(enrolled(), frames, lambda t, people: None)
+
+    def test_enrol_waits_while_someone_is_right_at_the_operator(self):
+        s = enrolled()
+        read(s, 0.1, scan_of(person(1.5, 0.0) + person(1.5, -0.35)))  # crowded: ambiguous latches
+        s.tracker = s._new_tracker()  # lost meanwhile
+        self.assertEqual(s.enrol(0.2, scan_of(person(1.5, -0.35)), Answer(0.2, [seen(1.5, -0.35, OTHER)])),
+                         "someone is right at the operator: wait")
 
     def test_someone_walking_past_does_not_drop_the_track(self):
         s = enrolled()
