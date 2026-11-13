@@ -9,16 +9,17 @@ One-off, by the owner (needs sudo, tell the voice and arm teams):
 
     sudo apt install ros-jazzy-slam-toolbox
 
-Run (two terminals on the Jetson, in `~/hmc-follow`):
+Run (two terminals on the Jetson, in `~/hmc-follow`). The arm team uses ROS_DOMAIN_ID 42 and the voice
+team 43, so ours is 44 and loopback only: our `odom`, `base_link` and `/scan` never enter their graph.
 
-    source /opt/ros/jazzy/setup.bash && python3 slam_bridge.py
-    source /opt/ros/jazzy/setup.bash && ros2 launch slam_toolbox online_async_launch.py slam_params_file:=$HOME/hmc-follow/slam/params.yaml use_sim_time:=false
+    export ROS_DOMAIN_ID=44 ROS_LOCALHOST_ONLY=1; source /opt/ros/jazzy/setup.bash && python3 slam_bridge.py
+    export ROS_DOMAIN_ID=44 ROS_LOCALHOST_ONLY=1; source /opt/ros/jazzy/setup.bash && ros2 launch slam_toolbox online_async_launch.py slam_params_file:=$HOME/hmc-follow/slam/params.yaml use_sim_time:=false
 
 Check with a replayed log (the robot does not move), from the Pi:
 
     ~/hmc-base/.venv/bin/python ~/hmc-base/tools/slam_replay.py ~/hmc-base/logs/<run folder>
 
-Rates, on the Jetson:
+Rates, on the Jetson (a third terminal, with the same two exports):
 
     ros2 topic hz /scan
     ros2 topic hz /odom
