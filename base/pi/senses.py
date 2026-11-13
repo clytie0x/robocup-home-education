@@ -34,6 +34,7 @@ class RealSenses:
         self.tracker = self._new_tracker()
         self.memory = ObstacleMemory(p)
         self.ambiguous = False  # True: someone else is right at the operator, the caller should hold
+        self.why = None
         self._unsure_at = -math.inf  # last cycle the operator was crowded
         self._answer = None  # newest camera answer, for the look check after a gap
         self._last_now = None  # time of the previous read (or enrol)
@@ -76,6 +77,7 @@ class RealSenses:
         return geometry.base_to_odom(self._base(c), self._pose), look
 
     def read(self, now, pose, v, w, dt, scan, depth_points, answer, link_alive, score):
+        self.why = None  # which rule made this cycle unsure or dropped the track, for the log
         self._pose = pose
         self._yaws = [s for s in self._yaws if now - s[0] <= YAW_KEEP] + [(now, pose[2])]
         if link_alive and answer is not None:
@@ -91,10 +93,12 @@ class RealSenses:
             fixed = pos is not None and self.tracker.seen_at == now
             if fixed and not self._fix_ok(now, pos, predicted, last_fix, cands, score):
                 self.tracker = self._new_tracker()  # lost: only a camera look can lock again (rule 4)
+                self.why = "fix rejected"
             elif fixed:
                 at_track = [l for b, l in seen if abs(self._camera_bearing(pos) - b) <= MATCH_DEG]
                 if self._crowded(pos, cands) or len(at_track) > 1:
                     self._unsure_at = now
+                    self.why = "crowded" if self._crowded(pos, cands) else "two seen at the track"
                 else:
                     look = next((l for b, l in seen if self._match(b, cands) == pos), None)
         unsure = now - self._unsure_at <= UNSURE_LATCH
@@ -106,6 +110,7 @@ class RealSenses:
                 two_seen = sum(abs(self._camera_bearing(c) - b) <= MATCH_DEG for b, _ in seen) > 1
                 if self._crowded(c, cands) or two_seen:
                     self._unsure_at = now  # never lock onto a spot where two people stand (or look like one)
+                    self.why = "no re-lock: crowded" if self._crowded(c, cands) else "no re-lock: two seen"
                     break
                 self.tracker.update(scan, now, lock_at=c)
                 look = l
@@ -116,11 +121,13 @@ class RealSenses:
         others = [self._base(c) for c in cands if c != self.tracker.pos]
         others = [geometry.base_to_odom(b, pose) for b in others if PEOPLE_RANGE[0] <= math.hypot(*b) <= PEOPLE_RANGE[1]]
         people = self._ids(others)
-        if self._mixed_up(now, operator, people):
+        mixed = self._mixed_up(now, operator, people)
+        if mixed:
             # They may now be one LiDAR object; when it splits, nobody can say which piece is the
             # operator (spec criterion 4). Drop the track and hold: only a camera look may lock again.
             self.tracker = self._new_tracker()
             self._unsure_at = now
+            self.why = mixed
             operator = None
 
         self.ambiguous = now - self._unsure_at <= UNSURE_LATCH
@@ -142,7 +149,7 @@ class RealSenses:
         """
         for pid in people:
             self._born.setdefault(pid, now)
-        doubt = False
+        doubt = None
         if operator is not None:  # no fix this cycle: keep what we knew, judge on the next fix
             near = {pid for pid, pt in people.items() if math.dist(pt, operator) <= COMPANY}
             if self._fixed_before:  # the first fix of a track has nothing to compare with
@@ -150,7 +157,7 @@ class RealSenses:
             old = [pid for pid, t in self._born.items() if now - t >= COMPANY_MIN]
             vanished = any(pid not in people for pid in self._company if pid in old)
             split = any(pid in people for pid in self._born_near if pid in old)
-            doubt = vanished or split
+            doubt = "someone next to the operator vanished" if vanished else ("split next to the operator" if split else None)
             self._company, self._fixed_before = near, True
             self._born_near = {pid for pid in self._born_near if pid in people}
         self._born = {pid: t for pid, t in self._born.items() if pid in people or pid in self._company}

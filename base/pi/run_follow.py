@@ -35,7 +35,7 @@ from senses import LEARNED, LOOK_MATCH, RealSenses
 
 PERIOD = 0.1  # s, one LiDAR revolution
 SLOW_CYCLE = 0.4  # s; a longer cycle stops the wheels and ends the run
-SAVE_EVERY = 10  # save every 10th scan and its JPEG
+SAVE_EVERY = 10  # save every 10th JPEG; every scan is saved, so a lost track can be replayed
 SEARCH_AGAIN_EVERY = 10.0  # s; after asking the operator back, turn on the spot again (hmc.follower)
 CLOSED_GATE_SPEED = 0.15  # m/s; above this --drive needs the braking numbers measured (params.speed_gates_open)
 STILL = (0.0, 0.0, 0.0)  # the dry run's pose: zero motion
@@ -219,6 +219,7 @@ def cycle(state, now):
         "obstacles": len(seen.obstacles),
         "nearest": float(numpy.hypot(points[:, 0], points[:, 1]).min()) if len(points) else None,  # m from the base centre
         "stop": stop,
+        "why": getattr(senses, "why", None),  # the senses rule behind an ambiguous cycle or a dropped track
         "enrol": enrol,
         "cycle_time": cycle_time,  # s from cycle start to send
         "period": period,  # s since the previous cycle started
