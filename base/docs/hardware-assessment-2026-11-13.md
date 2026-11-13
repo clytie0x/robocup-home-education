@@ -585,3 +585,31 @@ bottles onto the box. None was finished.
 - End state: base still, about 8 cm from the bottle. Arm folded to rest (torque on), my driver on
   domain 44 stopped, the arm team's driver and pick_place (domain 42) untouched. One-off scripts
   removed from /tmp on the Pi and the Jetson (copies in the session scratchpad only).
+
+## Task 9 first run with the velocity loop, and the M1 heading bug, 2026-11-14 05:13 to 05:45
+
+- The branches lap_check (5d3efc5) and slam-bridge (c4d9308) were merged into sim/robustness-ladder
+  on the owner's word. Afterwards: Pi suite 284 OK, hmc 140 passed and 3 xpassed, Jetson 33 OK
+  (2 skipped). The SLAM files on the Pi already matched the merged ones (md5).
+- `base_check --line 0.12 --metres 2.5 --velocity-loop` (fb1fe45), log
+  `logs/base-check/20261114-051357-line-0.12.json`. It stopped on the time limit after 2.391 m
+  (scan), at 0.103 m/s in the middle second. The heading turned right 9.8 deg (scan start to end;
+  odometry -9.3), -4.09 deg per m. None of the loop's estimates reached trusted. max_speed 0.12
+  left the loop no room above the asked speed.
+- Replaying the log showed M1 (motion.py) integrating +8.7 deg over that run. It thinned each scan
+  to every 4th return before matching, and the returns then stood further apart than SURFACE_GAP
+  (0.10 m), so the matches had no surface lines. Over 200 steps, thinned matches summed +4.94 deg
+  and full scans -5.15. So the loop corrected the wrong way.
+- Fix (4a917c5, 683d123, reviewed by Fable): the surface lines come from the whole scan, and each kept
+  return's line reaches over the returns it replaces. M1 matches each new scan against the one
+  about 0.5 s back, because 0.1 s steps read the turn short (-0.0015 rad/s against -0.0071).
+  velocity and calib time their comparisons to the middle of that span. base_check's loop acts
+  once per new scan and needs a longer clear strip, since it may command 1.3 times the asked speed.
+  On the same log: w -0.0054 rad/s, v 0.100 m/s. Pi time per new scan: 24.6 ms median, 44 ms at
+  95 %, 90 ms worst. Still short: far oblique walls (beyond about 4 m) read the motion short, as
+  they do with full scans too.
+- Deployed to the Pi, md5 matching. The old files are in backups/20261114-054214 and
+  backups/20261114-050700. The robot stands at the far end of the lane, about 2.4 m from where it
+  started. Net turn since the cable was laid out: -5.4 deg.
+- Not done: the six out-and-back runs Task 9 asks for (the owner said not to drive yet). Also not
+  done: a second review of the post-review changes.
