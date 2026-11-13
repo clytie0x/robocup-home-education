@@ -40,6 +40,24 @@ from senses import LEARNED, LOOK_MATCH, RealSenses
 # after MEMORY_KEEP like everything else; the camera turns toward where the robot will drive.
 hmc_follower.KEEP_NEAR = 0.0
 
+# Diagnostic (2026-11-13): while following, the planner often found no way to the operator
+# though a replay of the saved scans did. Keep the inputs of the last failed plan for the log.
+import hmc.navigation as hmc_navigation  # noqa: E402
+
+_plan_path = hmc_navigation.plan_path
+NO_PATH = {}
+
+
+def _plan_path_logged(start, goal, shapes, near_side=False):
+    path = _plan_path(start, goal, shapes, near_side)
+    if path is None:
+        NO_PATH.update(start=list(start), goal=list(goal), near_side=near_side,
+                       shapes=[[type(s).__name__] + [round(v, 3) for v in vars(s).values()] for s in shapes])
+    return path
+
+
+hmc_navigation.plan_path = _plan_path_logged
+
 PERIOD = 0.1  # s, one LiDAR revolution
 SLOW_CYCLE = 0.4  # s; a longer cycle stops the wheels and ends the run
 SAVE_EVERY = 10  # save every 10th JPEG; every scan is saved, so a lost track can be replayed
@@ -235,6 +253,9 @@ def cycle(state, now):
         "period": period,  # s since the previous cycle started
     }
     state.log.write(record)
+    if NO_PATH and state.n % 20 == 0:  # at most one dump every 2 s
+        state.log.write({"time": now, "no_path": dict(NO_PATH)})
+        NO_PATH.clear()
     return record
 
 
