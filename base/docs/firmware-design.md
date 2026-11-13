@@ -48,6 +48,12 @@ SHA-256 recorded here.
 5. Restore check, only with the owner's approval: flash the backup back, run `O#` and one
    `F008|+000#` line with the wheels off the floor, confirm the old behaviour.
 
+Done 2026-11-14 (steps 1 to 3, by `stm32flash` over the CH340 on USART1, nothing written):
+STM32F103C8T6, device ID 0x0410, bootloader 0x22, option bytes 0x00/0x00 (no read
+protection). Two reads identical, SHA-256
+`5924421ea558a965d5519a98514ddeb8c92a08ea88528dca0b71876d4b849ef9`, on the Pi at
+`~/firmware-backup/old-1.bin` and `old-2.bin`. Step 5 not done.
+
 ## 2. Serial protocol (kept, so `base/pi/wheels.py` keeps working)
 
 115200 baud, 8E1. Every message ends with `#`. Unknown or malformed messages are ignored
