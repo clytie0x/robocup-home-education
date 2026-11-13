@@ -634,3 +634,26 @@ bottles onto the box. None was finished.
   Old copies are in backups/20261114-054214, backups/20261114-060054 and backups/20261114-060246.
 - Still open: Task 9's six out-and-back runs, and a field run of run_follow with --velocity-loop.
   A hall with walls further than 4 m now leaves the loop on feed-forward only, with no feedback.
+
+## Turn commands while driving barely reach the wheels (old firmware), 2026-11-14 06:26 to 06:40
+
+- Task 9 line with the fixed loop: `base_check --line 0.12 --metres 2.0 --velocity-loop --max-speed 0.16`.
+  2.0 m, not 2.5 m, because the lane had 3.53 m clear and a loop run needs 3.94 m for 2.5 m.
+  Log `logs/base-check/20261114-062650-line-0.12.json`. Results:
+  - 2.035 m driven, 0.116 m/s, heading +3.74 deg per m (left)
+  - M1 replay: w +0.0083 rad/s; start-to-end scan +0.0077, so the measurement is right now
+  - the loop asked for more and more right turn, up to -0.056 rad/s, and the base kept turning left
+- Turn steps while driving at 0.12 m/s (`/tmp/arc.py`, one-off), 0.35 m per step. The yaw rate is
+  from odometry (0.01 rad resolution), the first 0.6 s of each step left out:
+
+  | w asked (rad/s) | 0 | +0.05 | -0.05 | +0.10 | -0.10 | +0.15 | -0.15 | +0.20 | -0.20 |
+  |---|---|---|---|---|---|---|---|---|---|
+  | measured, run 1 | -0.004 | +0.010 | +0.005 | +0.010 | +0.005 | | | | |
+  | measured, run 2 (other way) | 0.000 | | | | | +0.029 | +0.010 | +0.020 | 0.000 |
+
+  The old firmware turns 5 to 20 % of a small left command and nothing of a right command while
+  driving. On the spot both ways work (the turn ladder, every 180 deg turn today). So no Pi-side
+  loop can hold a straight line or steer finely on this firmware. This is also a likely cause of the
+  loose following noted before.
+- The fix is the new firmware's per-wheel speed loop (branch claude/base-firmware-e54d4f, PWM 1 kHz,
+  not flashed). Flashing needs the owner's approval. The old image is backed up (see above).
