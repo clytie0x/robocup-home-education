@@ -551,3 +551,37 @@ The task (owner, unattended): pick the bag in front, put it next to the chair be
   from the chair, the gripper opened and the arm folded to rest (torque on).
 - The arm team had their stack running in sim mode on ROS domain 42 from 03:53; one trajectory of
   mine went to their simulated arm before the real driver was moved to domain 44.
+
+## Arm: bag onto a box, then water bottles, 2026-11-14 (stopped by the owner, nothing placed)
+
+Owner's tasks: pick the bag again and put it on the chair, then on a cardboard box, then three water
+bottles onto the box. None was finished.
+- Chair seat: not attempted. With the bag hanging 0.27 m below the grip, the gripper would need
+  0.70 to 0.75 m above the floor. The arm team's IK reaches 0.605 m at most (14 to 35 cm forward,
+  tool level).
+- Power: the owner put a power strip on the top deck. Its 10+ m cable hung first at the front-left
+  corner, 3.5 cm ahead of the front edge, where `must_stop` refused to drive. It was then taped to
+  a left post. It shows in the scan at about (-0.08, 0.24) m and was masked as a body part.
+  The one-off drive script counted the net turn since the cable was laid out and refused anything
+  past +-180 degrees. It ended at -170.9 degrees.
+- Two left turns of 180 degrees (361 in all) were made before the owner's cable note arrived. The
+  owner then laid the cable out again, and nothing was caught.
+- Sensing at close range: the clear plastic bag gave almost no LiDAR returns (many 0 m readings)
+  and no Xtion depth. The Xtion also reads nothing nearer than about 0.5 m. A cluster at (0.28, 0.08)
+  that looked like the bag neck vanished when the arm moved home: it was the arm itself.
+  The bag was located from two colour frames 0.36 m apart by odometry (knot about 0.27 m ahead,
+  0.17 m up). Two grasps closed on nothing, the first probably blocked by the top deck's front edge.
+- Cardboard box: 0.135 m tall (depth, front face top to bottom), below the LiDAR plane, so only the
+  camera and odometry see it.
+- Green-cap bottle: 6.4 cm wide (depth), its cap crosses the LiDAR plane. `tools/approach.py --to 0.30`
+  crept 0.196 m to it. The gripper has a fixed finger (inner face at gripper x +0.008) and a jaw
+  opening to -x, so the grasp was aimed with the cap 2.95 cm on the jaw side, opened to 7.5 cm.
+  It closed on nothing and the bottle did not move.
+- Arm height check: closed jaws lowered beside the bottle first showed in the scan when the IK put
+  the tips at 0.2115 m, not at 0.2265 m. So the real arm sits about 1.9 to 3.4 cm higher than its
+  model puts it, or the scan plane is that much lower than 0.245 m. Sideways it was within about 1 cm.
+  This offset is the likely cause of the missed top-down grasps. It is not fixed in the arm team's
+  calibration.
+- End state: base still, about 8 cm from the bottle. Arm folded to rest (torque on), my driver on
+  domain 44 stopped, the arm team's driver and pick_place (domain 42) untouched. One-off scripts
+  removed from /tmp on the Pi and the Jetson (copies in the session scratchpad only).
