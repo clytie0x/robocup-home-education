@@ -225,3 +225,58 @@ New risk for Help Me Carry: retractable barriers have a belt about 0.9 m above t
 The LiDAR plane (0.22 m) sees only the posts, and the robot (0.24 m high) fits under the
 belt, so it may drive into the blocked area without touching anything. Only the depth
 image can see the belt, and only once `camera_pitch_deg` is known.
+
+## Safety review of the drive path, 2026-11-13 (before the first drive)
+
+A review of `safety.py`, `wheels.py` and `run_follow.py`. Each item says whether it was
+confirmed by reading the code here.
+
+Fixed in this branch (`163 tests OK` on the laptop and on the Pi):
+
+1. **An incomplete LiDAR revolution read as free space** (confirmed). `ScanStream.feed`
+   promoted whatever had arrived between two angle wraps, so a revolution with lost
+   packets had no samples where the packets were missing, and a missing sample cannot be
+   told from clear air. `must_stop` saw nothing there and the robot would drive on. Real
+   rate: in the 549 revolutions saved by the five base-check runs, 2 were broken (0.4 %),
+   the worst with 135 samples and a 252 degree hole. Good revolutions have gaps of 1.03
+   degrees median, 1.47 at the 95th percentile. Fix: `lidar.complete()` with a 5 degree
+   limit; a holed revolution is dropped and the last good one is kept, so after 0.5 s
+   (`max_age`) `latest()` returns nothing and `run_follow` stops with "no scan".
+2. **`S#` was sent exactly once per stop** (confirmed). The watchdog wrote one `S#` and
+   then returned early for ever; `stop()` and `close()` wrote one each. One byte lost to
+   an 8E1 parity error left the base driving on the last command. Fix: every stop writes
+   `S#` three times (`STOP_REPEATS`), including when the port is opened, which also stops
+   a base left driving by a crashed run. The port still goes quiet after a stop, so
+   `air_check.py`'s silence test still measures silence.
+
+Open, and the reason the owner must keep a hand on the power switch:
+
+3. **Process death leaves the last `F` packet in force** (confirmed by reading; the
+   firmware's behaviour is unmeasured). The only watchdog is a thread in the same process.
+   `kill -9`, the OOM killer, a crash in the OpenNI thread, a Pi brown-out or an unplugged
+   CH340 run no `finally` and send no `S#`. `run_follow.py` claimed in a docstring that
+   "the firmware then stops on its own silence"; that was never measured, and the docstring
+   now says so. `tools/air_check.py` part 2 measures it. No Python change can remove this
+   risk.
+4. **Jetson link loss does not stop the robot** (confirmed). This is the design the owner
+   chose (`specs/2026-11-13-person-follow-design.md`: keep following on the LiDAR track
+   when the Jetson is gone), so it is not a fault. The real question behind it is whether
+   the LiDAR leg track can jump to another person while no look arrives to contradict it.
+   `legs.py` and `senses.py` were not reviewed in depth. Open for Task 9 and Task 13
+   scenario 4.
+5. **The 0.3 m closest approach is not enforced by any layer** (reported, arithmetic
+   checked here). `must_stop` uses the braking distance, which shrinks with speed:
+   0.295 m at 0.12 m/s but 0.153 m at 0.01 m/s, and the brain restarts from standstill
+   after an "obstacle" stop, so it can creep closer. Side margin is 0.05 m. Decide with
+   the owner whether a flat floor of 0.3 m is wanted.
+6. Smaller, reported and not fixed: the brain brakes with `accel` 0.25 m/s² while the base
+   needs 0.064 m/s² plus 0.27 s, so a close approach ends about 0.07 m short of the
+   0.60 m gap; no heading deadband, so a standing operator gives small turn packets back
+   and forth (wheel chatter, not a hazard); `--max-speed` is enforced through the brain
+   only, not in `packet()`; no `write_timeout` on the wheel port, so a blocked write could
+   hold the lock; the scan timestamp is the parse time, allowing about 1 s of sensor age in
+   the worst cycle; valid but frozen or reset odometry is not detected; `must_stop` checks
+   a straight strip while a turning robot sweeps an arc.
+
+Not a fault: `safety.speed_cap`'s blind-camera cap (0.3 m/s) is above `max_speed` (0.12),
+so it never acts. That was the measured decision of Task 2, recorded above.
