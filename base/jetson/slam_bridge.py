@@ -236,6 +236,7 @@ def make_bridge(port, log_dir, laser_x):
             latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
             self.create_subscription(OccupancyGrid, "/map", self.on_map, latched)
             self.map = None  # the newest /map not yet written to a PNG
+            self.saved = None  # the cells of the last PNG written
             self.log_dir = Path(log_dir)
             self.create_timer(1.0 / CORRECTION_HZ, self.send_correction)
             self.create_timer(MAP_PNG_EVERY, self.save_map)
@@ -282,8 +283,9 @@ def make_bridge(port, log_dir, laser_x):
 
         def save_map(self):
             message, self.map = self.map, None
-            if message is None:
+            if message is None or list(message.data) == self.saved:  # slam_toolbox republishes an unchanged map
                 return
+            self.saved = list(message.data)
             self.log_dir.mkdir(parents=True, exist_ok=True)
             path = self.log_dir / time.strftime("map-%Y%m%d-%H%M%S.png")
             write_png(path, message.info.width, message.info.height, map_pixels(message.data, message.info.width, message.info.height))

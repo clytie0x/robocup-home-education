@@ -84,15 +84,47 @@ class SlamLinkTests(unittest.TestCase):
         self.reply(0.7, 0.0, 0.0)  # 0.4 m from the last one, fine
         self.assertTrue(wait_for(lambda: link.correction() == (0.7, 0.0, 0.0)))
 
+    def test_the_first_correction_of_a_session_may_be_far_from_identity(self):
+        link = self.make_link()
+        link.send(1.0, (0, 0, 0), ring())
+        self.assertTrue(wait_for(lambda: self.records))
+        self.reply(2.0, -3.4, 1.0)  # the map starts at the first odometry pose, not at zero
+        self.assertTrue(wait_for(lambda: link.correction() == (2.0, -3.4, 1.0)))
+        self.assertEqual((link.refused, link.rebased), (0, 1))
+        self.reply(2.0, -2.0, 1.0)  # a jump inside the session is still refused
+        self.assertTrue(wait_for(lambda: link.refused == 1))
+
+    def test_a_reconnect_takes_the_new_map_but_a_steady_one_is_not_counted(self):
+        port = self.server.port
+        link = self.make_link()
+        link.send(1.0, (0, 0, 0), ring())
+        self.assertTrue(wait_for(lambda: self.records))
+        self.reply(0.3, 0.0, 0.0)
+        self.assertTrue(wait_for(lambda: link.correction() == (0.3, 0.0, 0.0)))
+        self.server.stop()
+        self.records.clear()
+        self.start_server(port)
+
+        def arrived():
+            link.send(2.0, (0, 0, 0), ring())
+            return bool(self.records)
+
+        self.assertTrue(wait_for(arrived, 6.0))
+        self.reply(0.35, 0.0, 0.0)  # same map after a Wi-Fi hiccup
+        self.assertTrue(wait_for(lambda: link.correction() == (0.35, 0.0, 0.0)))
+        self.assertEqual(link.rebased, 0)
+
     def test_a_jump_over_20_degrees_is_refused_across_the_wrap(self):
         link = self.make_link()
         link.send(1.0, (0, 0, 0), ring())
         self.assertTrue(wait_for(lambda: self.records))
-        self.reply(0.0, 0.0, math.radians(170))
-        self.assertTrue(wait_for(lambda: link.refused == 1))  # 170 degrees from identity
-        self.reply(0.0, 0.0, math.radians(15))
+        self.reply(0.0, 0.0, math.radians(15))  # the first one is taken as it is
         self.assertTrue(wait_for(lambda: link.correction()[2] == math.radians(15)))
         self.reply(0.0, 0.0, math.radians(-170))  # 175 degrees away, though only 10 from -180
+        self.assertTrue(wait_for(lambda: link.refused == 1))
+        self.reply(0.0, 0.0, math.radians(30))  # 15 degrees on, fine
+        self.assertTrue(wait_for(lambda: link.correction()[2] == math.radians(30)))
+        self.reply(0.0, 0.0, math.radians(60))  # 30 degrees on, refused
         self.assertTrue(wait_for(lambda: link.refused == 2))
 
     def test_a_bad_correction_is_ignored_and_the_link_goes_on(self):

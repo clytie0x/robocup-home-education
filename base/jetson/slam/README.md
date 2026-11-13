@@ -24,3 +24,8 @@ Rates, on the Jetson (a third terminal, with the same two exports):
     ros2 topic hz /scan
     ros2 topic hz /odom
     ros2 run tf2_ros tf2_echo map odom
+
+Stopping: Ctrl-C the launch. slam_toolbox 2.8.5 then aborts with "context cannot be slept with because it's
+invalid" and apport writes a crash report. That is a shutdown bug in the package, not a fault in the map.
+The first correction of a session can be far from zero: the map origin is the first pose slam_toolbox sees,
+and the firmware odometry is not zeroed between runs. `SlamLink` takes the first one after each connection.

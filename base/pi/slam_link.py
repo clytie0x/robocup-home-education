@@ -56,6 +56,8 @@ class SlamLink:
         self._stop = threading.Event()
         self._thread = None
         self.refused = 0  # corrections thrown away for jumping too far
+        self.rebased = 0  # times a new connection started from a map that is not where the old one was
+        self._fresh = True  # the next correction starts a SLAM session and is taken as it is
         self.connected = False
         self.error = None  # text of the last problem, for logs
 
@@ -88,6 +90,7 @@ class SlamLink:
                 with socket.create_connection((self._host, self._port), timeout=self._connect_timeout) as sock:
                     sock.settimeout(self._send_timeout)
                     self.connected = True
+                    self._fresh = True
                     self._talk(sock)
             except Exception as error:  # the thread must live until stop()
                 self.error = "%s: %s" % (type(error).__name__, error)
@@ -125,8 +128,13 @@ class SlamLink:
             return
         with self._lock:
             px, py, pth = self._correction
-            if math.hypot(x - px, y - py) > MAX_JUMP_M or abs(_wrap(th - pth)) > MAX_JUMP_RAD:
+            jumped = math.hypot(x - px, y - py) > MAX_JUMP_M or abs(_wrap(th - pth)) > MAX_JUMP_RAD
+            # slam_toolbox puts the map origin at the first pose it sees, and the firmware odometry is
+            # not zeroed between runs, so the first correction of a session can be far from identity.
+            if jumped and not self._fresh:
                 self.refused += 1
                 self.error = "correction refused: jumped to %.2f %.2f %.2f" % (x, y, th)
                 return
+            self.rebased += jumped
+            self._fresh = False
             self._correction = (x, y, th)
