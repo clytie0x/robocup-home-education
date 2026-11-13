@@ -35,6 +35,29 @@ not do quite what it is told. What was measured:
 4. The simulation keeps running the same brain: every map still earns 1115 points at
    0.5 m/s (ladder last rung), and the evidence folder is regenerated.
 
+## Principle: measure while driving, bound by fixed safety limits (owner, 2026-11-13)
+
+The hardware is measured coarsely (odometry in 0.01 m steps, no firmware speed loop), so
+the software carries the accuracy. Values in `params.json` are starting values, not
+truth: while the robot drives, it measures what it really did and keeps its own estimates.
+Safety limits stay fixed and the estimates may only make the robot more careful, never
+less: top speed, the 0.30 m clearance ahead, the 0.03 m body margin, and a floor under
+the braking distance (the worse of the estimate and `params.json`).
+
+Layers, bottom first; each one is built on the one below:
+1. Stopping for sure: `safe_run` now, a firmware timeout later.
+2. Wheel speed and measured motion: a motion estimator on the Pi fuses wheel odometry with
+   LiDAR scan-to-scan matching every revolution and gives the real (v, w); a velocity loop
+   on the Pi corrects the command until the measured speed matches; new firmware later
+   adds a wheel loop and finer odometry.
+3. Pose: the same estimator gives the pose; slam_toolbox corrects it on the Jetson.
+4. Collision checks with the real outline. 5. Planning. 6. Following and who is who.
+
+Estimated online, each with bounds and a fallback to `params.json` when the estimate is
+not trustworthy (too few samples, scan match below 60 % agreement, value outside bounds):
+speed gain (driven / commanded), turn gain, straight-line drift (turn per metre),
+command latency, braking (deceleration and stop delay, from every stop).
+
 ## Design, group B: the brain (code only, first)
 
 - **Footprint, not a circle.** Planning inflates obstacles by the inscribed half-width
@@ -48,9 +71,9 @@ not do quite what it is told. What was measured:
   point comes within 0.03 m; the 0.30 m clearance straight ahead stays. This replaces the
   0.33 m spin circle that froze the robot beside a wall.
 - **A base model with the real numbers.** `world.MAX_DECEL` (braking) is separate from
-  `world.MAX_ACCEL`; the brain brakes with the base's 0.064 m/s^2 and accounts for the
-  stop delay. The command latency is measured (task A1); if it is over 0.15 s the Pi
-  predicts its pose that far ahead before each brain step.
+  `world.MAX_ACCEL`; the brain brakes with the estimator's deceleration and stop delay
+  (never better than the floor). The Pi predicts its pose ahead by the estimated latency
+  before each brain step.
 - **Heading deadband.** Within 4 degrees of the wanted heading while standing, the robot
   does not turn.
 - **Furniture is not a person.** A LiDAR candidate counts as a person (for the crowd and
@@ -63,11 +86,8 @@ not do quite what it is told. What was measured:
 
 ## Design, group A: the base (measure, calibrate, then hardware)
 
-- A1 measure the command latency and the response with the existing tools (logs of
-  `base_check`, timestamps of packets, odometry and scans).
-- A2 calibrate the straight-line drift: lines out and back on the open lane, then a
-  turn-rate bias per metre driven (`drift_w_per_v` in `params.json`) applied in
-  `wheels.packet`.
+- A1 and A2 (latency, drift) are no longer one-off calibrations: the motion estimator
+  measures them all the time (layer 2), and the velocity loop corrects them.
 - A3 new firmware (draft `base/docs/firmware-design.md`): wheel speed PI loop, odometry in
   millimetres with a timestamp, 0.3 s command timeout. Needs the owner at the board
   (photos, ST-Link, multimeter), and only after the backup of the old firmware.

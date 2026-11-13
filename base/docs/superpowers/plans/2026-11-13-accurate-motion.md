@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The real base follows the operator through 0.65 m gaps without touching anything, drives what the brain asks, and knows its pose to 0.10 m.
+**Goal:** The real base follows the operator through 0.65 m gaps without touching anything, drives what the brain asks, and knows its pose to 0.10 m, with the base's numbers measured while it drives.
 
 **Architecture:** Group B changes the shared brain (`hmc/`) and the Pi's last-resort stop to use the robot's real outline and the measured base limits. Group A measures and calibrates the base, then replaces the firmware and adds an IMU. Group C runs slam_toolbox on the Jetson, fed over TCP by the Pi, and sends the map correction back.
 
@@ -41,16 +41,62 @@ base/pi/safety.py                modify  must_stop sweeps the outline
 base/pi/body.py                  modify  sets the new world constants from params
 base/pi/senses.py                modify  static candidates are not people
 base/pi/run_follow.py            modify  pose prediction for latency, search turning
-base/pi/wheels.py                modify  drift bias
+base/pi/motion.py                new     fused motion from wheel odometry and LiDAR scan matching
+base/pi/calib.py                 new     online estimates of gains, drift, latency, braking, with bounds
+base/pi/velocity.py              new     velocity loop on the Pi
 base/pi/slam_link.py             new     Pi side of the SLAM stream (port 5602)
 base/pi/tools/lap_check.py       new     wall-following lap for gap and map runs (from the scratch lap.py)
 base/pi/tools/latency.py         new     command-to-motion latency from base_check logs
 base/jetson/slam_bridge.py       new     TCP <-> ROS2 bridge for slam_toolbox
 base/jetson/slam/params.yaml     new     slam_toolbox settings
-base/params.json                 modify  robot_radius 0.26, drift_w_per_v, latency
+base/params.json                 modify  robot_radius 0.26; command_latency as a starting value
 ```
 
 ---
+
+## Order of work (owner, 2026-11-13: bottom layer first, values measured while driving)
+
+M1, M2, M3 first (layers 2 and 3 of the spec), then Task 2 (safety), Task 1, 3, 4, 5, 6, 7, 8.
+Firmware (Task 10) and the SLAM stream (Tasks 11 and 12) run in parallel sessions; they do
+not touch the files of M1 to Task 8.
+
+## Layers 2 and 3: measured motion
+
+### Task M1: Motion estimator, wheel odometry plus LiDAR scan matching
+
+**Files:** Create `base/pi/motion.py`; Test `base/pi/tests/test_motion.py`.
+
+**Interfaces:**
+- Consumes: `scanmatch.match(before, after, p, guess) -> (dx, dy, dyaw, agree)`; `wheels.Wheels.read_odom() -> (x, y, yaw)`.
+- Produces: `MotionEstimator(p, match=scanmatch.match)`; `update(t, odom_pose, scan, command) -> MotionState`; `MotionState(t, pose, v, w, trusted: bool, agree: float)` where `pose` is the fused pose in the odometry frame and `v, w` the measured speeds over the last revolution.
+
+- [ ] **Step 1: Failing tests:** with a fake `match` that reports 0.012 m per revolution while odometry reports 0.010 m, the fused step follows the scan match (within 1 mm) and `trusted` is True; with `agree` 0.4 the step follows odometry and `trusted` is False; a scan-match step that disagrees with odometry by more than 0.05 m or 5 degrees is refused (odometry used, counted in `refused`); timestamps that go backward raise.
+- [ ] **Step 2: Run** `PYTHONPATH="hmc/src;base/pi" python -m unittest base.pi.tests.test_motion` — FAIL.
+- [ ] **Step 3: Implement.** Odometry delta as the match guess; downsample each scan to at most 150 points before matching (time budget below).
+- [ ] **Step 4: Measure on the Pi:** match time per revolution pair, median and worst of 200 from tonight's saved scans. Must stay under 40 ms median, 80 ms worst; if not, lower the point count and say what was lost.
+- [ ] **Step 5:** Replay the three follow logs and the two lap logs of 2026-11-13 through the estimator; report the fused path against odometry (end-point difference) and the share of trusted revolutions. Commit.
+
+### Task M2: Online estimates of the base, with bounds
+
+**Files:** Create `base/pi/calib.py`; Test `base/pi/tests/test_calib.py`.
+
+**Interfaces:**
+- Produces: `BaseEstimates(p)`; `observe(state: MotionState, command: (v, w), sent_at)`; read-only properties `speed_gain`, `turn_gain`, `drift_per_m`, `latency`, `decel`, `stop_delay`, each `(value, samples, trusted)`; `safe_braking()` returns the larger of the estimate and the `params.json` floor.
+
+- [ ] **Step 1: Failing tests:** a synthetic run where the base drives 0.8 times the command converges to `speed_gain` 0.80 within 0.03 after 30 s of samples; a stop event (command to 0, speed decays) gives `decel` and `stop_delay` within 10 % of the synthetic truth; a lag of 0.4 s between command and measured turn rate gives `latency` 0.40 within 0.1; `safe_braking()` never returns less than the floor; with fewer than the minimum samples every estimate reports `trusted` False and the `params.json` value.
+- [ ] **Step 2: Run, FAIL. Step 3: Implement** (exponential averages with a sample count; latency by the lag of best correlation over a 10 s window; bounds: gains 0.5 to 1.5, latency 0 to 1.0 s, decel 0.02 to 1.0 m/s^2).
+- [ ] **Step 4:** Replay tonight's logs; report each estimate. Compare with the one-off measurements in the hardware assessment. Commit.
+
+### Task M3: Velocity loop on the Pi
+
+**Files:** Create `base/pi/velocity.py`; Modify `base/pi/run_follow.py` (wiring only); Test `base/pi/tests/test_velocity.py`.
+
+**Interfaces:**
+- Produces: `VelocityLoop(p, estimates)`; `command(v_wanted, w_wanted, state) -> (v_send, w_send)`: feed-forward divides by the trusted gains, a PI term on the measured error, a turn bias for the estimated drift; clamps to `max_speed` and `max_turn_rate`; no integral wind-up while the base is at its cap (measured speed flat while the command rises).
+
+- [ ] **Step 1: Failing tests:** against a simulated base with gain 0.8 and a 0.12 m/s cap, a wanted 0.10 m/s settles within 5 % in 3 s; a wanted 0.20 m/s never sends above `max_speed` and the integral stays bounded; a drift of 2 cm per metre is turned out within 0.5 cm per metre; `v_wanted = 0` sends exactly 0 (the stop path is never delayed by the loop).
+- [ ] **Step 2: Run, FAIL. Step 3: Implement.** `run_follow.cycle` passes the brain's `(v, w)` through `VelocityLoop.command` after `must_stop`, so a stop still sends 0 at once.
+- [ ] **Step 4:** Fable review of `velocity.py` and the `run_follow.py` wiring. Then on the robot: `lap_check` (Task 8 tool) one lap with the loop; pass when the driven speed is within 10 % of the wanted speed in steady 1 s windows and straight segments drift under 0.5 cm per metre. Commit.
 
 ## Group B: the brain
 
@@ -112,6 +158,8 @@ and keep every existing `test_safety` assertion (straight-ahead clearance 0.30 m
 **Interfaces:**
 - Produces: `world.MAX_DECEL: float | None = None` (None means `MAX_ACCEL`), `world.STOP_DELAY = 0.0`; `braking_speed(room, dt)` uses them: the speed from which the robot stops within `room` after `STOP_DELAY`.
 
+On the robot `Body` sets `MAX_DECEL` and `STOP_DELAY` every cycle from `BaseEstimates.safe_braking()` (M2), so the brain brakes with what the base did today, never better than the floor.
+
 - [ ] **Step 1: Failing tests:** `test_braking_speed_with_the_real_base()` — with `MAX_DECEL = 0.064`, `STOP_DELAY = 0.27`, `braking_speed(0.30, 0.1)` is at most 0.12 and `v * 0.27 + v * v / (2 * 0.064) <= 0.30`; `test_body_sets_decel_and_delay()` — after `Body(P)`, `world.MAX_DECEL == P["decel"]`.
 - [ ] **Step 2: Run, expect FAIL. Step 3: Implement** (`Robot.brake` uses `MAX_DECEL`; `BASES["real"]` gains `decel=0.064, stop_delay=0.27`; `use_base` sets them).
 - [ ] **Step 4: Run** `pytest`, `python -m hmc.run`, the ladder. Regenerate evidence. Commit.
@@ -133,8 +181,8 @@ and keep every existing `test_safety` assertion (straight-ahead clearance 0.30 m
 
 - [ ] **Step 1: Failing tests:** `first_motion` on a synthetic log that starts moving 0.30 s after `drive_start` returns 0.30 within 0.05; `predict((0,0,0), 0.1, 0.0, 0.5) == (0.05, 0, 0)`.
 - [ ] **Step 2: Run, FAIL. Step 3: Implement.**
-- [ ] **Step 4: Measure:** run `latency.py` on tonight's 13 turn and line logs; report median and worst. Then three `base_check --turn 0.26 --degrees 30` runs. Write `command_latency` (median) to `params.json`.
-- [ ] **Step 5:** If `command_latency > 0.15`, call `predict` on the pose before `body.sync` in `run_follow.cycle`, with the commands sent in the last `command_latency` seconds. Test with the fake base. Fable review of `run_follow.py` with Task 7. Commit.
+- [ ] **Step 4: Measure:** run `latency.py` on tonight's 13 turn and line logs; report median and worst, and compare with `BaseEstimates.latency` (M2). `command_latency` in `params.json` becomes the starting value only.
+- [ ] **Step 5:** Call `predict` on the pose before `body.sync` in `run_follow.cycle` with `BaseEstimates.latency` (the `params.json` value until it is trusted) and the commands sent in that window. Test with the fake base. Fable review of `run_follow.py` with Task 7. Commit.
 
 ### Task 6: Furniture is not a person
 
@@ -165,13 +213,12 @@ and keep every existing `test_safety` assertion (straight-ahead clearance 0.30 m
 
 ## Group A: the base
 
-### Task 9: Straight-line drift calibration
+### Task 9: Check the drift the velocity loop leaves
 
-**Files:** Modify `base/pi/wheels.py`, `base/params.json`; Test `base/pi/tests/test_wheels.py`.
-
-- [ ] **Step 1: Failing test:** with `drift_w_per_v = 0.1`, `packet(0.10, 0.0, p)` carries `w = +0.010 * angular_cmd_scale` rounded as today; `packet(0.0, 0.3, p)` is unchanged.
-- [ ] **Step 2: Run, FAIL. Step 3: Implement.**
-- [ ] **Step 4: Measure** on the open lane: `base_check --line 0.12 --metres 2.5` out, turn 180, back, three times each way. Fit `drift_w_per_v = -drift_per_metre` (rad per metre). Write it; repeat the lines; pass when drift is under 0.5 cm per metre. Commit.
+The fixed `drift_w_per_v` of the first draft is replaced by M2's online drift estimate and
+M3's turn bias. This task only checks it: on the open lane, `base_check --line 0.12
+--metres 2.5` out, turn 180, back, three times each way, with the loop on. Pass when drift
+is under 0.5 cm per metre in every run; record the numbers in the hardware assessment.
 
 ### Task 10: New firmware and an IMU (owner hardware)
 
