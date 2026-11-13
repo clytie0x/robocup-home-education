@@ -339,6 +339,9 @@ and 23 (NO), wired on 11. The controller board is hidden between the motors. Thi
 with the Task 3 note that one power bank feeds everything: to be confirmed by the owner,
 with the converter's output voltage.
 
+The red push button cuts the motor power (owner, 2026-11-13). It is the cut-off to keep within
+reach on every drive, because the firmware does not stop by itself.
+
 ## Operator identity, review round 2, 2026-11-13
 
 A second review of the merge rule (fuzz of 600 runs with leg geometry, link down) found two
