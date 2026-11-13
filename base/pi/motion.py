@@ -12,8 +12,10 @@ from dataclasses import dataclass
 import scanmatch
 
 AGREE_MIN = 0.6  # share of points that must agree (spec: below 60 % the estimate is not trusted)
-MAX_POS = 0.05  # m; a match further than this from the odometry step is refused
-MAX_YAW = math.radians(5)
+# A match further than this from the odometry step is refused: a floor, plus half the step itself
+# (a step is about 0.012 m at 0.12 m/s; a fixed 0.05 m let a match the wrong way through, review).
+MAX_POS = 0.02  # m
+MAX_YAW = math.radians(2)
 # Returns per scan given to the matcher. On the Pi (235 pairs of saved scans 1 s apart, no guess):
 # 150 points took 26.9 ms median, 91 ms worst (over the 80 ms budget), 84 % trusted; 120 points
 # 14.4 ms median, 63 ms worst, 71 % trusted. Scans 0.1 s apart with the odometry guess agree more.
@@ -69,7 +71,9 @@ class MotionEstimator:
                 pass  # too few points, or no overlap: keep the odometry
             else:
                 if agree >= AGREE_MIN:
-                    if math.hypot(mx - step[0], my - step[1]) <= MAX_POS and abs(_wrap(mth - step[2])) <= MAX_YAW:
+                    near = (math.hypot(mx - step[0], my - step[1]) <= MAX_POS + 0.5 * math.hypot(step[0], step[1])
+                            and abs(_wrap(mth - step[2])) <= MAX_YAW + 0.5 * abs(step[2]))
+                    if near:
                         step, trusted = (mx, my, mth), True
                     else:
                         self.refused += 1

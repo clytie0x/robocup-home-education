@@ -59,6 +59,23 @@ class VelocityLoopTest(unittest.TestCase):
         state = MotionState(2.0, (0.0, 0.0, 0.0), 0.1, 0.2, True, 0.9)
         self.assertEqual(loop.command(0.0, 0.0, state), (0.0, 0.0))
 
+    def test_a_hold_does_not_build_up_the_integral(self):
+        loop = velocity.VelocityLoop(P, FakeEstimates())
+        still = MotionState(0.0, (0.0, 0.0, 0.0), 0.0, 0.0, True, 0.9)
+        for i in range(30):  # 3 s held by a stop: the brain asks 0.025, the base stands
+            t = 0.1 * i
+            loop.command(0.025, 0.0, MotionState(t, (0, 0, 0), 0.0, 0.0, True, 0.9))
+            loop.reset(t)
+        first = loop.command(0.025, 0.0, MotionState(3.0, (0, 0, 0), 0.0, 0.0, True, 0.9))
+        self.assertLess(first[0], 0.04)
+
+    def test_the_cycle_cap_is_kept(self):
+        loop = velocity.VelocityLoop(P, FakeEstimates())
+        _, _, sent = run(loop, (0.05, 0.0), 3.0, gain=0.5)
+        loop2 = velocity.VelocityLoop(P, FakeEstimates())
+        state = MotionState(3.1, (0, 0, 0), 0.0, 0.0, True, 0.9)
+        self.assertLessEqual(loop2.command(0.05, 0.0, state, top=0.05)[0], 0.05)
+
     def test_an_untrusted_measurement_only_feeds_forward(self):
         loop = velocity.VelocityLoop(P, FakeEstimates(speed_gain=(0.8, 100, True)))
         state = MotionState(0.0, (0.0, 0.0, 0.0), 0.0, 0.0, False, 0.2)

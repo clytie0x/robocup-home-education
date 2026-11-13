@@ -82,6 +82,29 @@ class EstimatesTest(unittest.TestCase):
         self.assertLessEqual(decel, P["decel"])
         self.assertGreaterEqual(delay, P["stop_delay"])
 
+    def test_standing_after_a_stop_makes_no_more_stops(self):
+        est = calib.BaseEstimates(dict(P, decel=0.5, stop_delay=0.0))
+        t = drive(est, [(0.04, 0.0)] * 20 + [(0.0, 0.0)] * 20, decel=0.064, delay=0.27)
+        samples = est.decel[1]
+        for i in range(600):  # 60 s standing with a little noise in the measured speed
+            est.observe(MotionState(t + 0.1 * i, (0, 0, 0), 0.01 * (i % 2), 0.0, True, 0.9), (0.0, 0.0), t)
+        self.assertEqual(est.decel[1], samples)
+
+    def test_no_latency_from_noise_without_turn_commands(self):
+        est = calib.BaseEstimates(P)
+        for i in range(300):
+            w = 0.15 if i % 37 == 0 else 0.0
+            est.observe(MotionState(0.1 * i, (0, 0, 0), 0.05, w, True, 0.9), (0.05, 0.0), 0.0)
+        self.assertEqual(est.latency[1], 0)
+
+    def test_a_command_the_velocity_loop_moves_a_little_still_counts_as_steady(self):
+        est = calib.BaseEstimates(P)
+        for i in range(400):  # the loop moves the command by under SAME every cycle
+            v_cmd = 0.10 + 0.004 * ((i % 3) - 1)
+            est.observe(MotionState(0.1 * i, (0, 0, 0), 0.8 * 0.10, 0.003, True, 0.9), (v_cmd, 0.005), 0.1 * i)
+        self.assertTrue(est.speed_gain[2])
+        self.assertAlmostEqual(est.speed_gain[0], 0.8, delta=0.05)
+
     def test_estimates_stay_inside_their_bounds(self):
         est = calib.BaseEstimates(P)
         drive(est, [(0.10, 0.0)] * 300, gain=3.0)

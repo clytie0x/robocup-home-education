@@ -20,6 +20,9 @@ MIN_V, MIN_W = 0.03, 0.1  # commands this small say too little about the gain
 WINDOW = 10.0  # s of history for the latency
 LAG_STEP = 0.02  # s
 STOP_FROM = 0.03  # m/s: a stop counts when the command falls to 0 from at least this
+SAME = 0.01  # m/s or rad/s: commands closer than this are one command (the velocity loop moves it a little)
+STRAIGHT = 0.02  # rad/s: a smaller turn command counts as driving straight
+CLEAR_FIT = 0.7  # the best latency must fit at least this much better than the median lag
 
 
 def _clamp(x, bounds):
@@ -32,7 +35,8 @@ class _Average:
 
     def add(self, x):
         x = _clamp(x, self.bounds)
-        self.value = x if self.value is None else (1 - ALPHA) * self.value + ALPHA * x
+        weight = max(ALPHA, 1.0 / (self.samples + 1))  # a plain mean until 1/ALPHA samples, then an average that forgets
+        self.value = x if self.value is None else self.value + weight * (x - self.value)
         self.samples += 1
 
 
@@ -72,11 +76,12 @@ class BaseEstimates:
 
     def observe(self, state, command, sent_at):
         """One cycle: the measured state (motion.MotionState), and the command (v, w) sent at sent_at."""
-        if not self.sent or self.sent[-1][1:] != tuple(command):
+        changed = not self.sent or max(abs(command[0] - self.sent[-1][1]), abs(command[1] - self.sent[-1][2])) > SAME
+        if changed:
             self.sent.append((sent_at, float(command[0]), float(command[1])))
         self.sent = [s for s in self.sent if s[0] > state.t - WINDOW - 1.0] or self.sent[-1:]
         self.seen = [s for s in self.seen if s[0] > state.t - WINDOW] + [(state.t, state.v, state.w)]
-        self._stops(state)
+        self._stops(state, changed)
         if not state.trusted:
             return  # gains only from motion the LiDAR confirmed
         lag = self.latency[0]
@@ -84,13 +89,14 @@ class BaseEstimates:
         if acting is None or state.t - lag - acting[0] < STEADY:
             return
         _, v_cmd, w_cmd = acting
-        if v_cmd >= MIN_V and abs(w_cmd) < 1e-9:
+        if v_cmd >= MIN_V and abs(w_cmd) < STRAIGHT:
             self._avg["speed_gain"].add(state.v / v_cmd)
             if state.v > MIN_V:
                 self._avg["drift_per_m"].add(state.w / state.v)
         if abs(w_cmd) >= MIN_W and v_cmd < MIN_V:
             self._avg["turn_gain"].add(state.w / w_cmd)
         if state.t - self._last_latency_at >= 1.0:
+            self._last_latency_at = state.t  # at most once a second, found or not
             self._latency(state.t)
 
     def _latency(self, now):
@@ -98,25 +104,29 @@ class BaseEstimates:
         seen = [s for s in self.seen if s[0] > now - WINDOW]
         if len(seen) < 30 or max(abs(s[2]) for s in seen) < MIN_W:
             return
-        best = None
+        turns = [s for s in self.sent if s[0] > now - WINDOW]
+        if sum(1 for a, b in zip(turns, turns[1:]) if abs(b[2] - a[2]) >= MIN_W) < 2:
+            return  # the turn command must change in the window, or every lag fits the same
+        best, errors = None, []
         lag = 0.0
         while lag <= LATENCY_BOUNDS[1] + 1e-9:
             pairs = [(c[2], s[2]) for s in seen if (c := self._command_at(s[0] - lag)) is not None]
             if len(pairs) >= 20:
                 err = sum((m - c) ** 2 for c, m in pairs) / len(pairs)
+                errors.append(err)
                 if best is None or err < best[0] - 1e-12:
                     best = (err, lag)
             lag = round(lag + LAG_STEP, 6)
         sign_changes = sum(1 for a, b in zip(seen, seen[1:]) if a[2] * b[2] < 0)
-        if best is not None and sign_changes >= 2:  # a lag is only seen when the turn changes
+        clear = errors and best is not None and best[0] <= CLEAR_FIT * sorted(errors)[len(errors) // 2]
+        if clear and sign_changes >= 2:  # a lag is only seen when the turn changes, and one lag must fit clearly best
             self._avg["latency"].add(best[1])
-            self._last_latency_at = now
 
-    def _stops(self, state):
+    def _stops(self, state, changed):
         """Watch each stop: how long the base kept its speed, then how fast it slowed down."""
         cmd = self.sent[-1] if self.sent else None
         if self._stop is None:
-            if cmd is not None and cmd[1] == 0.0 and len(self.sent) >= 2 and self.sent[-2][1] >= STOP_FROM:
+            if changed and cmd is not None and cmd[1] == 0.0 and len(self.sent) >= 2 and self.sent[-2][1] >= STOP_FROM:
                 before = [s for s in self.seen if s[0] < cmd[0]]
                 if before:
                     self._stop = (cmd[0], before[-1][1], [])

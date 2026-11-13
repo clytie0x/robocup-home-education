@@ -28,10 +28,11 @@ def test_the_simulation_brakes_as_before():
     assert braking_speed(1.0, 0.1) == max(math.sqrt(2 * a * 1.0) - a * 0.1, a * 0.1)
 
 
-def test_brake_slows_at_the_real_decel(real_base):
+def test_the_command_drops_fast_whatever_the_decel(real_base):
+    # the real base coasts at 0.064 m/s^2 whatever we send: sending less, sooner, is what stops it
     robot = Robot(speed=0.12)
     robot.brake(0.1)
-    assert robot.speed == pytest.approx(0.12 - 0.0064)
+    assert robot.speed == pytest.approx(max(0.0, 0.12 - world.MAX_ACCEL * 0.1))
 
 
 def test_no_turn_inside_the_deadband(real_base):

@@ -280,7 +280,8 @@ def cycle(state, now):
 
     if state.wheels is not None:  # a dry run has no motion to measure
         state.measured = state.motion.update(now, pose, scan, state.sent)
-        state.estimates.observe(state.measured, state.sent, now)
+        sent_at = state.history[-1][0] if state.history else now  # when the last command really went out
+        state.estimates.observe(state.measured, state.sent, sent_at)
         world_decel, world_delay = state.estimates.safe_braking()  # never better than params.json
         hmc_world.MAX_DECEL, hmc_world.STOP_DELAY = world_decel, world_delay
     t_read = state.clock() - now
@@ -326,7 +327,7 @@ def cycle(state, now):
     if search is not None:
         v, w = search
     if state.velocity is not None and state.measured is not None:
-        v, w = state.velocity.command(v, w, state.measured)  # what makes the base drive (v, w); 0 stays 0
+        v, w = state.velocity.command(v, w, state.measured, state.body.robot.max_speed)  # 0 stays 0
     # SLOW_CYCLE: the next cycle may come that late (a later one ends the run), so the command runs that long
     if stop is None and any(safety.must_stop(points, mv, mw, p, cycle=SLOW_CYCLE) for mv, mw in state.coast.motions(v, w, now)):
         stop = "obstacle"
@@ -336,6 +337,8 @@ def cycle(state, now):
         stop = "paused"  # from the page: hold still, the senses and the brain keep running
     if stop is not None:
         v = w = 0.0
+        if state.velocity is not None:
+            state.velocity.reset(now)  # nothing was driven: the integral must not grow while held
         state.body.robot.speed = state.body.robot.turn_speed = 0.0  # the brain ramps up again from standstill
 
     # 5. Wheels, Jetson, log. A command computed from sensors read too long ago is stale: stop instead.

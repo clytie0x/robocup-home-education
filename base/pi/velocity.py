@@ -24,8 +24,18 @@ class VelocityLoop:
         before = [x for x in self.wanted if x[0] <= t + 1e-9]
         return before[-1][1:] if before else (0.0, 0.0)
 
-    def command(self, v_wanted, w_wanted, state):
-        """(v, w) to send for the wanted (v, w), given the measured motion.MotionState."""
+    def reset(self, t):
+        """A stop overrode the command: nothing was driven, so nothing may build up meanwhile."""
+        self.integral_v = self.integral_w = 0.0
+        self.t = t
+        if self.wanted:
+            self.wanted[-1] = (t, 0.0, 0.0)
+
+    def command(self, v_wanted, w_wanted, state, top=None):
+        """(v, w) to send for the wanted (v, w), given the measured motion.MotionState.
+
+        top: this cycle's speed cap (the run's --max-speed, the page's slider, a blind camera), if lower.
+        """
         self.wanted = [x for x in self.wanted if x[0] > state.t - 2.0] + [(state.t, v_wanted, w_wanted)]
         if v_wanted == 0.0 and w_wanted == 0.0:
             self.integral_v = self.integral_w = 0.0
@@ -36,7 +46,8 @@ class VelocityLoop:
         gain_v = self.estimates.speed_gain[0] if self.estimates.speed_gain[2] else 1.0
         gain_w = self.estimates.turn_gain[0] if self.estimates.turn_gain[2] else 1.0
         drift = self.estimates.drift_per_m[0] if self.estimates.drift_per_m[2] else 0.0
-        top, turn_top = self.p["max_speed"], self.p["max_turn_rate"]
+        top = self.p["max_speed"] if top is None else min(top, self.p["max_speed"])
+        turn_top = self.p["max_turn_rate"]
         v = v_wanted / gain_v
         w = w_wanted / gain_w - drift * v_wanted  # the base turns drift rad per metre by itself
         if state.trusted:

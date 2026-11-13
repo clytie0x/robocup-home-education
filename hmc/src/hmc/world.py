@@ -38,6 +38,8 @@ MAX_ACCEL = 0.5  # m/s^2
 MAX_TURN_ACCEL = 3.0  # rad/s^2
 # Braking. None means the base brakes as hard as it speeds up (the simulation). The real base,
 # measured on 2026-11-13, slows at only 0.064 m/s^2, and only 0.27 s after it is told to stop.
+# They only set how early the robot starts to brake (braking_speed); the command itself still
+# drops at MAX_ACCEL, or a low estimate would keep the robot driving longer (review 2026-11-14).
 MAX_DECEL: float | None = None  # m/s^2
 STOP_DELAY = 0.0  # seconds from the stop command to the base starting to slow down
 # Turning on the spot to face a point (turn_toward), the robot does not turn for a heading error
@@ -230,7 +232,7 @@ class Robot:
         speed = 0.0 if left > TURN_ON_SPOT else self.max_speed * math.cos(left)
         if stop_in is not None:
             speed = min(speed, braking_speed(stop_in, dt))
-        self.speed = _ramp(self.speed, speed, (MAX_ACCEL if speed > self.speed else _decel()) * dt)
+        self.speed = _ramp(self.speed, speed, MAX_ACCEL * dt)
         step = min(self.speed * dt, remaining)
         self.x += math.cos(self.heading) * step
         self.y += math.sin(self.heading) * step
@@ -238,7 +240,7 @@ class Robot:
     def brake(self, dt: float) -> None:
         """Nothing to drive to: slow down. The robot still rolls on while it brakes."""
         self.turn_speed = 0.0  # shortcut: stops turning at once, ramp it if it matters
-        self.speed = _ramp(self.speed, 0.0, _decel() * dt)
+        self.speed = _ramp(self.speed, 0.0, MAX_ACCEL * dt)
         self.x += math.cos(self.heading) * self.speed * dt
         self.y += math.sin(self.heading) * self.speed * dt
 
