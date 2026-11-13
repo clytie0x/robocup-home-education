@@ -1,9 +1,16 @@
 # Copied from xohm@pi:~/pi-drive/lidar.py on 2026-11-13.
 """One revolution from the LDS-03 on /dev/rct_ahr_lidar. Angles are base-frame degrees."""
 
+import math
 import time
 
+import params
+
 LIDAR_PORT = "/dev/rct_ahr_lidar"
+LIDAR_X = params.load()["lidar_x"]  # laser ahead of the turning centre, metres
+# Half the 0.40 m square body, 2 cm in from its outline: a return inside it is part of the robot.
+# Seen 2026-11-13: laser 132 deg at 0.20 m, 3 of 726 logged scans, stopped a turn.
+BODY_INSIDE = 0.18
 # Measured with the camera depth columns and the lidar ranges, and by rotating the base: the
 # raw laser angle runs clockwise, and the front of the base is at this laser angle.
 FRONT_LASER_DEG = 178.7
@@ -192,7 +199,9 @@ def is_body(deg, meters):
         return True
     if meters <= 0.40 and 138 <= abs(deg) <= 155:
         return True
-    return False
+    x = LIDAR_X + meters * math.cos(math.radians(deg))
+    y = meters * math.sin(math.radians(deg))
+    return abs(x) < BODY_INSIDE and abs(y) < BODY_INSIDE  # a cable or the camera stand, never an obstacle
 
 
 def usable(scan):
