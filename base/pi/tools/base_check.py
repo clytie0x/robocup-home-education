@@ -5,7 +5,8 @@
   python tools/base_check.py --turn 0.26 --degrees 180 --yes-owner-at-robot
 
 The base moves. Only run it with the owner at the robot and 3 m clear in front.
---max-speed and --linear-scale change a copy of params.json for this run only.
+  python tools/base_check.py --turn 0.8 --degrees 180 --max-turn-rate 0.8 --yes-owner-at-robot
+--max-speed, --max-turn-rate and --linear-scale change a copy of params.json for this run only.
 Odometry (20 Hz), every scan and the report go to logs/base-check/ next to tools/.
 """
 
@@ -40,6 +41,7 @@ SEND_GAP = 0.15  # s between two send() calls; longer and the watchdog may have 
 LINE_OVERRUN = 0.3  # m, a line may run this far past the target before the time limit stops it
 TURN_OVERRUN = math.radians(30)  # the same for a turn
 MAX_SPEED_LIMIT = 0.6  # m/s, the highest rung of the ladder
+MAX_TURN_LIMIT = 1.2  # rad/s, the highest turn rung: each wheel then runs at about 0.19 m/s
 SCALE_RANGE = (0.5, 2.0)  # allowed --linear-scale
 SETTLE = 2.0  # s to wait after S# before the final scan
 
@@ -312,6 +314,8 @@ def run_params(p, args):
     p = dict(p)
     if args.max_speed is not None:
         p["max_speed"] = args.max_speed
+    if args.max_turn_rate is not None:
+        p["max_turn_rate"] = args.max_turn_rate
     p["linear_cmd_scale"] = args.linear_scale
     return p
 
@@ -328,6 +332,7 @@ def main():
     parser.add_argument("--metres", type=float, default=1.5, help="--line: odometry distance before S#")
     parser.add_argument("--degrees", type=float, default=180.0, help="--turn: odometry angle before S#")
     parser.add_argument("--max-speed", type=float, metavar="V", help="raise max_speed for this run only")
+    parser.add_argument("--max-turn-rate", type=float, metavar="W", help="raise max_turn_rate for this run only")
     parser.add_argument("--linear-scale", type=float, default=1.0, metavar="S", help="linear_cmd_scale for this run")
     parser.add_argument("--yes-owner-at-robot", action="store_true", help="the owner is at the robot for this run")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="folder for the JSON log")
@@ -341,6 +346,8 @@ def main():
     target = args.metres if line else math.radians(args.degrees)
     if args.max_speed is not None and not 0 < args.max_speed <= MAX_SPEED_LIMIT:
         sys.exit("REFUSED: --max-speed %.2f is outside (0, %.2f]" % (args.max_speed, MAX_SPEED_LIMIT))
+    if args.max_turn_rate is not None and not 0 < args.max_turn_rate <= MAX_TURN_LIMIT:
+        sys.exit("REFUSED: --max-turn-rate %.2f is outside (0, %.2f]" % (args.max_turn_rate, MAX_TURN_LIMIT))
     if not SCALE_RANGE[0] <= args.linear_scale <= SCALE_RANGE[1]:
         sys.exit("REFUSED: --linear-scale %.3f is outside [%.1f, %.1f]" % ((args.linear_scale,) + SCALE_RANGE))
     if line and not 0 < rate <= p["max_speed"]:

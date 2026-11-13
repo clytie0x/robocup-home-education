@@ -168,7 +168,8 @@ class Guards(unittest.TestCase):
         base_check.lidar.LidarSession = base_check.wheels_module.Wheels = no_port
         try:
             for argv in (["--line", "0.3", "--max-speed", "0.8"], ["--line", "0.15", "--linear-scale", "10"],
-                         ["--line", "0.15", "--linear-scale", "0.2"], ["--line", "0.3"], ["--line", "0.15"]):
+                         ["--line", "0.15", "--linear-scale", "0.2"], ["--line", "0.3"], ["--line", "0.15"],
+                         ["--turn", "0.8"], ["--turn", "0.8", "--max-turn-rate", "2.0"]):
                 sys.argv = ["base_check.py"] + argv + (["--yes-owner-at-robot"] if argv != ["--line", "0.15"] else [])
                 with self.assertRaises(SystemExit) as stopped:
                     base_check.main()
