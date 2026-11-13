@@ -51,5 +51,6 @@ beatbox action: rule/llm node -> /tts/say + /tts/play (path, beatbox_file = ~/ro
 5. test: launch with use_mic:=false + scripts/test_text_only.sh, then with mic
 
 ## Status
-Code written and syntax-checked only; NOT yet run on the real board.
+See docs/assessment-2026-11-13.md for the latest findings, open risks and the staged plan (read it first).
+Current goal (owner, 2026-11-13): get the robot moving correctly first; voice work comes after.
 Verify RAM with `tegrastats` while all parts are running.
