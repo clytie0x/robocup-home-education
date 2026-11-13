@@ -497,3 +497,33 @@ used (0x08000000 to 0x08007400), the rest erased; stack 0x20005000, reset 0x0800
 application starts at 0x08000000 with no separate bootloader. Copies: Pi
 `~/firmware-backup/old-1.bin` and `old-2.bin`; here
 `base/firmware-original/stm32-old-firmware-2026-11-14.bin` (not committed).
+
+## Field drives after the outline stop, close plan and search turn, 2026-11-14 02:15 to 03:00
+
+All under tools/safe_run.py, run_follow.py --drive, max_speed 0.12, the owner walking ahead in the
+lab (two other people and an office chair in the room at times). Numbers from replay.py and the
+logs in ~/hmc-base/logs/ (measured tonight).
+
+| Run (log) | Code | Ran | Moved | Locked | Closest (base centre) | Ended by |
+|---|---|---|---|---|---|---|
+| 1 (20261114-022323) | 199ca53 + 74827bb | 103 s | 8.02 m | 94.8 % | 0.428 m | slow cycle 0.40 s |
+| 2 (20261114-023102) | 8ff7166 + ac918c5 | 78 s | 4.02 m | 42.6 % | 0.383 m | slow cycle 0.40 s |
+| 3 (20261114-023328) | 17c4606 (replan every 0.5 s) | 49 s | 1.52 m | 33.6 % | 0.427 m | slow cycle 0.43 s |
+| 4 (20261114-024054) | cea46fd (planner in a second process) | 120 s | 6.09 m | 72.0 % | 0.383 m | the time limit |
+| 5 (20261114-024427) | cea46fd | 535 s | not summed | 55.0 % | 0.321 m | owner's stop (SIGINT) |
+| 6 (20261114-025427) | 4dec578 (dashboard) | about 5 min | not summed | not summed | not summed | STOP on the page |
+
+No touch in any run (closest return 0.32 m from the base centre, about 0.12 m from the body).
+- Cycle time: run 1 median 0.103 s, worst 0.398 s; the planner on the Pi took 0.12 s per plan
+  (161 shapes) and a failed close plan 0.19 s more, planned nearly every cycle. Run 4 with
+  plan_server.py in a second process: median 0.057 s, worst 0.172 s, remote 520 plans, local 3.
+  The Jetson planned the same failed plans in 0.108 to 0.135 s (load 5 of 6 cores from the
+  other teams), so the planner stays on the Pi by default (--planner jetson to change).
+- Run 4: path 0 in 334 of 761 following cycles with the operator over 1 m away, in long
+  episodes (76 to 136 cycles). Replayed, the 30 failed plans: the wide grid found none; the close
+  plan found a detour round an office chair (its wheel base below the LiDAR, seen by the depth
+  camera only, in frames 740 and 770) but refused it for a tight spot 2 to 10 m along it. With
+  the outline checked over the first 1.5 m only (commit after 4dec578), 19 of 30 find a path
+  (12 before). Not yet driven with that change.
+- The track: run 5 held for 432 ambiguous cycles and lost the operator for up to 72 s; the
+  identity rules (crowded, company) still fire next to chair legs, as the Task 6 review measured.
