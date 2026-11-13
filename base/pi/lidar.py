@@ -9,6 +9,10 @@ LIDAR_PORT = "/dev/rct_ahr_lidar"
 FRONT_LASER_DEG = 178.7
 START = bytes([0xAA, 0x55, 0xF0, 0x0F])
 STOP = bytes([0xAA, 0x55, 0xF5, 0x0A])
+# The widest angular gap one revolution may have. In 549 revolutions recorded on the robot
+# (logs/base-check, 2026-11-13) the largest gap was 1.03 deg median, 1.47 at the 95th
+# percentile; two revolutions had lost packets, the worst leaving a 252 deg hole.
+GAP_DEG = 5.0
 
 
 def _wrap(deg):
@@ -86,6 +90,20 @@ def parse_revolutions(buf):
     return max(revolutions, key=len)
 
 
+def complete(scan, gap_deg=GAP_DEG):
+    """True when one revolution covers the whole circle with no gap wider than gap_deg.
+
+    Where packets were lost the revolution simply has no samples, and a missing sample
+    cannot be told from clear air: the obstacle in that direction would be invisible.
+    """
+    if len(scan) < 2:
+        return False
+    degrees = sorted(deg for deg, _ in scan)
+    gaps = [b - a for a, b in zip(degrees, degrees[1:])]
+    gaps.append(degrees[0] + 360.0 - degrees[-1])  # across the back of the circle
+    return max(gaps) <= gap_deg
+
+
 class ScanStream:
     """Parses only the new bytes and keeps the last complete revolution in the base frame."""
 
@@ -106,9 +124,10 @@ class ScanStream:
         self.parsed_bytes += len(buf) - carried
         for angle, meters in samples:
             if self.previous is not None and angle < self.previous - 180:
-                self.last = self.current
+                if complete(self.current):  # an incomplete revolution is not a view of free space
+                    self.last = self.current
+                    self.updated_at = self.clock()
                 self.current = []
-                self.updated_at = self.clock()
             self.previous = angle
             self.current.append((_wrap(FRONT_LASER_DEG - angle), meters))
 

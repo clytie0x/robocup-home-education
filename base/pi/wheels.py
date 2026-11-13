@@ -7,6 +7,7 @@ WHEEL_PORT = "/dev/rct_ahr_robot"
 BAUD = 115200
 TIMEOUT = 0.3  # seconds of silence before the watchdog sends S#
 PERIOD = 0.04
+STOP_REPEATS = 3  # S# writes per stop: one byte lost to a parity error must not leave the base driving
 
 
 def _digits(value):
@@ -59,6 +60,7 @@ class Wheels:
         self.lock = threading.Lock()
         self.last = b"S#"
         self.sent_at = clock()
+        self._write_stop()  # a base left driving by a crashed run stops as soon as we open the port
         self.done = threading.Event()
         self.thread = None
         if start_thread:
@@ -69,14 +71,21 @@ class Wheels:
         while not self.done.wait(PERIOD):
             self.tick()
 
+    def _write_stop(self):
+        """S# several times. The caller holds the lock, except in __init__ where nobody else can."""
+        self.last = b"S#"  # first, so a failed write still leaves us stopped
+        for _ in range(STOP_REPEATS):
+            self.port.write(b"S#")
+
     def tick(self):
         with self.lock:
             if self.last == b"S#":
                 return
-            if self.clock() - self.sent_at >= TIMEOUT:
-                self.last = b"S#"
             try:
-                self.port.write(self.last)
+                if self.clock() - self.sent_at >= TIMEOUT:
+                    self._write_stop()
+                else:
+                    self.port.write(self.last)
             except Exception:
                 self.last = b"S#"
 
@@ -102,8 +111,7 @@ class Wheels:
 
     def stop(self):
         with self.lock:
-            self.last = b"S#"
-            self.port.write(b"S#")
+            self._write_stop()
 
     def close(self):
         self.done.set()

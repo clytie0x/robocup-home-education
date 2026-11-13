@@ -81,13 +81,24 @@ class Watchdog(unittest.TestCase):
         self.assertEqual(port.written[-1], b"F010|+000#")
         clock.now = 0.35
         w.tick()
-        self.assertEqual(port.written[-1], b"S#")
+        self.assertEqual(port.written[-wheels.STOP_REPEATS:], [b"S#"] * wheels.STOP_REPEATS)
+        quiet = len(port.written)
+        w.tick()  # stopped already: the port stays quiet, so a silence test means silence
+        self.assertEqual(len(port.written), quiet)
+
+    def test_opening_the_port_and_every_stop_send_s_more_than_once(self):
+        port = FakePort()
+        w = wheels.Wheels(P, port=port, start_thread=False)
+        self.assertEqual(port.written, [b"S#"] * wheels.STOP_REPEATS)  # whatever the base was doing
+        port.written.clear()
+        w.stop()
+        self.assertEqual(port.written, [b"S#"] * wheels.STOP_REPEATS)
 
     def test_read_odom_asks_and_parses(self):
         port = FakePort()
         w = wheels.Wheels(P, port=port, start_thread=False)
         self.assertAlmostEqual(w.read_odom()[0], 0.90 / 0.902, places=3)
-        self.assertEqual(port.written, [b"O#"])
+        self.assertEqual([d for d in port.written if d != b"S#"], [b"O#"])  # opening S# aside
 
     def test_read_odom_gives_up_after_four_bad_lines(self):
         port = FakePort(odom=b"junk#")

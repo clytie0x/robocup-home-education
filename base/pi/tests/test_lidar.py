@@ -4,7 +4,8 @@ import time
 import unittest
 from pathlib import Path
 
-from lidar import START, STOP, FRONT_LASER_DEG, LidarSession, ScanStream, checksum_ok, parse_revolutions, parse_samples
+from lidar import (START, STOP, FRONT_LASER_DEG, LidarSession, ScanStream, checksum_ok, complete,
+                   parse_revolutions, parse_samples)
 
 HERE = Path(__file__).resolve().parent
 REAL = bytes.fromhex((HERE / "fixtures" / "lidar-4-packets.hex").read_text().strip())
@@ -132,6 +133,16 @@ class StreamingTest(unittest.TestCase):
         now[0] = 0.6
         self.assertEqual(stream.latest(), [])
 
+    def test_a_revolution_with_a_hole_does_not_replace_the_last_good_one(self):
+        now = [0.0]
+        stream = ScanStream(clock=lambda: now[0])
+        stream.feed(sweep(0, 360))                    # one good revolution
+        stream.feed(sweep(0, 100) + sweep(140, 220))  # the next one loses 40 deg of packets
+        stream.feed(sweep(0, 5))                      # the wrap that would promote it
+        self.assertEqual(len(stream.latest()), 360)   # the good one is kept, the holed one dropped
+        now[0] = 0.6
+        self.assertEqual(stream.latest(), [])         # and it goes stale, so the robot is told nothing
+
     def test_each_feed_only_parses_the_new_bytes(self):
         stream = ScanStream(clock=lambda: 0.0)
         data = sweep(0, 360) + sweep(0, 30)
@@ -200,3 +211,15 @@ class SessionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompleteTest(unittest.TestCase):
+    def test_a_full_circle_is_complete_and_a_hole_in_it_is_not(self):
+        full = [(float(deg) - 180.0, 1.0) for deg in range(360)]
+        self.assertTrue(complete(full))
+        self.assertFalse(complete([point for point in full if not 0.0 <= point[0] < 40.0]))
+        self.assertFalse(complete([]))
+        self.assertFalse(complete([(0.0, 1.0)]))
+
+    def test_a_hole_behind_the_robot_counts_too(self):
+        self.assertFalse(complete([(float(deg), 1.0) for deg in range(-170, 171)]))  # 20 deg across the back

@@ -112,7 +112,8 @@ def scan_points(scan, p):
 
 
 def _stop_wheels(state):
-    """S# now. A dead port cannot take it either; the firmware then stops on its own silence."""
+    """S# now, several times. A dead port cannot take it, and whether the firmware then stops
+    on its own silence is NOT known (tools/air_check.py measures it)."""
     if state.wheels is None:
         return
     with contextlib.suppress(OSError, ValueError):
