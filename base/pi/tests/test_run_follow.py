@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import numpy
+
 from hmc.follower import Mode, Senses
 
 import params
@@ -98,7 +100,8 @@ class Camera:
         self.t = 0.0
 
     def latest(self):
-        return SimpleNamespace(time=self.t)  # the depth gate is closed: the image is never read
+        # An empty room: every pixel 4 m away, past the depth layer's 3 m, so "looked, nothing there".
+        return SimpleNamespace(time=self.t, depth=numpy.full((240, 320), 4000, dtype=numpy.uint16))
 
 
 class Scans:

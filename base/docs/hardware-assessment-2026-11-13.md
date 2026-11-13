@@ -376,3 +376,22 @@ out: the red button stays within reach.
 
 Firmware odometry has a 0.01 m step (11 mm after `odom_distance_scale`), so at 0.08 m/s and
 10 Hz one read often shows no motion; speed from odometry needs at least about 0.3 s.
+
+## Sensor geometry settled, evening 2026-11-13 (wheels still)
+
+- **LiDAR front.** A box (face 7.9 cm wide) on the robot's centre line, placed by the owner,
+  0.564 m from the laser: centre bearing +0.03 deg (median of 30 scans, spread -0.38 to
+  +0.51) with `lidar_front_deg` 178.7, i.e. 0.3 mm off the centre line. With 180.3 it would
+  have shown at about 1.6 deg, 16 mm off. 178.7 stays, valid if the box was within about
+  8 mm of the centre line (the owner: "exactly in the middle"). This agrees with the
+  two-bottle check of 2026-11-07 (0.4 deg); the 180.3 estimate rested on the assumption
+  that the robot's posts are symmetric. A clear plastic bottle at 1.5 m first was not seen
+  at all (the LiDAR passes through clear plastic).
+- **Camera pitch: 12.3 deg up.** `sensor_check.py --wall` on a room wall 1.29 m from the lens
+  (LiDAR: 1.32 m, flat and square within a few degrees): 30 of 30 frames fitted, median
+  12.33 deg, spread 12.32 to 12.36, 74 % of the image on the plane, wall yaw -1.4 deg.
+  Written to `params.json` (`camera_pitch_deg` 12.3), which opens the depth obstacle gate.
+- Depth layer check on 30 live frames of that scene: no obstacle cell nearer than 1.30 m
+  ahead (the bare floor stays clear) at pitch 11.3, 12.33 and 13.3 deg; the wall lands
+  1.517 m from the turning centre against 1.495 m by LiDAR (2.2 cm). Not yet checked: a
+  0.12 m box and a chair (Task 6 step 3), and a longer floor view.
