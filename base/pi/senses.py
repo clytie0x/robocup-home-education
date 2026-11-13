@@ -42,8 +42,11 @@ class RealSenses:
     def locked(self):
         return self.tracker.pos is not None
 
-    def enrol(self, now, scan, answer):
-        """Lock onto the one camera person within 2.5 m. Returns (odometry point, look) or a refusal."""
+    def enrol(self, now, scan, answer, accept=None):
+        """Lock onto the one camera person within 2.5 m. Returns (odometry point, look) or a refusal.
+
+        accept(look) -> bool, when given, must agree before the lock (a re-enrol checks the look).
+        """
         if now - answer.t > FRESH:
             return "camera answer too old"
         cands = candidates(scan)
@@ -57,6 +60,8 @@ class RealSenses:
         if not close:
             return "nobody in view"
         c, look = close[0]
+        if accept is not None and not accept(look):
+            return "the person in view does not look like the operator"
         self.tracker = self._new_tracker()
         self.tracker.update(scan, now, lock_at=c)
         self._last_now = now

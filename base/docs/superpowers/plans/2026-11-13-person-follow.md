@@ -448,7 +448,7 @@ def test_enrol_refuses_two_people_inside_2_5_m(self): ...
 - `speech` is an object whose `say(time, text)` prints the line and logs it; the voice work plugs in there later.
 - `replay.py LOGDIR` prints: share of cycles locked, longest gap, closest obstacle distance, count of stops by reason, cycle time median and worst.
 
-- [ ] **Step 1:** Failing tests with fake devices:
+- [x] **Step 1:** Failing tests with fake devices:
 
 ```python
 def test_dry_run_never_opens_the_wheel_port(self): ...
@@ -460,7 +460,7 @@ def test_follows_a_simulated_walker_with_fakes(self): ...       # 30 s: locked >
 def test_replay_summary_counts(self): ...
 ```
 
-- [ ] **Step 2:** Implement, run, pass. Full suite on the laptop and on the Pi. Commit.
+- [x] **Step 2:** Implement, run, pass. Full suite on the laptop and on the Pi. Commit.
 
 ### Task 11: Jetson: TensorRT, detector, look vectors
 
