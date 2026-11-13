@@ -8,41 +8,22 @@ import math
 from enum import Enum
 
 from hmc import hri, manipulation, navigation, perception
-from hmc.appearance import LookMemory
 from hmc.follower import Follower, Mode, Senses
 from hmc.odometry import RobotView
+from hmc.queue import QUEUE_GAP, QUEUE_SPOT, QueueFollower
+from hmc.route import Returner
 from hmc.world import TIME_LIMIT, Point, World, distance
 
-QUEUE_GAP = 1.0  # metres to keep behind the last person in the queue
-QUEUE_SPOT = 0.3  # metres; close enough to our spot in the line
-# The rulebook: "The queue is composed of the same people that form the crowd." So on
-# the way out we remember the people who stand together in a group near us.
-CROWD_NEAR_US = 4.0  # metres from the robot
-CROWD_TOGETHER = 1.5  # metres between two people standing in the same group
-# The crowd stands there from the start. Passers-by only stop for a moment.
-CROWD_STANDING = 6.0  # seconds a person must stand in one place to count
+# The crowd and the queue are in queue.py. Who stands where is kept here, by place:
 STAND_STILL = 0.3  # metres; moving less than this is standing in one place
 STANDING_FORGET = 2.0  # seconds; a place nobody was seen at for this long is empty
-# The queue walks back to the start: cos of the largest angle between where a queue
-# member walks and the way to the start (60 degrees leaves room for corners and doors).
-QUEUE_HEADING = 0.5
 # A queue that stands still this close to the start has arrived and waits there in line.
 LINE_NEAR_START = 4.0  # metres
 LINE_UP_FOR = 10.0  # seconds at most to take our place at the end of that line
-# Close enough to the start to put the bag down. The referee counts 1 m; the queue
-# waiting in its line next to the start can keep us from getting much closer.
-AT_START = 0.6  # metres; less than 1 m, as our pose can be a few tenths off
 # Noise handling. (Following the operator has its own, in follower.py.)
 BAG_VOTES = 5  # frames that must point at the same bag (and 3 more than at any other)
 RAY_FRAMES = 5  # frames of the pointing arm we average before we look for the bag
 LOOK_ALONG_RAY = 2.0  # metres; to find the bag we look at this point along the arm
-# Re-identification by look (see appearance.py).
-CROWD_MATCH = 0.65  # a person must look at least this much like someone in the crowd
-SAME_PERSON = 0.8  # two looks this similar are taken to be the same person
-# If we lose sight of the last person of the queue (a corner), keep going this long.
-LOST_TAIL_WAIT = 3.0  # seconds
-# The queue walks on past the start, so we leave it this close to the start.
-LEAVE_QUEUE_NEAR_START = 2.0  # metres
 # Pace. We ask the operator to walk a bit slower than we can drive, so we keep up.
 PACE_SHARE = 0.8  # the pace we ask for, as a share of our top speed
 
@@ -83,18 +64,18 @@ class Task:
         self.history: list[tuple[float, State]] = [(world.time, self.state)]
         self.body = RobotView(world)  # our pose as we believe it (odometry)
         self.start = self.body.pos  # remembered from odometry
+        self.start_heading = self.body.heading
         # Who the operator is, following and searching (one brain for sim and robot).
         self.follower = Follower(self.body, speech)
         self.senses: Senses | None = None  # this step's senses, filled in step()
         self.perceived_bag: str | None = None
-        self.queue_done = False  # we leave the queue only once
-        self.tail_walked = 0.0  # when we last saw the queue's last person walking
+        # The crowd on the way out and the queue on the way back.
+        self.queue = QueueFollower(self.body, self.start, self.follower.people_trackers)
         self.lined_up = False  # we took our place at the end of a queue waiting by the start
         self.line_since: float | None = None
-        self.last_tail: tuple[float, int] | None = None  # (time, id) we last saw it
-        # The crowd we passed on the way out: one look memory per person. Kept by look,
-        # not by tracker id, because tracker ids get swapped.
-        self.crowd: list[LookMemory] = []
+        # Drives the follower's breadcrumbs back to the start. Made anew each time we
+        # start driving back (after the queue we stand somewhere else on the route).
+        self.returner: Returner | None = None
         # Places where someone stands: [since when, where, last seen]. Kept by place, not by
         # tracker id: passers-by make the tracker swap ids, which would restart the clock.
         self.standing: list[list] = []
@@ -112,6 +93,7 @@ class Task:
             raise ValueError(f"illegal transition {self.state} -> {new_state}")
         self.state = new_state
         self.history.append((self.world.time, new_state))
+        self.returner = None
 
     def step(self, dt: float) -> None:
         if self.finished:
@@ -126,6 +108,7 @@ class Task:
             operator_look=perception.see_operator_look(self.world),
             people=people,
             obstacles=perception.see_obstacles(self.world),
+            looks={pid: look for pid, look in perception.see_looks(self.world).items() if look is not None},
         )
         # Every step in every state, so we also avoid the operator after following.
         self.follower.watch(self.senses)
@@ -140,7 +123,13 @@ class Task:
         # A place nobody was seen at for a while is empty (they walked on).
         self.standing = [s for s in self.standing if now - s[2] <= STANDING_FORGET]
         if self.state in (State.FOLLOW, State.SEARCH):
-            self._remember_crowd()
+            # Since when someone stands on each person's place, for the crowd.
+            standing = {
+                pid: (spot[0], pos)
+                for pid, pos in people.items()
+                if (spot := self._spot(self.follower.people_trackers[pid].last())) is not None
+            }
+            self.queue.remember_crowd(self.senses, standing)
 
         handlers = {
             State.ANNOUNCE_READY: self._announce_ready,
@@ -233,6 +222,7 @@ class Task:
 
     def _pick(self, dt: float) -> None:
         if manipulation.pick(self.world, self.perceived_bag):
+            self.speech.say(self.world.time, hri.RETURN_TEXT)
             self._go(State.RETURN)
         else:
             self._go(State.GO_TO_BAG)
@@ -241,11 +231,7 @@ class Task:
         if self.world.carried_bag() is None:
             self._go(State.GO_TO_BAG)  # we dropped it, fetch it again
             return
-        tail = None if self.queue_done else self._queue_tail()
-        if tail is not None:
-            # Remember who we saw, so one frame without them does not end the queue.
-            self.last_tail = (self.world.time, tail)
-            self.tail_walked = self.world.time
+        if self.queue.tail(self.senses) is not None:
             self._go(State.JOIN_QUEUE)  # optional goal: join the queue on the way back
             return
         if not self.lined_up:
@@ -255,6 +241,7 @@ class Task:
             if spot is not None:
                 if self.line_since is None:
                     self.line_since = self.world.time
+                self.returner = None
                 reached = self._drive_to(spot, dt, QUEUE_SPOT)
                 # Give up when the spot cannot be reached (a wall, people): the start
                 # and the bag count for more than the queue.
@@ -262,7 +249,15 @@ class Task:
                 if reached or late or not self.follower.navigator.path:
                     self.lined_up = True
                 return
-        if self._drive_to(self.start, dt, AT_START):
+        # Back along the breadcrumbs of the way out, not straight at the start: that
+        # way is known to be passable, and a straight plan can end in a dead end.
+        follower = self.follower
+        if self.returner is None:
+            self.returner = Returner(
+                self.body, self.speech, follower.navigator, follower.route, self.start_heading
+            )
+        self.returner.step(follower.shapes(self.senses), self.world.time, dt)
+        if self.returner.done:
             manipulation.place(self.world)  # allowed by the rules, no penalty
             self._go(State.DONE)
 
@@ -273,7 +268,7 @@ class Task:
         line = [
             trackers[pid].last()
             for pid in perception.see_people(self.world)
-            if self._looks_like_crowd(looks.get(pid))
+            if self.queue.looks_like_crowd(looks.get(pid))
             and trackers[pid].is_stationary()
             and distance(trackers[pid].last(), self.start) <= LINE_NEAR_START
         ]
@@ -291,51 +286,10 @@ class Task:
         if self.world.carried_bag() is None:
             self._go(State.GO_TO_BAG)  # we dropped it, fetch it again
             return
-        now = self.world.time
-        tail = self._queue_tail()
-        if tail is not None:
-            self.last_tail = (now, tail)
-            self.tail_walked = now
-        elif self.last_tail is not None:
-            # Nobody of the queue is in view right now. If we still see the person we
-            # followed, or lost them only a moment ago (a corner), keep following them.
-            # The id may have been swapped to someone else: check the look too.
-            followed = self.last_tail[1]
-            looks = perception.see_looks(self.world)
-            seen = followed in looks and self._looks_like_crowd(looks[followed])
-            if seen:
-                self.last_tail = (now, self.last_tail[1])
-            if seen or now - self.last_tail[0] <= LOST_TAIL_WAIT:
-                tail = self.last_tail[1]
-        robot = self.body.pos
-        # Leave when there is no queue, when we are near the start, or when the person
-        # we follow has stopped walking (the queue has arrived).
-        trackers = self.follower.people_trackers
-        # A tail that looks stationary for a moment (a missed frame, an id swap with
-        # someone standing) has not arrived yet: only a queue that stopped for
-        # LOST_TAIL_WAIT has.
-        stopped = (
-            tail is not None
-            and trackers[tail].is_stationary()
-            and now - self.tail_walked > LOST_TAIL_WAIT
-        )
-        if (
-            tail is None
-            or stopped
-            or distance(robot, self.start) <= LEAVE_QUEUE_NEAR_START
-        ):
-            self.queue_done = True
+        follower = self.follower
+        shapes = follower.shapes(self.senses)
+        if not self.queue.step(self.senses, shapes, follower.navigator, dt):
             self._go(State.RETURN)
-            return
-        # Stand QUEUE_GAP behind the last person, in the direction they walk, so we are
-        # in the line and not next to it.
-        tracker = trackers[tail]
-        x, y = tracker.last()
-        walk = tracker.direction()
-        goal = (x, y)
-        if walk is not None:
-            goal = (x - QUEUE_GAP * walk[0], y - QUEUE_GAP * walk[1])
-        self._drive_to(goal, dt, QUEUE_SPOT)
 
     # Helpers
 
@@ -346,81 +300,7 @@ class Task:
             stop_distance,
         )  # fmt: skip
 
-    def _remember_crowd(self) -> None:
-        """Remember people standing in a group near us: that is the crowd."""
-        robot = self.body.pos
-        now = self.world.time
-        standing = {
-            pid: pos
-            for pid, pos in perception.see_people(self.world).items()
-            if (spot := self._spot(self.follower.people_trackers[pid].last())) is not None
-            and now - spot[0] >= CROWD_STANDING
-            # A passer-by who steps onto a crowd member's place must not take its time.
-            and self.follower.people_trackers[pid].is_stationary()
-            and distance(pos, robot) <= CROWD_NEAR_US
-        }
-        looks = perception.see_looks(self.world)
-        for pid, pos in standing.items():
-            if looks.get(pid) is None:
-                continue
-            if any(
-                other != pid and distance(pos, other_pos) <= CROWD_TOGETHER
-                for other, other_pos in standing.items()
-            ):
-                self._remember_look(looks[pid])
-
-    def _walks_to_start(self, pid: int, pos: Point) -> bool:
-        """True if this person walks roughly toward the start, as the queue does.
-
-        A passer-by who stood near the crowd for a while can look like a crowd member;
-        walking anywhere else tells them apart.
-        """
-        walk = self.follower.people_trackers[pid].direction()
-        if walk is None:
-            return False
-        to_start = (self.start[0] - pos[0], self.start[1] - pos[1])
-        length = math.hypot(*to_start)
-        return length < 1e-9 or (walk[0] * to_start[0] + walk[1] * to_start[1]) / length >= QUEUE_HEADING
-
     def _spot(self, pos):
         """The place record someone at pos stands on, or None."""
         near = [s for s in self.standing if distance(pos, s[1]) <= STAND_STILL]
         return min(near, key=lambda s: distance(pos, s[1])) if near else None
-
-    def _remember_look(self, look) -> None:
-        """Add a look to the crowd member it matches, or remember a new member."""
-        best = max(self.crowd, key=lambda memory: memory.similarity(look), default=None)
-        if best is not None and best.similarity(look) >= SAME_PERSON:
-            best.add(look)
-        else:
-            memory = LookMemory()
-            memory.add(look)
-            self.crowd.append(memory)
-
-    def _looks_like_crowd(self, look) -> bool:
-        """True if this look matches someone we remember from the crowd."""
-        return look is not None and any(
-            memory.similarity(look) >= CROWD_MATCH for memory in self.crowd
-        )
-
-    def _queue_tail(self) -> int | None:
-        """The tracker id of the last person of the queue walking back ahead of us, or None.
-
-        Only people who look like someone of the crowd count (re-ID), so passers-by
-        are not taken for the queue, even when the tracker swapped their ids.
-        "Ahead of us" means closer to the start than we are. The last person is the one
-        of them closest to us. (Not the one farthest from the start: the queue walks on
-        past the start.)
-        """
-        robot = self.body.pos
-        looks = perception.see_looks(self.world)
-        ahead = [
-            (pid, pos)
-            for pid, pos in perception.see_people(self.world).items()
-            if self._looks_like_crowd(looks.get(pid))
-            and self._walks_to_start(pid, pos)
-            and distance(pos, self.start) < distance(robot, self.start)
-        ]
-        if not ahead:
-            return None
-        return min(ahead, key=lambda seen: distance(seen[1], robot))[0]

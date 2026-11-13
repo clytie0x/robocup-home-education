@@ -5,6 +5,10 @@ READY_TEXT = "I am ready to follow you."
 WAIT_TEXT = "Please wait for me."
 GO_ON_TEXT = "Thank you, please go on."
 COME_BACK_TEXT = "I lost you. Please come back and stand in front of me."
+# The way back (route.py).
+RETURN_TEXT = "I will go back to the start now."
+PASS_TEXT = "Please let me pass."
+ARRIVED_TEXT = "I am back at the start."
 _SLOW_START = "Please walk slowly, at about "
 _SLOW_END = " metres per second, so I can follow you."
 

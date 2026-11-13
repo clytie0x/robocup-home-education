@@ -7,11 +7,12 @@ drive_toward, turn_toward and brake (odometry.RobotView and hmc's Robot both hav
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from hmc import hri, navigation, perception
 from hmc.appearance import LookMemory
+from hmc.route import Route
 from hmc.world import PERSON_RADIUS, Circle, Point, Shape, distance
 
 # Noise handling.
@@ -51,6 +52,8 @@ class Senses:
     operator_look: tuple[float, ...] | None  # their look, if the camera saw them
     people: dict[int, Point]  # everyone else, by tracker id
     obstacles: list[Shape]
+    # The look of each person in people the camera saw this step, by the same id.
+    looks: dict[int, tuple[float, ...]] = field(default_factory=dict)
 
 
 class Mode(Enum):
@@ -75,6 +78,8 @@ class Follower:
         self.people_trackers: dict[int, perception.MotionTracker] = {}
         self.operator_look = LookMemory()
         self.navigator = navigation.Navigator()
+        # Breadcrumbs for the way back, from where we stand now (the start).
+        self.route = Route(body.pos)
         # Obstacles we saw before. The camera looks forward only and the depth image is
         # blind closer than 0.6 m, so a low object we pass would vanish without this.
         self.obstacle_memory: dict = {}  # rough place and size -> (time, shape)
@@ -126,6 +131,7 @@ class Follower:
 
     def step(self, senses: Senses, dt: float) -> None:
         """Follow or search, and drive the body. Call watch(senses) first in each step."""
+        self.route.add(self.body.pos)
         if self.mode == Mode.SEARCH:
             self._search(senses, dt)
         else:

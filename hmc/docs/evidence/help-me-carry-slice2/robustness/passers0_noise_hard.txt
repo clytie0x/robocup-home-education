@@ -1,52 +1,15 @@
-map                  ok / 20   (0 passers-by, noise hard)
-default              14 / 20
-bangkok2022          16 / 20
-bordeaux2023         14 / 20
-eindhoven2024         3 / 20
-germanopen2024       14 / 20
-portugalopen2024     15 / 20
-all                  76 / 120  (63.3 %)
-  failed: default seed 4: lost queue
-  failed: default seed 9: lost avoid_crowd, touched something (0.24 m)
-  failed: default seed 13: lost queue
-  failed: default seed 15: touched something (0.25 m)
-  failed: default seed 18: lost queue
-  failed: default seed 19: lost queue
-  failed: bangkok2022 seed 1: lost queue
-  failed: bangkok2022 seed 2: lost avoid_crowd, touched something (0.26 m)
-  failed: bangkok2022 seed 9: lost queue, touched something (0.19 m)
-  failed: bangkok2022 seed 14: lost queue
-  failed: bordeaux2023 seed 5: lost queue
-  failed: bordeaux2023 seed 10: touched something (0.20 m)
-  failed: bordeaux2023 seed 11: lost queue
-  failed: bordeaux2023 seed 12: lost queue
-  failed: bordeaux2023 seed 14: lost queue
-  failed: bordeaux2023 seed 16: lost queue
-  failed: eindhoven2024 seed 0: lost queue
-  failed: eindhoven2024 seed 1: lost queue
-  failed: eindhoven2024 seed 3: lost queue
-  failed: eindhoven2024 seed 4: lost queue
-  failed: eindhoven2024 seed 5: lost queue
-  failed: eindhoven2024 seed 6: lost queue
-  failed: eindhoven2024 seed 7: lost queue
-  failed: eindhoven2024 seed 8: lost queue
-  failed: eindhoven2024 seed 9: lost queue
-  failed: eindhoven2024 seed 10: lost queue
-  failed: eindhoven2024 seed 11: lost queue
-  failed: eindhoven2024 seed 12: lost avoid_crowd, touched something (0.22 m)
-  failed: eindhoven2024 seed 13: lost queue
-  failed: eindhoven2024 seed 15: lost queue
-  failed: eindhoven2024 seed 17: lost queue
-  failed: eindhoven2024 seed 18: lost queue
-  failed: eindhoven2024 seed 19: lost queue
-  failed: germanopen2024 seed 0: touched something (0.21 m)
-  failed: germanopen2024 seed 2: lost queue
-  failed: germanopen2024 seed 14: lost queue
-  failed: germanopen2024 seed 15: lost queue
-  failed: germanopen2024 seed 16: touched something (0.22 m)
-  failed: germanopen2024 seed 19: lost queue
-  failed: portugalopen2024 seed 3: lost queue
-  failed: portugalopen2024 seed 7: lost queue
-  failed: portugalopen2024 seed 8: touched something (0.21 m)
-  failed: portugalopen2024 seed 15: lost queue
-  failed: portugalopen2024 seed 16: lost queue
+map                  ok / 20   (0 passers-by, noise hard, sensors ideal, odometry perfect, robot 1.0 m/s, base sim)
+default              18 / 20
+bangkok2022          19 / 20
+bordeaux2023         20 / 20
+eindhoven2024        20 / 20
+germanopen2024       17 / 20
+portugalopen2024     19 / 20
+all                 113 / 120  (94.2 %)
+  failed: default seed 3: lost avoid_small_object, touched something (-0.01 m into it)
+  failed: default seed 19: touched something (-0.19 m into it)
+  failed: bangkok2022 seed 18: lost avoid_crowd, touched something (-0.01 m into it)
+  failed: germanopen2024 seed 9: lost queue
+  failed: germanopen2024 seed 18: lost queue
+  failed: germanopen2024 seed 19: lost avoid_crowd, touched something (-0.00 m into it)
+  failed: portugalopen2024 seed 10: touched something (-0.03 m into it)

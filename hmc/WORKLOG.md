@@ -106,3 +106,23 @@ Decisions for Help Me Carry slice 1. Dates and times are Asia/Bangkok.
 - **Scenario changes, stated because they help the robot:** the queue on the default and Eindhoven maps now stops in a line next to the start like on the other four maps (before, it walked on past the start, and no robot below about 1.5 m/s could join it); passers-by step to the side of the robot's way instead of straight away from it (they used to walk just ahead of the robot down a corridor); the operator walks round a robot in their way instead of into it.
 - **Speed needed.** On the full stack (step 5): 0.12 m/s 0/30, 0.2 m/s 7/30, 0.3 m/s 19/30, 0.5 m/s 60/60. The real base does 0.12 m/s today (`base/docs/hardware-assessment-2026-11-13.md`), so the base must reach about 0.5 m/s before the simulation's result can apply. What else the robot needs: `base/docs/sim-to-robot-checklist.md`.
 - **Tests run against the worktree.** The project's venv imports `hmc` from the main checkout, so pytest here must run with `PYTHONPATH=src`. An earlier "116 passed" in this session was the main checkout's code.
+
+## 2026-11-14, the way back along breadcrumbs (branch `sim/robustness-ladder`, plan `base/docs/superpowers/plans/2026-11-13-return-trip.md` Tasks 1 and 2)
+
+- **The queue logic moved into `src/hmc/queue.py` (`QueueFollower`).** The crowd memory, the queue's end (`tail`), joining and leaving (`step`) and their constants left `task.py` unchanged, behind the same kind of interface as `Follower`, so the robot can run them. `Senses` gained `looks` (the look of every person the camera saw); `Task` fills it from `perception.see_looks`. 9 new tests in `tests/test_queue.py`. This step was a pure refactor: the six-map output of `python -m hmc.run --map <m>` (stdout, `score.txt`, `timeline.csv` and `trajectory.png`) was byte-identical before and after (`diff -r` empty). pytest: 140 passed, 3 xpassed before; 149 passed, 3 xpassed after.
+- **The way back drives the breadcrumbs of the way out (`src/hmc/route.py`).** The `Follower` drops a breadcrumb every 0.5 m (`Route`), loops are cut out, and `Returner` drives them newest first with the same planner, then faces the start heading. It replaced "plan straight to the start, stop within 0.6 m". The robot now says "I will go back to the start now." after picking and "I am back at the start." at the end. 12 new tests in `tests/test_route.py`.
+- **Three brain fixes found on the way, each from a traced run.** Steering at the next breadcrumb, 0.5 m away, made the robot brake at every one (Eindhoven took 236 s instead of 133 s), so it steers three breadcrumbs past the one it must reach. A passer-by standing on that breadcrumb made the planner aim beside them, on a side that flipped as they moved, and the robot swung into the small object at 0.8 m/s (eindhoven2024 seed 2, `--odometry wheel`, 0.10 m into it), so it steers at the furthest free one. The queue standing in its line by the start kept the robot 0.31 m away for ever (germanopen2024 seed 4, wheel, timeout), so after 5 s kept out it accepts 0.6 m, the old stop distance.
+- **Scores.** Every map and bag (AT-38): 18 of 18 runs 1115 and DONE, nothing touched; times 62.7 to 140.4 s (Eindhoven 135 to 140 s, before 133 s). pytest: 161 passed, 3 xpassed.
+- **Robustness with odometry drift** (`python -m hmc.robustness --odometry wheel|slam`, ideal sensors, no noise). The 2026-11-13 01:10 entry had wheel 15/18 and slam 16/18 (3 seeds, 10 passers-by). Rerun on the code before this change and after it:
+
+  | runs | before | after |
+  |---|---|---|
+  | wheel, 3 seeds, 10 passers-by | 17/18 | 18/18 |
+  | slam, 3 seeds, 10 passers-by | 16/18 | 17/18 |
+  | wheel, 3 seeds, no passers-by | 17/18 | 17/18 |
+  | slam, 3 seeds, no passers-by | 18/18 | 18/18 |
+  | wheel, 10 seeds, 10 passers-by | 54/60 | 56/60 |
+  | slam, 10 seeds, 10 passers-by | 54/60 | 54/60 |
+
+  With wheel odometry and 10 seeds, three runs that missed the start before now reach it (bangkok2022 seed 0, portugalopen2024 seeds 4 and 7). One new failure: eindhoven2024 seed 4 times out on the way back. The pose there drifted about 1.5 m sideways since the way out, so the remaining breadcrumbs lie in a wall of the current view and none can be reached; it asks to pass and waits. Breadcrumbs fix dead ends, not drift: on the robot the scan keyframes of plan Task 3 correct this, and in the simulation `slam` stands in for them. With slam the failed seeds are the same except two: eindhoven2024 seed 2 now keeps the queue, germanopen2024 seed 5 now loses it.
+- **The evidence folder was regenerated** (`docs/evidence/help-me-carry-slice2/`, with `SHA256SUMS`), because the behaviour changed.

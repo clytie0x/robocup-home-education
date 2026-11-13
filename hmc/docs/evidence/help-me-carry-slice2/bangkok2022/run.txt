@@ -11,11 +11,11 @@ Joining and staying in the queue                       300      300  awarded
 Dropping the bag                                       -50        0  not-earned
 Rediscovering operator, natural interaction            -50        0  not-run
 Rediscovering operator, unnatural interaction         -100        0  not-run
-Rediscovering operator, asking them to come back      -150        0  not-run
+Rediscovering operator, asking them to come back      -150        0  not-earned
 Rediscovering operator, direct contact                -200        0  not-run
 Not attending                                         -500        0  not-run
 Using alternative start signal                        -100        0  not-run
 Outstanding performance                                111        0  not-run
 TOTAL (max 1115 without special rows): 1115
 Awarded 1115 of 1115
-Sim time: 61.8 s (limit 300 s), end state: done
+Sim time: 70.7 s (limit 300 s), end state: done
