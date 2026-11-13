@@ -264,11 +264,18 @@ Open, and the reason the owner must keep a hand on the power switch:
    the LiDAR leg track can jump to another person while no look arrives to contradict it.
    `legs.py` and `senses.py` were not reviewed in depth. Open for Task 9 and Task 13
    scenario 4.
-5. **The 0.3 m closest approach is not enforced by any layer** (reported, arithmetic
-   checked here). `must_stop` uses the braking distance, which shrinks with speed:
-   0.295 m at 0.12 m/s but 0.153 m at 0.01 m/s, and the brain restarts from standstill
-   after an "obstacle" stop, so it can creep closer. Side margin is 0.05 m. Decide with
-   the owner whether a flat floor of 0.3 m is wanted.
+5. **The 0.3 m closest approach was not enforced by any layer** (confirmed by arithmetic;
+   fixed, owner's decision 2026-11-13). `must_stop` fired at the braking distance, whose
+   last term is a fixed 0.15 m, so with the measured decel 0.064 and stop_delay 0.27 the
+   base stopped with only 0.15 m left at every speed (trigger 0.295 m at 0.12 m/s, 0.153 m
+   at 0.01 m/s). Fix: `safety.CLEARANCE` 0.30 m; the strip now reaches run-on distance plus
+   0.30 m, so the base stops with 0.30 m left ahead at any speed. At 0.12 m/s the strip
+   reaches 0.445 m from the front edge, inside the 0.60 m follow gap. That margin closes at
+   0.18 m/s with today's braking: above it the robot would stop behind every operator, so
+   braking must be measured again before `max_speed` rises (a test now fails if it is
+   raised alone). Sideways and while turning this floor does not apply: `SIDE_MARGIN` is
+   0.05 m and `SPIN_RADIUS` 0.33 m, and a 0.3 m floor there would forbid turning in a door.
+   Side clearance stays the planner's job.
 6. Smaller, reported and not fixed: the brain brakes with `accel` 0.25 m/s² while the base
    needs 0.064 m/s² plus 0.27 s, so a close approach ends about 0.07 m short of the
    0.60 m gap; no heading deadband, so a standing operator gives small turn packets back
