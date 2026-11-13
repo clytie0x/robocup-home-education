@@ -27,5 +27,9 @@ Rates, on the Jetson (a third terminal, with the same two exports):
 
 Stopping: Ctrl-C the launch. slam_toolbox 2.8.5 then aborts with "context cannot be slept with because it's
 invalid" and apport writes a crash report. That is a shutdown bug in the package, not a fault in the map.
-The first correction of a session can be far from zero: the map origin is the first pose slam_toolbox sees,
-and the firmware odometry is not zeroed between runs. `SlamLink` takes the first one after each connection.
+A correction far from the last one is refused and counted. The same new value ten times in a row (5 s) is
+taken: that is a new map (slam_toolbox starts it at the first pose it sees, and the firmware odometry is not
+zeroed between runs) or a loop closure. A single wild value never gets through.
+
+Replaying old logs: the poses of logs recorded before the yaw fix disagree with the motion (see
+`slam_replay.py --repair`), so replay them with `--repair`.

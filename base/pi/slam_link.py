@@ -17,6 +17,7 @@ from collections import deque
 MAX_BODY = 1_000_000  # bytes; a bigger message means a broken or hostile peer
 MAX_JUMP_M = 0.5  # a correction that moves this far in one message is refused
 MAX_JUMP_RAD = math.radians(20)
+REBASE_AFTER = 10  # refused corrections in a row that agree with each other: 5 s at the bridge's 2 Hz
 BACKLOG = 20  # records waiting to go out; a longer Wi-Fi stall drops the oldest, never blocks the caller
 IDENTITY = (0.0, 0.0, 0.0)
 
@@ -56,8 +57,9 @@ class SlamLink:
         self._stop = threading.Event()
         self._thread = None
         self.refused = 0  # corrections thrown away for jumping too far
-        self.rebased = 0  # times a new connection started from a map that is not where the old one was
-        self._fresh = True  # the next correction starts a SLAM session and is taken as it is
+        self.rebased = 0  # times a jump stayed put long enough to be taken as the new truth
+        self._candidate = None  # the refused correction that later ones are compared with
+        self._agree = 0
         self.connected = False
         self.error = None  # text of the last problem, for logs
 
@@ -90,7 +92,6 @@ class SlamLink:
                 with socket.create_connection((self._host, self._port), timeout=self._connect_timeout) as sock:
                     sock.settimeout(self._send_timeout)
                     self.connected = True
-                    self._fresh = True
                     self._talk(sock)
             except Exception as error:  # the thread must live until stop()
                 self.error = "%s: %s" % (type(error).__name__, error)
@@ -127,14 +128,25 @@ class SlamLink:
             self.error = "bad correction: %s" % error
             return
         with self._lock:
-            px, py, pth = self._correction
-            jumped = math.hypot(x - px, y - py) > MAX_JUMP_M or abs(_wrap(th - pth)) > MAX_JUMP_RAD
-            # slam_toolbox puts the map origin at the first pose it sees, and the firmware odometry is
-            # not zeroed between runs, so the first correction of a session can be far from identity.
-            if jumped and not self._fresh:
-                self.refused += 1
-                self.error = "correction refused: jumped to %.2f %.2f %.2f" % (x, y, th)
+            if not self._jumped((x, y, th), self._correction):
+                self._candidate, self._agree = None, 0
+                self._correction = (x, y, th)
                 return
-            self.rebased += jumped
-            self._fresh = False
-            self._correction = (x, y, th)
+            self.refused += 1
+            self.error = "correction refused: jumped to %.2f %.2f %.2f" % (x, y, th)
+            # One bad message is a glitch. The same new value again and again is real: slam_toolbox
+            # started a new map (the map origin is the first pose it sees, and the firmware odometry
+            # is not zeroed between runs) or a loop closure moved it. Take that one.
+            if self._candidate is not None and not self._jumped((x, y, th), self._candidate):
+                self._agree += 1
+            else:
+                self._agree = 1
+            self._candidate = (x, y, th)
+            if self._agree >= REBASE_AFTER:
+                self.rebased += 1
+                self._candidate, self._agree = None, 0
+                self._correction = (x, y, th)
+
+    @staticmethod
+    def _jumped(new, old):
+        return math.hypot(new[0] - old[0], new[1] - old[1]) > MAX_JUMP_M or abs(_wrap(new[2] - old[2])) > MAX_JUMP_RAD

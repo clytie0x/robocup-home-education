@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import sys
 import tempfile
@@ -48,6 +49,20 @@ class ReplayPlanTests(unittest.TestCase):
             make_log(folder, scans=())
             with self.assertRaises(ValueError):
                 slam_replay.load_plan(folder)
+
+    def test_repair_turns_motion_along_the_unscaled_heading_back_into_the_robot_frame(self):
+        scale = 0.862
+        raw = 20.0  # the firmware heading after many turns: x and y are integrated along this
+        # the robot drives 1 m straight ahead, 0.1 m a step, then 1 m after a 90 degree left turn
+        poses = [[0.1 * k * math.cos(raw), 0.1 * k * math.sin(raw), raw / scale] for k in range(11)]
+        turned = raw + math.pi / 2
+        poses += [[poses[-1][0] + 0.1 * k * math.cos(turned), poses[-1][1] + 0.1 * k * math.sin(turned), turned / scale] for k in range(1, 11)]
+        fixed = slam_replay.repaired_poses(poses, scale)
+        self.assertEqual(fixed[0], [0.0, 0.0, 0.0])
+        self.assertAlmostEqual(fixed[10][0], 1.0, places=6)
+        self.assertAlmostEqual(fixed[10][1], 0.0, places=6)
+        # the logged heading step across the turn is scaled by 1/yaw_scale, so the repaired turn is too
+        self.assertAlmostEqual(fixed[-1][2], (math.pi / 2) / scale, places=6)
 
     def test_run_keeps_real_time_and_the_speed_factor(self):
         now = [0.0]

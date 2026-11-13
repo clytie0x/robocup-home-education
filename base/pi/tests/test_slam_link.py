@@ -84,41 +84,44 @@ class SlamLinkTests(unittest.TestCase):
         self.reply(0.7, 0.0, 0.0)  # 0.4 m from the last one, fine
         self.assertTrue(wait_for(lambda: link.correction() == (0.7, 0.0, 0.0)))
 
-    def test_the_first_correction_of_a_session_may_be_far_from_identity(self):
+    def test_a_jump_that_keeps_coming_is_taken_after_REBASE_AFTER_messages(self):
         link = self.make_link()
         link.send(1.0, (0, 0, 0), ring())
         self.assertTrue(wait_for(lambda: self.records))
-        self.reply(2.0, -3.4, 1.0)  # the map starts at the first odometry pose, not at zero
+        for _ in range(slam_link.REBASE_AFTER - 1):
+            self.reply(2.0, -3.4, 1.0)  # a new map far from identity, as after a slam_toolbox restart
+        self.assertTrue(wait_for(lambda: link.refused == slam_link.REBASE_AFTER - 1))
+        self.assertEqual(link.correction(), (0.0, 0.0, 0.0))
+        self.reply(2.0, -3.4, 1.0)
         self.assertTrue(wait_for(lambda: link.correction() == (2.0, -3.4, 1.0)))
-        self.assertEqual((link.refused, link.rebased), (0, 1))
-        self.reply(2.0, -2.0, 1.0)  # a jump inside the session is still refused
-        self.assertTrue(wait_for(lambda: link.refused == 1))
+        self.assertEqual((link.refused, link.rebased), (slam_link.REBASE_AFTER, 1))
 
-    def test_a_reconnect_takes_the_new_map_but_a_steady_one_is_not_counted(self):
-        port = self.server.port
+    def test_one_glitch_between_good_values_never_gets_through(self):
         link = self.make_link()
         link.send(1.0, (0, 0, 0), ring())
         self.assertTrue(wait_for(lambda: self.records))
-        self.reply(0.3, 0.0, 0.0)
-        self.assertTrue(wait_for(lambda: link.correction() == (0.3, 0.0, 0.0)))
-        self.server.stop()
-        self.records.clear()
-        self.start_server(port)
+        self.reply(0.1, 0.0, 0.0)
+        self.assertTrue(wait_for(lambda: link.correction() == (0.1, 0.0, 0.0)))
+        for _ in range(3):
+            self.reply(5.0, 0.0, 0.0)  # glitch
+            self.reply(0.1, 0.0, 0.0)  # and back to the good value: the count of agreeing glitches restarts
+        self.assertTrue(wait_for(lambda: link.refused == 3))
+        self.assertEqual((link.correction(), link.rebased), ((0.1, 0.0, 0.0), 0))
 
-        def arrived():
-            link.send(2.0, (0, 0, 0), ring())
-            return bool(self.records)
-
-        self.assertTrue(wait_for(arrived, 6.0))
-        self.reply(0.35, 0.0, 0.0)  # same map after a Wi-Fi hiccup
-        self.assertTrue(wait_for(lambda: link.correction() == (0.35, 0.0, 0.0)))
-        self.assertEqual(link.rebased, 0)
+    def test_jumping_values_that_do_not_agree_are_never_taken(self):
+        link = self.make_link()
+        link.send(1.0, (0, 0, 0), ring())
+        self.assertTrue(wait_for(lambda: self.records))
+        for i in range(2 * slam_link.REBASE_AFTER):
+            self.reply(1.0 + 0.7 * (i % 3), 0.0, 0.0)  # each 0.7 m from the last: no two in a row agree
+        self.assertTrue(wait_for(lambda: link.refused == 2 * slam_link.REBASE_AFTER))
+        self.assertEqual((link.correction(), link.rebased), ((0.0, 0.0, 0.0), 0))
 
     def test_a_jump_over_20_degrees_is_refused_across_the_wrap(self):
         link = self.make_link()
         link.send(1.0, (0, 0, 0), ring())
         self.assertTrue(wait_for(lambda: self.records))
-        self.reply(0.0, 0.0, math.radians(15))  # the first one is taken as it is
+        self.reply(0.0, 0.0, math.radians(15))  # within 20 degrees of identity
         self.assertTrue(wait_for(lambda: link.correction()[2] == math.radians(15)))
         self.reply(0.0, 0.0, math.radians(-170))  # 175 degrees away, though only 10 from -180
         self.assertTrue(wait_for(lambda: link.refused == 1))
