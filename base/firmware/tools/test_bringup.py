@@ -26,6 +26,10 @@ class FakePort:
             return self.e_replies.pop(0).encode()
         if last == b"O#":
             return b"Ox:+000.00,y:+000.00,th:+000.00#"
+        if last == b"V#":
+            return b"Vversion:1,build:c0784b1#"
+        if last == b"U#":
+            return b"U!busy#"
         return b"Px:+0000000,y:+0000000,th:+0000000,t:0000012345#"
 
 
@@ -57,6 +61,14 @@ class Rules(unittest.TestCase):
         self.assertTrue(bringup.driven(base, "turn", b"F000|+030#", -1, +1))
         base = bringup.Base(FakePort([e(0, 0), e(4000, 4000, 40, 40)]))
         self.assertFalse(bringup.driven(base, "turn", b"F000|+030#", -1, +1))
+
+    def test_replies_include_the_version(self):
+        base = bringup.Base(FakePort([e(0, 0)]))
+        self.assertTrue(bringup.replies(base))
+
+    def test_update_is_refused_while_driving(self):
+        base = bringup.Base(FakePort([]))
+        self.assertTrue(bringup.update_refused_while_driving(base))
 
     def test_stop_needs_still_wheels_and_zero_pwm(self):
         base = bringup.Base(FakePort([e(5000, 5000), e(5003, 5001)]))

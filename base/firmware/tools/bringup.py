@@ -4,9 +4,9 @@ Wheels lifted off the floor, red button within reach. Needs only pyserial:
 
   python tools/safe_run.py .venv/bin/python ~/firmware-new/bringup.py
 
-Checks, in order: S# and the replies, each encoder by hand, both wheels forward, a left
-turn, S# stops, and the 0.3 s timeout stops. Prints PASS or FAIL for each and sends S#
-however it ends.
+Checks, in order: S# and the replies (with V#), each encoder by hand (motors set to
+coast for it), both wheels forward, a left turn, U# refused while driving, S# stops, and
+the 0.3 s timeout stops. Prints PASS or FAIL for each and sends S# however it ends.
 """
 import argparse
 import re
@@ -18,6 +18,7 @@ PERIOD = 0.04  # the Pi resends drive packets every 40 ms
 E_REPLY = re.compile(r"Eleft:([+-]\d{7}),right:([+-]\d{7}),pwm:([+-]\d{3}),([+-]\d{3}),flags:([0-9A-F]{2})#")
 O_REPLY = re.compile(r"Ox:[+-]\d{3}\.\d{2},y:[+-]\d{3}\.\d{2},th:[+-]\d{3}\.\d{2}#")
 P_REPLY = re.compile(r"Px:[+-]\d{7},y:[+-]\d{7},th:[+-]\d{7},t:\d{10}#")
+V_REPLY = re.compile(r"Vversion:\d+,build:[0-9a-z-]+#")
 TIMEOUT_FLAG = 0x04
 QUARTER_TURN = 9600  # counts, about 38 600 per wheel turn (config.h)
 
@@ -63,15 +64,17 @@ def replies(base):
     base.stop()
     time.sleep(0.2)
     left, right, pwm_l, pwm_r, flags = base.encoders()
-    o, p = base.ask(b"O#"), base.ask(b"P#")
-    ok = bool(O_REPLY.search(o)) and bool(P_REPLY.search(p)) and pwm_l == pwm_r == 0
-    return report("replies", ok, f"E flags {flags:02X} pwm {pwm_l},{pwm_r}; {o.strip()}; {p.strip()}")
+    o, p, v = base.ask(b"O#"), base.ask(b"P#"), base.ask(b"V#")
+    ok = bool(O_REPLY.search(o)) and bool(P_REPLY.search(p)) and bool(V_REPLY.search(v)) and pwm_l == pwm_r == 0
+    return report("replies", ok, f"E flags {flags:02X} pwm {pwm_l},{pwm_r}; {o.strip()}; {p.strip()}; {v.strip()}")
 
 
 def by_hand(base, wheel):
+    base.ask(b"Kbrake_at_zero=0#")  # coast, or the shorted motor fights the hand
     before = base.encoders()
     input(f"Turn the {wheel.upper()} wheel FORWARD about a quarter turn by hand, then press Enter ")
     after = base.encoders()
+    base.ask(b"Kbrake_at_zero=1#")
     mine, other = (0, 1) if wheel == "left" else (1, 0)
     moved, still = after[mine] - before[mine], after[other] - before[other]
     ok = moved > QUARTER_TURN // 4 and abs(still) < QUARTER_TURN // 20
@@ -87,6 +90,14 @@ def driven(base, name, packet, want_left, want_right):
     dl, dr = during[0] - before[0], during[1] - before[1]
     ok = (dl > 1000 if want_left > 0 else dl < -1000) and (dr > 1000 if want_right > 0 else dr < -1000)
     return report(name, ok, f"left {dl:+d}, right {dr:+d} counts, pwm {during[2]},{during[3]}")
+
+
+def update_refused_while_driving(base):
+    base.drive(b"F005|+000#", 1.0)
+    answer = base.ask(b"U#").strip()  # the last drive packet is still in force
+    base.stop()
+    time.sleep(0.5)
+    return report("U# refused while driving", answer == "U!busy#", answer)
 
 
 def stops(base, name, after_drive):
@@ -120,6 +131,7 @@ def main():
         ok = input("Did both wheels roll FORWARD? [y/n] ").strip().lower() == "y"
         results.append(report("forward by eye", ok, "owner"))
         results.append(driven(base, "turn left on the spot", b"F000|+030#", -1, +1))
+        results.append(update_refused_while_driving(base))
         results.append(stops(base, "S# stops", base.stop))
         results.append(stops(base, "0.3 s timeout stops", lambda: None))
     finally:

@@ -43,6 +43,8 @@ void test_protocol(void);
 void test_control(void);
 void test_odom(void);
 void test_safety(void);
+void test_params(void);
+void test_boot(void);
 void test_app(void);
 
 #endif

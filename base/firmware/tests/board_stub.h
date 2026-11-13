@@ -7,6 +7,8 @@
 extern uint32_t stub_ms;          /* what board_millis() returns */
 extern int32_t stub_counts[2];    /* what board_read_counts() returns, left and right */
 extern float stub_pwm[2];         /* the latest board_set_pwm() */
+extern int stub_brake;            /* its brake_at_zero */
+extern int stub_bootloader_calls; /* board_enter_bootloader() calls */
 extern char stub_tx[1024];        /* everything board_uart_write() sent since stub_clear_tx() */
 extern int stub_tx_length;
 

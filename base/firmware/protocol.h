@@ -11,6 +11,14 @@
  *   E#                reply Eleft:+0000000,right:+0000000,pwm:+000,+000,flags:00#
  *   P#                reply Px:+0000000,y:+0000000,th:+0000000,t:0000000000#
  *                     (mm, mm, milliradians, ms since power-up when the pose was computed)
+ * New for updates without the BOOT0 jumper and for tuning without a reflash:
+ *   U#                reply Uok# and restart into the ST ROM bootloader, or U!busy#
+ *   Uforce#           the same without the wheel-speed check (an encoder that counts
+ *                     on its own must not lock out updates); still needs zero PWM
+ *   V#                reply Vversion:1,build:<git hash>#
+ *   D#                reply Dtarget:+0000,+0000,speed:+0000,+0000,pwm:+000,+000# (mm/s, %)
+ *   K<name>=<value>#  set a tuning value (params.h); reply K<name>=<value in force>#
+ *   K<name>?#         read one; refused with K!unknown#, K!range# or K!syntax#
  *
  * No hardware calls here, so the laptop tests cover all of it. */
 #ifndef PROTOCOL_H
@@ -18,8 +26,11 @@
 
 #include <stdint.h>
 
-/* The longest valid message is "F000|+000" (9 bytes before '#'). */
-#define PROTOCOL_MAX_MESSAGE 16
+#include "params.h"
+
+/* The longest valid message is a K set, "Kbrake_at_zero=1" or a long value (under 32
+ * bytes before '#'); the old ones are at most "F000|+000" (9). */
+#define PROTOCOL_MAX_MESSAGE 32
 #define PROTOCOL_MAX_REPLY 64
 
 typedef enum {
@@ -29,7 +40,14 @@ typedef enum {
     MSG_POSE,      /* P#: reply with the fine pose and its timestamp */
     MSG_RESET,     /* R#: odometry back to zero */
     MSG_MAX_SPEED, /* M<vvv>#: max_speed_mps is set */
-    MSG_ENCODERS   /* E#: raw counts, PWM, fault flags */
+    MSG_ENCODERS,  /* E#: raw counts, PWM, fault flags */
+    MSG_BOOTLOADER, /* U#: restart into the ROM bootloader for an update */
+    MSG_BOOTLOADER_FORCE, /* Uforce#: the same, without the wheel-speed check */
+    MSG_VERSION,   /* V# */
+    MSG_DIAG,      /* D#: wheel targets, measured speeds, PWM */
+    MSG_PARAM_SET, /* K<name>=<value>#: name and value are set */
+    MSG_PARAM_GET, /* K<name>?#: name is set */
+    MSG_PARAM_BAD  /* a K message that does not parse: answered with K!syntax# */
 } msg_kind;
 
 typedef struct {
@@ -37,6 +55,8 @@ typedef struct {
     float v_mps;         /* MSG_DRIVE: forward speed, negative for B */
     float w_radps;       /* MSG_DRIVE: turn rate, left positive */
     float max_speed_mps; /* MSG_MAX_SPEED */
+    char name[PARAM_NAME_MAX]; /* MSG_PARAM_SET, MSG_PARAM_GET */
+    float value;         /* MSG_PARAM_SET */
 } message;
 
 typedef struct {
@@ -63,5 +83,10 @@ int format_odom(char *out, float x_m, float y_m, float th_rad);
 int format_pose(char *out, float x_m, float y_m, float th_rad, uint32_t t_ms);
 int format_encoders(char *out, int32_t left, int32_t right, float pwm_left_pct,
                     float pwm_right_pct, unsigned flags);
+/* K<name>=<value>#, the value with 6 decimals: Kkp=300.000000# */
+int format_param(char *out, const char *name, float value);
+/* m/s in, mm/s out */
+int format_diag(char *out, const float target_mps[2], const float speed_mps[2],
+                const float pwm_pct[2]);
 
 #endif

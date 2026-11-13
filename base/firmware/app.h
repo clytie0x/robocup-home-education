@@ -8,18 +8,20 @@
 
 #include "control.h"
 #include "odom.h"
+#include "params.h"
 #include "protocol.h"
 #include "safety.h"
 
 typedef struct {
     parser rx;
     safety_state safety;
+    params p;           /* tuning values, K<name>=<value># */
     odom_pose pose;
     speed_window speed[2];
     pi_state pi[2];
     float cmd_v;        /* latest valid drive command, m/s */
     float cmd_w;        /* rad/s, left positive */
-    float max_speed;    /* per wheel, m/s: MAX_WHEEL_SPEED_MPS or lower after M<vvv># */
+    float max_speed;    /* per wheel, m/s, from M<vvv>#; the cap in force is min(this, p.vmax) */
     wheel_pair ramped;  /* wheel speed targets after the ramp, m/s */
     int32_t counts[2];  /* running counts, forward positive */
     float measured[2];  /* wheel speeds, m/s */

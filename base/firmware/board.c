@@ -10,6 +10,7 @@
  * No pin remap is needed: all of these are the timers' and USART's default pins. */
 #include "board.h"
 
+#include "boot.h"
 #include "config.h"
 #include "stm32f103.h"
 
@@ -48,17 +49,60 @@ static void motors_off_pins(void)
     pin_mode(GPIOA, 7, PIN_OUTPUT_2MHZ);
 }
 
+/* ---- Restarts ---- */
+
+static void system_reset(void)
+{
+    __asm volatile("dsb" ::: "memory");
+    SCB_AIRCR = SCB_AIRCR_SYSRESETREQ;
+    __asm volatile("dsb" ::: "memory");
+    for (;;) {
+    }
+}
+
+/* Leave the mark for stage1 and restart: the next start runs the ST ROM bootloader. The
+ * backup register survives the reset; the watchdog does not (a system reset stops it),
+ * so it cannot fire while the bootloader waits. */
+static void restart_into_rom_bootloader(void)
+{
+    __asm volatile("cpsid i" ::: "memory");
+    motors_off_pins();
+    RCC_APB1ENR |= RCC_APB1ENR_PWREN | RCC_APB1ENR_BKPEN;
+    PWR_CR |= PWR_CR_DBP;
+    BKP_DR1 = BOOT_MAGIC;
+    system_reset();
+}
+
+/* Any fault or unexpected interrupt (startup.c): motors off and restart at once. stage1
+ * counts these restarts; three in a row before the loop ran 2 s, and it starts the ROM
+ * bootloader instead, so a broken update can always be replaced from the Pi. */
+void board_panic(void)
+{
+    motors_off_pins();
+    system_reset();
+}
+
 /* ---- Clock: 8 MHz crystal x 9 = 72 MHz; APB1 36 MHz (its timers still get 72 MHz) ---- */
 
 static void clock_init(void)
 {
+    /* Start from the internal 8 MHz clock whatever ran before: after the ROM bootloader's
+     * Go command its PLL may still be running, and the PLL cannot be changed while on. */
+    RCC_CR |= RCC_CR_HSION;
+    while (!(RCC_CR & RCC_CR_HSIRDY)) {
+    }
+    RCC_CFGR &= ~3u;                     /* system clock = HSI */
+    while (((RCC_CFGR >> 2) & 3u) != 0u) {
+    }
+    RCC_CR &= ~RCC_CR_PLLON;
+    while (RCC_CR & RCC_CR_PLLRDY) {
+    }
     RCC_CR |= RCC_CR_HSEON;
     for (uint32_t wait = 0; !(RCC_CR & RCC_CR_HSERDY); wait++) {
         if (wait > 1000000u) {
-            for (;;) {
-                /* No crystal: stop here with the motors held off. No O# reply tells the
-                 * operator something is wrong. */
-            }
+            /* No crystal: the loop cannot keep time. Wait in the ROM bootloader (it runs on
+             * the internal clock), motors off, where the Pi can still reach the chip. */
+            restart_into_rom_bootloader();
         }
     }
     FLASH_ACR = 0x10u | 0x2u;            /* prefetch on, 2 wait states for 72 MHz */
@@ -113,19 +157,20 @@ static uint32_t duty(float pct)
     return (uint32_t)(a * (float)(TIM3->ARR + 1u) / 100.0f);
 }
 
-/* One L298N channel: two direction pins and its PWM compare register. Both pins low and
- * zero duty is coasting, as the old firmware did. */
-static void drive(int forward_pin, int backward_pin, volatile uint32_t *ccr, float pct)
+/* One L298N channel: two direction pins and its PWM compare register. At zero, both
+ * inputs low with the enable fully on brakes (the low-side switches short the motor);
+ * with the enable off it coasts, as the old firmware did. */
+static void drive(int forward_pin, int backward_pin, volatile uint32_t *ccr, float pct, int brake)
 {
     pin_write(GPIOB, forward_pin, pct > 0.0f);
     pin_write(GPIOB, backward_pin, pct < 0.0f);
-    *ccr = duty(pct);
+    *ccr = (pct == 0.0f && brake) ? TIM3->ARR + 1u : duty(pct); /* above ARR: always high */
 }
 
-void board_set_pwm(float left_pct, float right_pct)
+void board_set_pwm(float left_pct, float right_pct, int brake_at_zero)
 {
-    drive(15, 14, &TIM3->CCR2, left_pct);
-    drive(13, 12, &TIM3->CCR1, right_pct);
+    drive(15, 14, &TIM3->CCR2, left_pct, brake_at_zero);
+    drive(13, 12, &TIM3->CCR1, right_pct, brake_at_zero);
 }
 
 /* ---- Encoders: TIM2 (left) and TIM4 (right) in encoder mode, both edges of both channels ---- */
@@ -185,6 +230,8 @@ static void uart_init(void)
     pin_write(GPIOA, 10, 1);
     pin_mode(GPIOA, 10, PIN_INPUT_PULL); /* pulled up: an unplugged CH340 reads idle, not noise */
     USART1->BRR = CPU_HZ / 115200u;      /* 625 */
+    USART1->CR2 = 0;                     /* 1 stop bit; also undoes the ROM bootloader's setup */
+    USART1->CR3 = 0;
     /* 9-bit frame = 8 data bits + even parity, then 1 stop bit: 8E1 */
     USART1->CR1 = USART_CR1_UE | USART_CR1_M | USART_CR1_PCE | USART_CR1_TE | USART_CR1_RE |
                   USART_CR1_RXNEIE;
@@ -255,6 +302,24 @@ static void watchdog_init(void)
 void board_watchdog_kick(void)
 {
     IWDG_KR = 0xAAAAu;
+}
+
+void board_enter_bootloader(void)
+{
+    /* The Uok# reply is still in the ring: let it reach the Pi first (about 0.5 ms). */
+    uint32_t start = millis;
+    while ((tx_tail != tx_head || !(USART1->SR & USART_SR_TC)) && millis - start < 50u) {
+        board_watchdog_kick();
+    }
+    restart_into_rom_bootloader();
+}
+
+void board_boot_ok(void)
+{
+    RCC_APB1ENR |= RCC_APB1ENR_PWREN | RCC_APB1ENR_BKPEN;
+    PWR_CR |= PWR_CR_DBP;
+    BKP_DR2 = 0; /* stage1's count of restarts in a row */
+    PWR_CR &= ~PWR_CR_DBP;
 }
 
 uint32_t board_millis(void)

@@ -9,6 +9,8 @@ int main(void)
     test_control();
     test_odom();
     test_safety();
+    test_params();
+    test_boot();
     test_app();
     printf("%d checks, %d failed\n", checks_run, checks_failed);
     return checks_failed ? 1 : 0;

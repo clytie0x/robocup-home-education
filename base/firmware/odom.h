@@ -14,8 +14,9 @@ typedef struct {
 
 void odom_reset(odom_pose *p);
 
-/* Add one tick of wheel motion: count changes of each wheel (forward positive). */
-void odom_update(odom_pose *p, int32_t d_left, int32_t d_right, float meters_per_count,
-                 float track, uint32_t t_ms);
+/* Add one tick of wheel motion: count changes of each wheel (forward positive), and
+ * metres per count of each wheel (they may differ after calibration). */
+void odom_update(odom_pose *p, int32_t d_left, int32_t d_right, float mpc_left,
+                 float mpc_right, float track, uint32_t t_ms);
 
 #endif

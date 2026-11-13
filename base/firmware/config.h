@@ -6,6 +6,9 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+/* Reported by V#. Raise it when the protocol or a default changes. */
+#define FIRMWARE_VERSION "1"
+
 /* ---- Geometry ---- */
 
 /* Derived, not measured directly. The old firmware's odometry used a 0.0762 m wheel
@@ -40,7 +43,8 @@
 
 /* ---- Speed limits and ramps ---- */
 
-/* Hard cap for each wheel; M<vvv># can lower it, never raise it. The old firmware gave
+/* Top speed of each wheel at start (Kvmax=<value># changes it at run time, up to the
+ * bound in params.c); M<vvv># can lower it, never raise it. The old firmware gave
  * 0.12 to 0.13 m/s straight and 0.10 to 0.11 per wheel spinning at what looks like full
  * PWM, so 0.12 keeps the loop out of saturation in straight lines. MEASURE ON THE BOARD
  * with the PWM ladder (design 5) and raise it if the new PWM frequency gives more. */
@@ -48,9 +52,15 @@
 
 /* Speeding up: the value in base/params.json. */
 #define ACCEL_MPS2 0.25f
-/* Slowing down, also for S# and the command timeout. Design draft value; at 0.12 m/s it
- * stops in 1.4 cm and 0.24 s. Owner to confirm (wheel slip on the competition floor). */
+/* Slowing down, also for S# and the command timeout. At 0.12 m/s it stops in 1.4 cm and
+ * 0.24 s. Default chosen 2026-11-14 (design draft value); the owner may change it, at run
+ * time with Kbrake=<value>#. */
 #define BRAKE_MPS2 0.5f
+
+/* What zero PWM does: 1 = brake (L298N enable high, both inputs low: the motor is
+ * shorted and stops quickly), 0 = coast (enable low), as the old firmware did. Default
+ * chosen 2026-11-14: brake; the owner may change it with Kbrake_at_zero=0#. */
+#define BRAKE_AT_ZERO 1.0f
 
 /* ---- Wheel speed loop: pwm% = KFF * target + KP * error + KI * integral ---- */
 
@@ -79,7 +89,8 @@
 #define FAULT_PWM_PCT 30.0f
 /* ...where "does not turn" is slower than this: a still wheel can jitter by a count. */
 #define FAULT_MIN_SPEED_MPS 0.005f
-/* ...for this long. Then both motors stop until S#. */
+/* ...for this long. Then both motors stop until S#. Rule kept as the default on
+ * 2026-11-14; the owner may change it (compile-time on purpose, like the timeout). */
 #define FAULT_MS 300u
 
 #endif

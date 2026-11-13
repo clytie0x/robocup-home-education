@@ -220,8 +220,135 @@ static void max_speed_message_lowers_the_cap(void)
     CHECK_NEAR(s[0], MAX_WHEEL_SPEED_MPS, 0.002f);
 }
 
+static void version_reply(void)
+{
+    app a;
+    start(&a);
+    CHECK_STR(ask(&a, "V#"), "Vversion:" FIRMWARE_VERSION ",build:unknown#\r\n");
+}
+
+static void bootloader_only_when_standing_still(void)
+{
+    app a;
+    start(&a);
+    run(&a, SETTLE_MS, "F010|+000#");
+    CHECK_STR(ask(&a, "U#"), "U!busy#\r\n"); /* driving */
+    stub_receive("S#");
+    run(&a, 100, NULL);
+    CHECK_STR(ask(&a, "U#"), "U!busy#\r\n"); /* still ramping down after S# */
+    CHECK(stub_bootloader_calls == 0);
+
+    run(&a, 400, NULL);
+    CHECK_STR(ask(&a, "U#"), "Uok#\r\n");
+    CHECK(stub_bootloader_calls == 1);
+}
+
+static void bootloader_after_silence_and_during_a_fault(void)
+{
+    app a;
+    start(&a);
+    CHECK_STR(ask(&a, "U#"), "Uok#\r\n"); /* fresh from power-up: never driven */
+
+    start(&a);
+    left_encoder_dead = 1;
+    run(&a, 1500, "F010|+000#"); /* fault holds both motors at zero */
+    run(&a, 100, NULL);
+    CHECK(a.safety.faults != 0u);
+    CHECK_STR(ask(&a, "U#"), "Uok#\r\n");
+}
+
+/* An encoder that counts by itself makes a still wheel look like it turns: U# then
+ * refuses, Uforce# does not. Neither works while a drive command is in force. */
+static void forced_bootloader_ignores_only_the_wheel_speed(void)
+{
+    app a;
+    start(&a);
+    run(&a, 100, NULL);
+    for (int t = 0; t < 100; t += 5) {
+        stub_counts[0] += 40; /* 0.1 m/s of phantom counts on the left */
+        stub_ms += 5u;
+        app_poll_uart(&a);
+        app_tick(&a);
+    }
+    CHECK_STR(ask(&a, "U#"), "U!busy#\r\n");
+    CHECK_STR(ask(&a, "Uforce#"), "Uok#\r\n");
+    CHECK(stub_bootloader_calls == 1);
+
+    start(&a);
+    run(&a, SETTLE_MS, "F010|+000#");
+    CHECK_STR(ask(&a, "Uforce#"), "U!busy#\r\n");
+    CHECK(stub_bootloader_calls == 0);
+}
+
+static void tuning_values(void)
+{
+    app a;
+    start(&a);
+    CHECK_STR(ask(&a, "Kvmax=0.05#"), "Kvmax=+0.050000#\r\n");
+    CHECK_STR(ask(&a, "Kvmax?#"), "Kvmax=+0.050000#\r\n");
+    CHECK_STR(ask(&a, "Kvmax=0.7#"), "K!range#\r\n");
+    CHECK_STR(ask(&a, "Kvmax?#"), "Kvmax=+0.050000#\r\n"); /* unchanged */
+    CHECK_STR(ask(&a, "Ktimeout=1#"), "K!unknown#\r\n");
+    CHECK_STR(ask(&a, "Kvmax=fast#"), "K!syntax#\r\n");
+
+    float s[2];
+    run(&a, SETTLE_MS, "F010|+000#");
+    mean_speeds(&a, "F010|+000#", s);
+    CHECK_NEAR(s[0], 0.05f, 0.002f); /* the new top speed is in force at once */
+
+    /* Odometry and speed follow the per-wheel scale: with the scale doubled, the firmware
+     * thinks the wheels go twice as fast, so they really go half as fast. */
+    start(&a);
+    ask(&a, "Kmpc_left=24.72#");
+    ask(&a, "Kmpc_right=24.72#");
+    run(&a, SETTLE_MS, "F005|+000#");
+    mean_speeds(&a, "F005|+000#", s);
+    CHECK_NEAR(s[0], 0.025f, 0.002f);
+    CHECK_NEAR(s[1], 0.025f, 0.002f);
+
+    /* Only the right scale doubled: the right wheel really turns at half speed, and the
+     * odometry, using the same scale, still sees a straight line. */
+    start(&a);
+    ask(&a, "Kmpc_right=24.72#");
+    run(&a, SETTLE_MS, "F005|+000#");
+    mean_speeds(&a, "F005|+000#", s);
+    CHECK_NEAR(s[0], 0.05f, 0.002f);
+    CHECK_NEAR(s[1], 0.025f, 0.002f);
+    /* About 0.03 rad from the two wheels' different start-up; a right wheel read with the
+     * left scale would show -0.3 rad. */
+    CHECK_NEAR(a.pose.th, 0.0f, 0.08f);
+}
+
+static void diagnostics_reply(void)
+{
+    app a;
+    start(&a);
+    run(&a, SETTLE_MS, "F010|+000#");
+    const char *d = ask(&a, "D#");
+    CHECK(strncmp(d, "Dtarget:+0100,+0100,speed:+0", 28) == 0);
+    CHECK(strstr(d, ",pwm:+0") != NULL && strstr(d, "#\r\n") != NULL);
+}
+
+static void zero_pwm_brakes_by_default(void)
+{
+    app a;
+    start(&a);
+    run(&a, 10, NULL);
+    CHECK(stub_brake == 1);
+    ask(&a, "Kbrake_at_zero=0#");
+    run(&a, 10, NULL);
+    CHECK(stub_brake == 0);
+}
+
 void test_app(void)
 {
+    version_reply();
+    bootloader_only_when_standing_still();
+    bootloader_after_silence_and_during_a_fault();
+    forced_bootloader_ignores_only_the_wheel_speed();
+    tuning_values();
+    diagnostics_reply();
+    zero_pwm_brakes_by_default();
     motors_stay_still_after_power_up();
     drives_the_asked_speed();
     turns_right_on_a_negative_rate();

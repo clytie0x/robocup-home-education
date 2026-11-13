@@ -14,6 +14,9 @@
 #define RCC_CFGR REG(RCC_BASE + 0x04)
 #define RCC_APB2ENR REG(RCC_BASE + 0x18)
 #define RCC_APB1ENR REG(RCC_BASE + 0x1C)
+#define RCC_CSR REG(RCC_BASE + 0x24)
+#define RCC_CR_HSION (1u << 0)
+#define RCC_CR_HSIRDY (1u << 1)
 #define RCC_CR_HSEON (1u << 16)
 #define RCC_CR_HSERDY (1u << 17)
 #define RCC_CR_PLLON (1u << 24)
@@ -25,6 +28,21 @@
 #define RCC_APB1ENR_TIM2EN (1u << 0)
 #define RCC_APB1ENR_TIM3EN (1u << 1)
 #define RCC_APB1ENR_TIM4EN (1u << 2)
+#define RCC_APB1ENR_BKPEN (1u << 27)
+#define RCC_APB1ENR_PWREN (1u << 28)
+#define RCC_CSR_RMVF (1u << 24)
+#define RCC_CSR_PINRSTF (1u << 26)
+#define RCC_CSR_PORRSTF (1u << 27)
+#define RCC_CSR_SFTRSTF (1u << 28)
+#define RCC_CSR_IWDGRSTF (1u << 29)
+#define RCC_CSR_WWDGRSTF (1u << 30)
+
+/* Power control and backup registers, RM0008 5.4 and 6.4. The backup registers keep their
+ * value across a system reset (and across power-off while VBAT is fed). */
+#define PWR_CR REG(0x40007000u)
+#define PWR_CR_DBP (1u << 8) /* allow writes to the backup domain */
+#define BKP_DR1 REG(0x40006C04u)
+#define BKP_DR2 REG(0x40006C08u)
 
 /* Flash access control, RM0008 3.3.3 */
 #define FLASH_ACR REG(0x40022000u)
@@ -61,6 +79,7 @@ typedef struct {
 #define USART_SR_NE (1u << 2)
 #define USART_SR_ORE (1u << 3)
 #define USART_SR_RXNE (1u << 5)
+#define USART_SR_TC (1u << 6)
 #define USART_SR_TXE (1u << 7)
 #define USART_CR1_RE (1u << 2)
 #define USART_CR1_TE (1u << 3)
@@ -80,6 +99,10 @@ typedef struct {
 #define SYST_RVR REG(0xE000E014u)
 #define SYST_CVR REG(0xE000E018u)
 #define NVIC_ISER1 REG(0xE000E104u)
+/* System control block, PM0056 4.4 */
+#define SCB_VTOR REG(0xE000ED08u)
+#define SCB_AIRCR REG(0xE000ED0Cu)
+#define SCB_AIRCR_SYSRESETREQ 0x05FA0004u /* key + request a system reset */
 #define USART1_IRQ 37
 
 #endif

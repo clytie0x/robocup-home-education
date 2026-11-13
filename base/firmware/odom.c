@@ -9,11 +9,11 @@ void odom_reset(odom_pose *p)
     p->th = 0.0f;
 }
 
-void odom_update(odom_pose *p, int32_t d_left, int32_t d_right, float meters_per_count,
-                 float track, uint32_t t_ms)
+void odom_update(odom_pose *p, int32_t d_left, int32_t d_right, float mpc_left,
+                 float mpc_right, float track, uint32_t t_ms)
 {
-    float left = (float)d_left * meters_per_count;
-    float right = (float)d_right * meters_per_count;
+    float left = (float)d_left * mpc_left;
+    float right = (float)d_right * mpc_right;
     float ds = (left + right) / 2.0f;
     float dth = (right - left) / track;
     /* Midpoint rule: during the tick the heading moved from th to th + dth, so the step

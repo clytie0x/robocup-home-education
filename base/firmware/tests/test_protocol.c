@@ -66,7 +66,8 @@ static void malformed_messages_are_dropped(void)
     const char *bad[] = {
         "F010|+00#", "F0100|+000#", "F01|+000#", "F010+000#", "F010|*000#", "F010|+0000#",
         "f010|+000#", "F0a0|+000#", "F010|+0 0#", "F-10|+000#", "X#", "#", "S1#", "Sx#",
-        "O #", "M12#", "M0123#", "Ma10#", "E0#", "|+000#", "010|+000#",
+        "O #", "M12#", "M0123#", "Ma10#", "E0#", "|+000#", "010|+000#", "U1#", "Ux#", "V #",
+        "D0#", "u#",
     };
     for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
         message m = {0};
@@ -97,7 +98,7 @@ static void stream_recovers(void)
     CHECK(feed(&p, "S#", &m) == 1 && m.kind == MSG_STOP);
 
     /* An over-long run of junk is dropped, and the parser keeps working. */
-    CHECK(feed(&p, "F01234567890123456789012345|+000#", &m) == 0);
+    CHECK(feed(&p, "F01234567890123456789012345678901234567890|+000#", &m) == 0);
     CHECK(feed(&p, "F012|+005#", &m) == 1 && m.kind == MSG_DRIVE);
     CHECK_NEAR(m.v_mps, 0.12f, 1e-6);
 }
@@ -134,8 +135,65 @@ static void encoder_reply(void)
     CHECK_STR(out, "Eleft:+2345678,right:+0000000,pwm:+000,+000,flags:00#");
 }
 
+static void update_and_tuning_messages(void)
+{
+    message m = {0};
+    CHECK(feed_fresh("U#", &m) == 1 && m.kind == MSG_BOOTLOADER);
+    CHECK(feed_fresh("Uforce#", &m) == 1 && m.kind == MSG_BOOTLOADER_FORCE);
+    CHECK(feed_fresh("Uforc#", &m) == 0 && feed_fresh("Uforcee#", &m) == 0);
+    CHECK(feed_fresh("V#", &m) == 1 && m.kind == MSG_VERSION);
+    CHECK(feed_fresh("D#", &m) == 1 && m.kind == MSG_DIAG);
+
+    CHECK(feed_fresh("Kkp=300#", &m) == 1 && m.kind == MSG_PARAM_SET);
+    CHECK_STR(m.name, "kp");
+    CHECK(m.value == 300.0f);
+    CHECK(feed_fresh("Kmpc_left=12.361234#", &m) == 1 && m.kind == MSG_PARAM_SET);
+    CHECK_STR(m.name, "mpc_left");
+    CHECK_NEAR(m.value, 12.361234f, 1e-5);
+    CHECK(feed_fresh("Ktrack=-0.25#", &m) == 1 && m.value == -0.25f);
+    CHECK(feed_fresh("Ktrack=.5#", &m) == 1 && m.kind == MSG_PARAM_SET && m.value == 0.5f);
+    CHECK(feed_fresh("Kbrake_at_zero=1#", &m) == 1 && m.value == 1.0f);
+    CHECK(feed_fresh("Kvmax?#", &m) == 1 && m.kind == MSG_PARAM_GET);
+    CHECK_STR(m.name, "vmax");
+
+    /* Broken K messages still get an answer (K!syntax#). */
+    const char *bad[] = {"K#", "K=1#", "Kkp#", "Kkp=#", "Kkp=1.2.3#", "Kkp=1x#", "Kkp=1234567890#",
+                         "Kkp?1#", "Kk-p=1#", "Kaaaaaaaaaaaaaaaa=1#", "Kkp=+#"};
+    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        CHECK(feed_fresh(bad[i], &m) == 1);
+        if (m.kind != MSG_PARAM_BAD) {
+            printf("  \"%s\" was not MSG_PARAM_BAD\n", bad[i]);
+        }
+        CHECK(m.kind == MSG_PARAM_BAD);
+    }
+    /* A capital inside a value starts a new message: "Kkp=1E5#" is a broken K, then E. */
+    parser p;
+    parser_init(&p);
+    CHECK(feed(&p, "Kkp=1E5#", &m) == 0);
+    CHECK(feed(&p, "S#", &m) == 1 && m.kind == MSG_STOP);
+}
+
+static void param_and_diag_replies(void)
+{
+    char out[PROTOCOL_MAX_REPLY];
+    format_param(out, "kp", 300.0f);
+    CHECK_STR(out, "Kkp=+300.000000#");
+    format_param(out, "track", 0.296f);
+    CHECK_STR(out, "Ktrack=+0.296000#");
+    format_param(out, "x", -0.9999999f); /* rounds up into the whole part */
+    CHECK_STR(out, "Kx=-1.000000#");
+    format_param(out, "brake_at_zero", 1.0f);
+    CHECK_STR(out, "Kbrake_at_zero=+1.000000#");
+
+    const float target[2] = {0.1f, -0.0444f}, speed[2] = {0.0987f, -0.05f}, pwm[2] = {37.4f, -100.0f};
+    CHECK(format_diag(out, target, speed, pwm) < PROTOCOL_MAX_REPLY);
+    CHECK_STR(out, "Dtarget:+0100,-0044,speed:+0099,-0050,pwm:+037,-100#");
+}
+
 void test_protocol(void)
 {
+    update_and_tuning_messages();
+    param_and_diag_replies();
     drive_packets_from_the_pi();
     single_letter_messages();
     malformed_messages_are_dropped();

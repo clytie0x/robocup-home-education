@@ -156,6 +156,25 @@ Build with `arm-none-eabi-gcc` and the vendor HAL or LL drivers for the identifi
 hardware calls, so their tests run on the laptop with the same packets that
 `base/pi/tests/test_wheels.py` uses.
 
+### 7.1 Updates without the BOOT0 jumper (added 2026-11-14)
+
+The owner moves the BOOT0 jumper once, for the first flash: the deck covers it afterwards,
+and the Pi cannot reset the chip (DTR and RTS on the CH340 do not reach RESET, measured
+2026-11-14). So the first image makes every later update software-only:
+
+- **stage1** (0x08000000, 4 KiB) is written once and never again. On every start it runs
+  the application, or the ST ROM bootloader when `U#` asked for it (a mark in backup
+  register 1), when the application faulted or hung three times in a row before running
+  2 s, or when the application's header or CRC-32 is wrong (an update that stopped half
+  way).
+- **The application** (0x08001000) is the firmware proper. `U#` (only with the motors
+  idle and the wheels still) restarts it into the ROM bootloader; the Pi writes the new
+  application with `stm32flash` at 0x08001000 and starts it with the Go command.
+- **Runtime parameters** (`K<name>=<value>#`, bounded) and `D#` make tuning a serial
+  job; `V#` names the build.
+- Rolling back to the old firmware still needs the jumper: it has no `U#`, and its image
+  covers stage1. Commands: `../firmware/FLASHING.md`.
+
 ## 8. Order of work, each step needs the owner's yes
 
 1. Photos and the part number (blocker 1 to 3).

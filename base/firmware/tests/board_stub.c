@@ -9,6 +9,8 @@
 uint32_t stub_ms;
 int32_t stub_counts[2];
 float stub_pwm[2];
+int stub_brake;
+int stub_bootloader_calls;
 char stub_tx[1024];
 int stub_tx_length;
 
@@ -20,6 +22,8 @@ void stub_reset(void)
     stub_ms = 0;
     stub_counts[0] = stub_counts[1] = 0;
     stub_pwm[0] = stub_pwm[1] = 0.0f;
+    stub_brake = 0;
+    stub_bootloader_calls = 0;
     rx_head = rx_tail = 0;
     stub_clear_tx();
 }
@@ -63,10 +67,11 @@ void board_read_counts(int32_t *left, int32_t *right)
     *right = stub_counts[1];
 }
 
-void board_set_pwm(float left_pct, float right_pct)
+void board_set_pwm(float left_pct, float right_pct, int brake_at_zero)
 {
     stub_pwm[0] = left_pct;
     stub_pwm[1] = right_pct;
+    stub_brake = brake_at_zero;
 }
 
 int board_uart_read(void)
@@ -89,3 +94,10 @@ void board_uart_write(const char *data, int length)
 }
 
 void board_watchdog_kick(void) {}
+
+void board_enter_bootloader(void)
+{
+    stub_bootloader_calls++; /* the real one restarts the chip */
+}
+
+void board_boot_ok(void) {}
