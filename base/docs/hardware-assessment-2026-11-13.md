@@ -174,3 +174,22 @@ Pi camera frames (320 x 240, JPEG) through `link.JetsonLink`: 29.42 frames sent 
 29.42 answers per second (1765 answers), round trip median 16.5 ms, 95th percentile
 22.3 ms, no link error. Pi to Jetson ping 1.7 to 4.9 ms. The fake server answers at once,
 so this is the link alone; the detector's time adds to it (Task 11).
+
+## Task 11: person detector and look vectors on the Jetson, measured 2026-11-13
+
+TensorRT 10.16.2.10 installed by the owner (`apt`, 22 packages). FP16 engines built with
+`trtexec`, input 256 x 320; look vectors from OSNet x0.25 (512 numbers). Sources, licences,
+SHA-256 and exact commands: `base/jetson/models/README.md`. `bench.py`, 300 frames of
+320 x 240 with two people, detector plus looks, while the other teams' processes ran as
+found (load 5.5 to 6.1, rviz2 about 355 % CPU):
+
+| Detector + OSNet | fps median | fps 5th pct | Engines + buffers (MiB, without the CUDA context) | RSS (MiB) | Pass |
+|---|---|---|---|---|---|
+| YOLO11n | 94.7 | 91.3 | 178 | 737 | yes |
+| YOLOv8n | 102.2 | 96.0 | 198 | 736 | yes |
+| YOLOX-nano | 106.9 | 99.2 | 160 | 727 | yes, but found only one of the two people in 36 of 300 frames |
+| YOLOX-tiny | 109.8 | 107.1 | 163 | 742 | yes |
+
+A 2000-frame check of YOLO11n gave median 96.9, 5th percentile 94.3. All four pass the
+15 frames per second and 1.5 GB gates with a wide margin. The choice between them waits
+for person recall on frames from this robot's low, tilted-up camera (Task 11 step 4).
