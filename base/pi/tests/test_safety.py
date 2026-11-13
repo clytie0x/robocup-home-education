@@ -7,7 +7,7 @@ import safety
 
 P = params.load()
 Q = dict(P, decel=0.5, stop_delay=0.2, robot_half_width=0.20)
-# At v = 0.4 the braking distance is 0.39, so the strip is 0.20 < x < 0.59, |y| < 0.25.
+# At v = 0.4 the base runs on 0.24 after S#; with the 0.30 clearance the strip is 0.20 < x < 0.74, |y| < 0.25.
 
 
 class SafetyTest(unittest.TestCase):
@@ -28,6 +28,18 @@ class SafetyTest(unittest.TestCase):
         for pt in [(0.4, 0.30), (0.4, -0.30), (-0.4, 0.0), (0.10, 0.0), (0.8, 0.0)]:
             self.assertFalse(safety.must_stop([pt], 0.4, 0.0, Q), pt)
         self.assertFalse(safety.must_stop(numpy.empty((0, 2)), 0.4, 0.0, Q))
+
+    def test_always_leaves_the_clearance_ahead_even_when_creeping(self):
+        for v in (P["max_speed"], 0.04, 0.01):  # the robot's measured decel and stop_delay
+            edge = safety.FRONT + safety.braking_distance(v, P, margin=0.0) + safety.CLEARANCE
+            self.assertTrue(safety.must_stop([(edge - 0.01, 0.0)], v, 0.0, P), v)
+            self.assertFalse(safety.must_stop([(edge + 0.01, 0.0)], v, 0.0, P), v)
+
+    def test_the_operator_at_the_follow_gap_does_not_stop_the_robot_at_top_speed(self):
+        # Fails if max_speed is raised before braking is measured again: the clearance would
+        # then reach past the follow gap and the robot would stop behind every operator.
+        operator = safety.FRONT + P["follow_gap"]
+        self.assertFalse(safety.must_stop([(operator, 0.0)], P["max_speed"], 0.0, P))
 
     def test_turning_checks_both_sides(self):
         for w in (0.3, -0.3):
