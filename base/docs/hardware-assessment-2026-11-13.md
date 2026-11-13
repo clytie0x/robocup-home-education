@@ -287,3 +287,75 @@ Open, and the reason the owner must keep a hand on the power switch:
 
 Not a fault: `safety.speed_cap`'s blind-camera cap (0.3 m/s) is above `max_speed` (0.12),
 so it never acts. That was the measured decision of Task 2, recorded above.
+
+## Turns, the speed cap and the firmware timeout, evening 2026-11-13
+
+The owner watched and, from this evening, lets the session drive without a per-run
+approval (announce each run; report danger). ROS off. `tools/base_check.py`, wheels on the
+floor; logs in `~/hmc-base/logs/base-check/`.
+
+| Run | Asked | Real rate (middle 1 s) | Yaw scan / odom | Coast after S# | Stop |
+|---|---|---|---|---|---|
+| 203934 | +0.26 | 0.267 | 126.2 / 126.3 deg | 3.7 deg | emergency: a return inside the robot outline (fixed, see below) |
+| 204400 | +0.26 | 0.252 | 184.7 / 184.1 deg | 3.9 deg | target (report recomputed: `timeout 60` killed the 60 s report) |
+| 204747 | +0.26 | 0.275 | 183.9 / 183.5 deg | 3.7 deg | target |
+| 204919 | -0.26 | 0.245 | -183.7 / -184.1 deg | 4.6 deg | target |
+| 0.49 x3 | +0.49, -0.49, +0.49 | 0.472, 0.478, 0.504 | 191.1/191.4, -192.2/-192.8, 190.4/191.4 deg | 11.5, 12.6, 10.8 deg | target |
+| 0.65 | +0.65 | 0.621 | 201.1 / 200.7 deg | 20.3 deg | target |
+| 0.80 | +0.80 | 0.659 | 186.2 / 186.1 deg | 24.6 deg | time limit |
+| 1.00 | +1.00 | 0.696 | 166.9 / 166.8 deg | 26.1 deg | time limit |
+
+Also a line at 0.08 m/s to get clear of a wall behind the robot: 0.346 m real, 0.079 m/s,
+5.1 cm after S#, stop_delay estimate 0.32 s (above the 0.27 s in `params.json`; one run,
+not changed).
+
+Findings:
+- **Turn odometry gate closed.** Under `wheels.py` the odometry yaw agrees with the scan
+  within 1.0 deg on all 9 turns that reached their end (0.5 % at most), both directions.
+  `angular_cmd_scale` 0.862 gives 0.94 to 1.06 of the asked rate up to 0.49 rad/s.
+- **The cap is per wheel.** Turning on the spot tops out at about 0.70 rad/s, each wheel at
+  0.10 to 0.11 m/s (computed with the owner's 0.31 m track). A firmware clamp on forward
+  speed alone would not limit an on-the-spot turn. The wheels run slower under the higher
+  load of spinning than in straight lines (0.12 to 0.13 m/s), which fits full PWM (or a PWM
+  clamp), not a closed-loop speed limit. Left to tell apart: a PWM clamp in the firmware or
+  the motor supply. Needs a multimeter: motor terminal voltage against the supply at F015
+  and at F037.
+- **The firmware has no command timeout of 1.5 s or less.** One `F008|+000#`, then no byte
+  for 1.5 s: the base was still driving at about 0.064 m/s (odometry moved 3.2 cm in the
+  next 0.5 s; log `*-silence-floor.json`, the strip ahead was 3.89 m clear). Only the Pi's
+  watchdog thread stops the base. A dead `run_follow` process (kill -9, OOM), a Pi power
+  loss or an unplugged CH340 leaves the base on its last command. A physical cut-off within
+  reach is required for every drive.
+- A LiDAR return at laser 132 deg, 0.20 m (0.155 m from the turning centre, inside the
+  body) stopped the first turn. It appeared in 3 of 726 logged scans, all tonight, always at
+  that spot. `lidar.is_body` now drops any return inside the outline (2 cm in from the
+  0.40 m square).
+
+From the owner's photos (2026-11-13, 06:09 to 06:11): two DC gear motors with encoders, tyres
+marked 6X1.5 (about 0.15 m; at 0.12 m/s that is about 15 rpm, computed), ball casters, a
+"21V MAX LITHIUM" tool battery, a UGREEN power bank, a USB hub, a finned DC-DC converter on
+the bottom plate (no label visible), and a 22 mm red push button with contact blocks 11 (NC)
+and 23 (NO), wired on 11. The controller board is hidden between the motors. This disagrees
+with the Task 3 note that one power bank feeds everything: to be confirmed by the owner,
+with the converter's output voltage.
+
+## Operator identity, review round 2, 2026-11-13
+
+A second review of the merge rule (fuzz of 600 runs with leg geometry, link down) found two
+holes; both are fixed and covered by tests that fail on the earlier code:
+- a stranger walking up fast merged before 0.3 s in the 0.6 m zone had passed, and was
+  forgotten: the age now counts from when the id was first seen;
+- a stranger never seen as a separate object (in the operator's LiDAR shadow) had no id to
+  vanish: an id that first appears within 0.6 m of the fixed operator and stays is a split.
+- `enrol` refuses while the scene is ambiguous (a fresh enrol has no look to check).
+Fuzz, rerun here with the reviewer's probes: silent stranger follows 156 of 600 before any
+fix, 25 after the first, 2 now; runs that hold or drop the track 81, 294, 363. `COMPANY_MIN`
+0.6 s instead of 0.3 s keeps the 2 and cuts a lone walker's false drops in a sine-leg gait
+model from 51 to 6 of 96 gaits. The gait model is the reviewer's assumption: Task 5 step 3
+(the owner walking a loop) must show the real rate.
+
+Still open from that review: ordinary occlusions (a chair leg, a passer behind the operator,
+someone crossing the 4.0 m range edge next to the operator) drop the track, for good while
+the link is down; in a queue the camera can never re-lock (anyone behind the operator within
+8 deg counts as "two seen"), so the robot holds; a camera re-lock uses the bearing only, and
+can lock onto a stranger standing in front of the operator.
