@@ -1,4 +1,5 @@
 """Obstacles from the depth image: base-frame points that stick up above the floor."""
+import functools
 import math
 
 import numpy as np
@@ -8,6 +9,19 @@ MAX_RANGE = 3.0  # m, depth is too noisy beyond this
 CELL = 0.05  # m, one point per cell
 MIN_VALID_SHARE = 0.05  # below this the image is blind (sunlight), not empty
 NEEDS = ("camera_x", "camera_y", "camera_height", "camera_pitch_deg", "robot_height", "camera_hfov_deg")
+
+
+@functools.lru_cache(maxsize=4)
+def _rays(shape, hfov_deg):
+    """Pinhole ray slopes (right, down) per pixel; the same every frame, so built once.
+
+    Same convention as tools/sensor_check.pixel_rays (reimplemented: that file lives in tools/
+    and pulls in camera and lidar on import).
+    """
+    height, width = shape
+    f = (width / 2) / math.tan(math.radians(hfov_deg) / 2)
+    u, v = np.meshgrid(np.arange(width), np.arange(height))
+    return (u - (width - 1) / 2) / f, (v - (height - 1) / 2) / f
 
 
 def points(depth, p):
@@ -25,14 +39,11 @@ def points(depth, p):
     if any(third.mean() < MIN_VALID_SHARE for third in np.array_split(valid, 3, axis=1)):
         return None
 
-    # Pinhole rays, same convention as tools/sensor_check.pixel_rays (reimplemented: that
-    # file lives in tools/ and pulls in camera and lidar on import).
-    height, width = depth.shape
-    f = (width / 2) / math.tan(math.radians(p["camera_hfov_deg"]) / 2)
-    u, v = np.meshgrid(np.arange(width), np.arange(height))
-    z = depth[valid] / 1000.0
-    x_cam = (u[valid] - (width - 1) / 2) / f * z  # right
-    y_cam = (v[valid] - (height - 1) / 2) / f * z  # down
+    near = valid & (depth < MAX_RANGE * 1000)  # farther pixels are dropped anyway: skip their maths
+    right, down = _rays(depth.shape, p["camera_hfov_deg"])
+    z = depth[near] / 1000.0
+    x_cam = right[near] * z
+    y_cam = down[near] * z
 
     # Camera tilted UP by pitch: forward = (cos, sin), down = (sin, -cos) in (x ahead, up).
     pitch = math.radians(p["camera_pitch_deg"])
@@ -40,7 +51,7 @@ def points(depth, p):
     left = p["camera_y"] + x_cam  # image is mirrored: image right is the robot's left (hardware assessment 2026-11-13)
     up = p["camera_height"] + z * math.sin(pitch) - y_cam * math.cos(pitch)
 
-    keep = (up > MIN_HEIGHT) & (up < p["robot_height"]) & (z < MAX_RANGE)
+    keep = (up > MIN_HEIGHT) & (up < p["robot_height"])
     xy = np.column_stack([ahead[keep], left[keep]])
     if len(xy) == 0:
         return xy
