@@ -362,3 +362,17 @@ someone crossing the 4.0 m range edge next to the operator) drop the track, for 
 the link is down; in a queue the camera can never re-lock (anyone behind the operator within
 8 deg counts as "two seen"), so the robot holds; a camera re-lock uses the bearing only, and
 can lock onto a stranger standing in front of the operator.
+
+## safe_run: stopping the base when a drive program dies, 2026-11-13
+
+`tools/safe_run.py` starts a drive program as its child and sends `S#` however the child
+ends. `run_follow.py --drive`, `base_check.py` and `air_check.py` now refuse to open the wheel
+port unless `safe_run` started them. Measured on the robot: `base_check --line 0.08` under
+`safe_run`, `kill -9` of `base_check` while driving. `safe_run` sent `S#` 0.11 s after the
+kill; odometry read every 0.11 s from 0.31 s on moved 11 mm and 16 mm (the tail of the coast)
+and then nothing from 0.75 s to 1.74 s. Without `safe_run` the base would have kept driving
+(see the timeout result above). It does not help when the Pi loses power or the CH340 comes
+out: the red button stays within reach.
+
+Firmware odometry has a 0.01 m step (11 mm after `odom_distance_scale`), so at 0.08 m/s and
+10 Hz one read often shows no motion; speed from odometry needs at least about 0.3 s.
