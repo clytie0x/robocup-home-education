@@ -34,6 +34,7 @@ import time
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 
 LISTENING, PICKING_BAG, ANNOUNCE_READY, FOLLOWING, DROPPING_BAG, ERROR, ASK_FOLLOW = (
@@ -309,6 +310,14 @@ class FlowNode(Node):
         self.create_subscription(Bool, '/tts/speaking', self._on_speaking, 10)
         self.create_timer(0.2, self._on_tick)
         self.started = False
+        # Start (= first "How can I help you?") only once tts_node says it can talk (/tts/ready, latched) plus a
+        # short settle time; a message published the instant tts_node appears can be lost during discovery.
+        self.declare_parameter('start_delay_s', 1.5)
+        self.start_delay = float(self.get_parameter('start_delay_s').value)
+        self.tts_ready_at = None
+        self.sub_seen_at = None
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
+        self.create_subscription(Bool, '/tts/ready', self._on_tts_ready, latched)
         self.get_logger().info('flow ready (no wake word). Robot events: /robot/event '
                                '[grab_success, grab_failed, drop_done, drop_failed, see_person, lost_person, bag_lost]')
 
@@ -346,13 +355,23 @@ class FlowNode(Node):
             self.get_logger().info(f'event: {msg.data}')
         self._emit(self.logic.on_event(msg.data, time.time()))
 
+    def _on_tts_ready(self, msg: Bool):
+        if msg.data and self.tts_ready_at is None:
+            self.tts_ready_at = time.time()
+
     def _on_speaking(self, msg: Bool):
         self._emit(self.logic.on_speaking(msg.data, time.time()))
 
     def _on_tick(self):
         now = time.time()
-        if not self.started:                            # wait until tts_node listens, so the first question is heard
+        if not self.started:                            # wait until tts_node can talk, so the first question is heard
             if self.pub_say.get_subscription_count() == 0:
+                return
+            if self.sub_seen_at is None:
+                self.sub_seen_at = now
+            ready = self.tts_ready_at is not None and now - self.tts_ready_at >= self.start_delay
+            old_tts = self.tts_ready_at is None and now - self.sub_seen_at >= 5.0   # tts_node without /tts/ready
+            if not (ready or old_tts):
                 return
             self.started = True
             self._emit(self.logic.start(now))
