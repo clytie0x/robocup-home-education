@@ -316,6 +316,22 @@ class MotionTracker:
         length = math.hypot(x1 - x0, y1 - y0)
         return ((x1 - x0) / length, (y1 - y0) / length)
 
+    def predict(self, time: float) -> Point:
+        """Where it is at `time`: the smoothed position moved on by its walking speed.
+
+        last() averages SMOOTH seconds, so for a walking person it lags behind by about
+        half of that, and a missed frame leaves it further behind. Avoiding that old spot
+        steers the robot into where the person really is.
+        """
+        x, y = self.last()
+        if not self.has_moved():
+            return (x, y)
+        (x0, y0) = self._first()
+        span = self._covered() - self.SMOOTH  # time between the two averaged centres
+        # At most half a second ahead: further than that people turn or stop.
+        ahead = min(time - (self._samples[-1][0] - self.SMOOTH / 2), self.SMOOTH)
+        return (x + (x - x0) / span * ahead, y + (y - y0) / span * ahead)
+
     def is_stationary(self) -> bool:
         """True when it stood still for the whole window."""
         if self._covered() < self.window - 0.2 - 1e-9:

@@ -9,7 +9,7 @@ import heapq
 import math
 
 from hmc import world as hmc_world
-from hmc.world import Point, Robot, Shape, distance
+from hmc.world import Point, Robot, Shape, distance, wrap_angle
 
 FOLLOW_DISTANCE = 1.5  # metres to keep behind the operator
 GOAL_TOLERANCE = 0.5  # metres, "close enough" for go_to
@@ -28,8 +28,15 @@ WAYPOINT_REACHED = 0.15  # metres
 # We aim at a waypoint up to this far ahead. The base cannot change its turn rate at
 # once, so aiming at the next cell, just in front of it, would make it wobble.
 AIM_AHEAD = 0.4  # metres
-STOP_MARGIN = 0.02  # metres left between the robot and a shape after a full stop
+STOP_MARGIN = SAFETY / 2  # metres left after a full stop: room for moving people and noisy shapes, with slack to drive along the planner's safety zone
 LOOK_AHEAD = 1.5  # metres; more than the 1.0 m the robot needs to stop from 1 m/s
+# Step of the look ahead. A full cell (0.1 m) could report up to 0.1 m more room than
+# there is, and with noise the robot then braked into a person standing in a crowd.
+FREE_STEP = 0.02  # metres
+# The shortest range at which the robot is sure to see any obstacle: the hard-to-see
+# object of the rulebook, seen only up close (sensors.py, task spec).
+SURE_SEEN = 1.5  # metres
+SWEEP_STEP = math.radians(15)  # headings checked between where we face and where we turn to
 
 Cell = tuple[int, int]
 
@@ -176,10 +183,24 @@ class Navigator:
                 # aim at the next waypoint instead, the planner says it is free.
                 aim = self.path[0]
                 free_there = free_ahead(robot, shapes, _heading_to(robot, aim))
+            # While it turns toward the aim it also rolls through every heading in between,
+            # so check those too. Checking only the two ends let a fast robot swing into
+            # something beside its path before it could brake.
+            here = robot.heading
+            turn = wrap_angle(_heading_to(robot, aim) - here)
+            steps = int(abs(turn) / SWEEP_STEP)
+            swept = min(
+                (free_ahead(robot, shapes, here + turn * k / (steps + 1)) for k in range(1, steps + 1)),
+                default=math.inf,
+            )
             stop_in = min(
                 distance(robot.pos, goal) - stop_distance,
                 free_ahead(robot, shapes, robot.heading),
                 free_there,
+                swept,
+                # Never drive faster than we can stop within what we are sure to see:
+                # a hard-to-see object shows up only SURE_SEEN metres from its edge.
+                SURE_SEEN - hmc_world.ROBOT_RADIUS - STOP_MARGIN,
             )
             robot.drive_toward(aim, dt, stop_in=stop_in)
         else:
@@ -200,13 +221,13 @@ def free_ahead(robot: Robot, shapes: list[Shape], heading: float) -> float:
     free = 0.0
     here = [s.clearance(robot.pos) for s in shapes]
     while free < LOOK_AHEAD:
-        x = robot.x + math.cos(heading) * (free + CELL)
-        y = robot.y + math.sin(heading) * (free + CELL)
+        x = robot.x + math.cos(heading) * (free + FREE_STEP)
+        y = robot.y + math.sin(heading) * (free + FREE_STEP)
         for shape, now in zip(shapes, here):
             there = shape.clearance((x, y))
             if there <= hmc_world.ROBOT_RADIUS + STOP_MARGIN and there < now:
                 return free
-        free += CELL
+        free += FREE_STEP
     return free
 
 

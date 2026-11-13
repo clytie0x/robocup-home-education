@@ -20,6 +20,10 @@ PERSON_MAX_SPEED = 2.0  # m/s; a detection further than this could walk is someo
 REMEMBER_FOR = 1.0  # seconds we still avoid a person the detector missed
 MEMORY_CELL = 0.3  # metres; obstacles closer than this in place and size are the same
 MEMORY_KEEP = 10.0  # seconds we remember an obstacle we no longer see
+KEEP_NEAR = 1.5  # metres; closer than this we keep a small object while the camera cannot see it
+SMALL_SIZE = 0.5  # metres; up to this wide counts as a small object
+# Where the depth camera sees well, forward: closer than VIEW_NEAR it is blind.
+VIEW_NEAR, VIEW_FAR, VIEW_HALF_ANGLE = 0.7, 3.0, math.radians(25)
 # Re-identification by look (see appearance.py).
 OPERATOR_LEARN = 20  # frames of the operator's look we learn at the start
 OPERATOR_MATCH = 0.65  # a detection must look at least this much like the operator
@@ -30,6 +34,12 @@ GO_ON_GAP = 2.5  # metres; once we are this close again, we ask them to go on
 LOST_AFTER = 2.0  # seconds without seeing the operator before we start to search
 DRIVE_FOR = 10.0  # seconds at most to reach the last seen spot (it may be blocked)
 LOOK_AROUND = 5.0  # seconds of turning on the spot before we ask them to come back
+
+
+def _small(shape) -> bool:
+    """A small object, the kind that only the camera sees (walls the lidar sees anyway)."""
+    x0, y0, x1, y1 = shape.bounds()
+    return max(x1 - x0, y1 - y0) <= SMALL_SIZE
 
 
 @dataclass
@@ -186,6 +196,14 @@ class Follower:
         # Stand still and face forward, where we asked them to stand.
         self.body.brake(dt)
 
+    def _in_view(self, shape) -> bool:
+        """True if the camera should see this shape now (its centre in the good view)."""
+        x0, y0, x1, y1 = shape.bounds()
+        dx, dy = (x0 + x1) / 2 - self.body.pos[0], (y0 + y1) / 2 - self.body.pos[1]
+        angle = abs(math.atan2(math.sin(math.atan2(dy, dx) - self.body.heading),
+                               math.cos(math.atan2(dy, dx) - self.body.heading)))  # fmt: skip
+        return VIEW_NEAR <= math.hypot(dx, dy) <= VIEW_FAR and angle <= VIEW_HALF_ANGLE
+
     def shapes(self, senses: Senses) -> list[Shape]:
         """Everything we must not touch: seen obstacles, other people and the operator."""
         now = senses.time
@@ -200,10 +218,15 @@ class Follower:
             self.obstacle_memory[key] = (now, shape)
         # Forget what we have not seen for a while: our own pose drifts, so an old
         # memory is in the wrong place, and could block a door that is really open.
+        # But keep what is near us and out of the camera's view: there we have no news
+        # of it, and forgetting it let the robot drive over a low object it had
+        # stood next to for a while. Something the camera should see but does not, is gone.
+        here = self.body.pos
         self.obstacle_memory = {
             key: (seen, shape)
             for key, (seen, shape) in self.obstacle_memory.items()
             if now - seen <= MEMORY_KEEP
+            or (_small(shape) and shape.clearance(here) <= KEEP_NEAR and not self._in_view(shape))
         }
         shapes = [shape for _, shape in self.obstacle_memory.values()]
         # People we saw a moment ago are still there, even if this frame missed them.
@@ -212,6 +235,8 @@ class Follower:
             trackers.append(self.tracker)
         for tracker in trackers:
             if tracker.seen and now - tracker.last_time <= REMEMBER_FOR:
-                x, y = tracker.last()
-                shapes.append(Circle(x, y, PERSON_RADIUS))
+                # Where they are going and where we last saw them: a walking person
+                # may stop at any moment, so avoid both.
+                for x, y in {tracker.predict(now), tracker.last()}:
+                    shapes.append(Circle(x, y, PERSON_RADIUS))
         return shapes
