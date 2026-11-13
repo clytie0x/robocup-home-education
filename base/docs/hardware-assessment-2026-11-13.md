@@ -417,3 +417,28 @@ circles the follower plans with, the robot, a planned path).
   The path goes round the back and along the far side of the wall on the right: the box, the
   chair and that wall, each grown by the robot radius plus 0.1 m, close every gap ahead. Real
   geometry, not a planner fault, but it shows how little room 0.39 m of inflation leaves.
+
+## Task 12 step 1 dry run, and the simulation at the measured speed, 2026-11-13
+
+Dry run, `run_follow.py --seconds 75` with the real Jetson server (YOLO11n + OSNet, wired in
+this evening): 750 cycles, locked 98.4 %, longest gap 1.20 s, closest obstacle 0.720 m from
+the base centre, 4 "no scan" stops, cycle median 0.068 s, worst 0.109 s (`replay.py`). The
+enrolment locked and learned 20 looks, mode follow for 712 cycles. But the track stayed in
+front (bearings -30 to 0 deg, 0.98 to 1.17 m, no net turn): the owner was not told when the
+lock happened (the ssh output was buffered), so this run shows a standing operator, not a
+walk round the robot. Not yet measured: answers per second and round trip with the real
+detector (the log has no answer times).
+
+Simulation at the real base's top speed (`hmc.run.run_scenario`, the ladder's last rung:
+base real, realistic noise, 10 passers-by, robot sensors, calibrated odometry, operator
+1.2 m/s; 6 maps x 10 seeds; script and CSV outside the repo, `sweep.py`):
+| Top speed | Car reached (follow_to_car, 300) | Time to the car | Score median | Timeouts |
+|---|---|---|---|---|
+| 0.12 m/s | 50 of 60 (all but eindhoven2024) | 151 to 225 s | 615 (eindhoven 0) | 60 of 60 |
+| 0.2 m/s | 59 of 60 | 96 to 287 s | 1115 on 3 maps, 615 to 915 on 2, 300 on eindhoven | 26 of 60 |
+| 0.3 m/s | 60 of 60 | 64 to 192 s | 1115 on 5 maps, 615 on eindhoven | 10 of 60 |
+| 0.5 m/s | 60 of 60 | 44 to 119 s | 1115 everywhere | 0 |
+At 0.12 m/s the robot can earn the main 615 points on 5 of 6 maps but never the return and
+the queue. Asking the operator to walk slower does not help (0.096 m/s is already the asked
+pace). The simulation does not model the measured braking (0.064 m/s^2 plus 0.27 s), so these
+numbers are optimistic.
