@@ -613,3 +613,24 @@ bottles onto the box. None was finished.
   started. Net turn since the cable was laid out: -5.4 deg.
 - Not done: the six out-and-back runs Task 9 asks for (the owner said not to drive yet). Also not
   done: a second review of the post-review changes.
+
+## M1 and the velocity loop after two Fable reviews, 2026-11-14 06:00 (wheels still)
+
+- Second review of 683d123 and 53778b6 found no new serious defect.
+- c3c73f2: base_check now runs the loop right after a new scan, inside the same 0.05 s period.
+  Before, a 0.11 s match plus PERIOD left the sends 0.16 s apart, which ended the run on "send gap".
+  The cap test now drives a slow base (gain 0.7) up to the loop's top.
+- velocity compares the 0.5 s average with the wish averaged over the same span (53778b6). The
+  wish at the span's middle had pushed 0.056 for a wish of 0.05.
+- calib with 0.5 s averages: decel 0.064, delay 0.2125, latency 0.32, the same as with instant
+  speeds. Calib before the span change read delay 0.41 and latency 0.52 there.
+- M1 matches only returns within 4 m (MATCH_RANGE). Simulated square rooms, 0.5 s at 0.12 m/s:
+  - 5 m: unchanged
+  - 7 m: 4 % short before, now 2.4 % at most
+  - 10 m: was 29 % short and still trusted; now no match, so the odometry stays untrusted
+  On the field log of 05:13: w -0.0053 rad/s, v 0.100 m/s, Pi time 23.2 ms median, 35 ms at 95 %,
+  80 ms worst.
+- Deployed: motion, scanmatch, calib, velocity, run_follow, tools/base_check (md5 matching).
+  Old copies are in backups/20261114-054214, backups/20261114-060054 and backups/20261114-060246.
+- Still open: Task 9's six out-and-back runs, and a field run of run_follow with --velocity-loop.
+  A hall with walls further than 4 m now leaves the loop on feed-forward only, with no feedback.
