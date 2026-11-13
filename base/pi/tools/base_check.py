@@ -8,6 +8,8 @@ The base moves. Only run it with the owner at the robot and 3 m clear in front.
   python tools/base_check.py --turn 0.8 --degrees 180 --max-turn-rate 0.8 --yes-owner-at-robot
 --max-speed, --max-turn-rate and --linear-scale change a copy of params.json for this run only.
 Odometry (20 Hz), every scan and the report go to logs/base-check/ next to tools/.
+--velocity-loop (with --line): the command comes from the velocity loop, run as in run_follow, so
+the run measures the drift the loop leaves (accurate-motion Task 9).
 """
 
 import argparse
@@ -21,11 +23,14 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # lidar.py, params.py, ...
+import calib  # noqa: E402
 import geometry  # noqa: E402
 import lidar  # noqa: E402
+import motion  # noqa: E402
 import params  # noqa: E402
 import safety  # noqa: E402
 import scanmatch  # noqa: E402
+import velocity  # noqa: E402
 import wheels as wheels_module  # noqa: E402
 
 DEFAULT_OUT = Path(__file__).resolve().parent.parent / "logs" / "base-check"
@@ -132,27 +137,61 @@ def first_full_scan(session, log, clock, sleep):
     return scan
 
 
-def drive(wheels, session, p, mode, rate, target, log, clock=time.monotonic, sleep=time.sleep):
-    """send() at 20 Hz until odometry covers target (m, or rad for a turn). S# however it ends."""
+class Loop:
+    """--velocity-loop for a line: the run_follow chain (motion.MotionEstimator, calib.BaseEstimates,
+    velocity.VelocityLoop) turns the asked true speed into the command, from the LiDAR-checked motion.
+
+    top caps the command so that, with the odometry dead, top for the run's time limit still stays
+    inside the strip clear_to_drive checked (target + LINE_MARGIN).
+    """
+
+    def __init__(self, p, rate, target):
+        self.rate = rate
+        self.top = rate * (target + LINE_MARGIN) / (target + LINE_OVERRUN)
+        self.motion = motion.MotionEstimator(p)
+        self.estimates = calib.BaseEstimates(p)
+        self.velocity = velocity.VelocityLoop(p, self.estimates)
+
+    def command(self, t, odom, scan, sent, sent_at):
+        measured = self.motion.update(t, odom, scan, sent)
+        self.estimates.observe(measured, sent, sent_at)
+        return self.velocity.command(self.rate, 0.0, measured, self.top)
+
+    def summary(self):
+        names = ("speed_gain", "turn_gain", "drift_per_m", "latency")
+        return {n: [getattr(self.estimates, n)[0], getattr(self.estimates, n)[2]] for n in names}
+
+
+def drive(wheels, session, p, mode, rate, target, log, clock=time.monotonic, sleep=time.sleep, loop=None):
+    """send() at 20 Hz until odometry covers target (m, or rad for a turn). S# however it ends.
+
+    loop: a Loop (line only) that sets each command after the first from the measured motion.
+    """
     v, w = (rate, 0.0) if mode == "line" else (0.0, rate)
     # Even with odometry reading zero, the asked speed for this long stays inside the checked-clear length.
     limit = (target + (LINE_OVERRUN if mode == "line" else TURN_OVERRUN)) / abs(rate)
+    log["sent"] = []
     try:
         start = odom = log_odom(wheels, log, clock)
         log["drive_start"] = last_scan = clock()
         turned, last_send = 0.0, None
+        newest = log["scans"][-1][1] if log["scans"] else None  # the newest revolution, for the loop
         while True:
             tick = clock()
             if last_send is not None and tick - last_send > SEND_GAP:
                 log["stop_reason"] = "send gap"  # a slow odometry read: the base may have stopped and restarted
                 break
+            if loop is not None and last_send is not None:
+                v, w = loop.command(tick, odom, newest, (v, w), last_send)
             wheels.send(v, w)
             last_send = clock()
+            log["sent"].append([last_send, v, w])
             previous, odom = odom, log_odom(wheels, log, clock)
             turned += wrap(odom[2] - previous[2])
             scan = log_scan(session, log)
             if scan:
                 last_scan = clock()
+                newest = scan
             done = math.hypot(odom[0] - start[0], odom[1] - start[1]) if mode == "line" else abs(turned)
             if scan and emergency(scan, p, mode, v):
                 log["stop_reason"] = "emergency"
@@ -266,6 +305,8 @@ def report(log, p):
             "odom_distance": math.hypot(odom[-1][1] - odom[0][1], odom[-1][2] - odom[0][2]),
             "odom_distance_at_stop": math.hypot(at_stop[1] - odom[0][1], at_stop[2] - odom[0][2]),
             "drift_per_m": total[1] / total[0] if total[0] else None,
+            # heading change per metre: a fixed LiDAR mount angle cancels between two scans
+            "yaw_per_m": total[2] / math.hypot(total[0], total[1]) if total[0] else None,
             "asked_over_real": log["rate"] / middle_speed if middle_speed else None,
         })
     return result
@@ -285,6 +326,7 @@ def table(r):
             "distance after S#        %s" % f(r["after_stop"], "%.3f m"),
             "sideways drift           %s" % f(None if r["drift_per_m"] is None else 100 * r["drift_per_m"], "%+.1f cm per m (+ = left)"),
             "yaw change scan / odom   %.1f / %.1f deg" % (math.degrees(r["scan_yaw"]), math.degrees(r["odom_yaw"])),
+            "heading drift            %s" % f(None if r.get("yaw_per_m") is None else math.degrees(r["yaw_per_m"]), "%+.2f deg per m (+ = left)"),
             "note: drift carries the unresolved lidar_front_deg error (about 1.6-2 deg, about 3 cm per m);",
             "      the yaw change does not (a fixed mount angle cancels between two scans)",
         ]
@@ -336,6 +378,8 @@ def main():
     parser.add_argument("--linear-scale", type=float, default=1.0, metavar="S", help="linear_cmd_scale for this run")
     parser.add_argument("--yes-owner-at-robot", action="store_true", help="the owner is at the robot for this run")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="folder for the JSON log")
+    parser.add_argument("--velocity-loop", action="store_true",
+                        help="--line: drive the asked true speed through the velocity loop (Task M3)")
     args = parser.parse_args()
     if not args.yes_owner_at_robot:
         sys.exit("REFUSED: the base moves. Pass --yes-owner-at-robot only when the owner is at the robot.")
@@ -354,10 +398,13 @@ def main():
         sys.exit("REFUSED: --line %.2f is outside 0 .. max_speed %.2f (raise it with --max-speed)" % (rate, p["max_speed"]))
     if not line and not 0 < abs(rate) <= p["max_turn_rate"]:
         sys.exit("REFUSED: --turn %.2f is outside 0 .. max_turn_rate %.2f" % (rate, p["max_turn_rate"]))
+    if args.velocity_loop and not line:
+        sys.exit("REFUSED: --velocity-loop is for --line runs")
     if not wheels_module.under_safe_run():
         sys.exit("REFUSED: " + wheels_module.NOT_SAFE_RUN)
 
-    log = {"mode": name, "rate": rate, "target": target, "date": time.strftime("%Y-%m-%d %H:%M:%S"),
+    loop = Loop(p, rate, target) if args.velocity_loop else None
+    log = {"mode": name, "rate": rate, "target": target, "velocity_loop": args.velocity_loop, "date": time.strftime("%Y-%m-%d %H:%M:%S"),
            "params": p, "odom": [], "scans": []}
     path = args.out / ("%s-%s-%s.json" % (time.strftime("%Y%m%d-%H%M%S"), name, rate))
     session = lidar.LidarSession()
@@ -371,8 +418,10 @@ def main():
             signal.signal(sig, _interrupt)
         wheels = wheels_module.Wheels(p)
         try:
-            drive(wheels, session, p, name, rate, target, log)
+            drive(wheels, session, p, name, rate, target, log, loop=loop)
             settle(wheels, session, log)
+            if loop is not None:
+                log["estimates"] = loop.summary()
         finally:
             with signals_ignored():
                 wheels.close()  # sends S# once more

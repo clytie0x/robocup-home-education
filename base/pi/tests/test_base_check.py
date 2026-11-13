@@ -31,11 +31,12 @@ class FakeWheels:
 
     def __init__(self, clock, fail_at=None, slow_at=None, odom_zero=False):
         self.clock, self.fail_at, self.slow_at, self.odom_zero = clock, fail_at, slow_at, odom_zero
-        self.calls, self.v, self.x, self.reads = [], 0.0, 0.0, 0
+        self.calls, self.v, self.x, self.reads, self.sends = [], 0.0, 0.0, 0, []
         self.last_t = clock()
 
     def send(self, v, w):
         self.calls.append("send")
+        self.sends.append((v, w))
         self.v = v
 
     def read_odom(self):
@@ -117,6 +118,38 @@ class Drive(unittest.TestCase):
         self.assertGreaterEqual(wheels.x, 0.3)
         self.assertGreater(len(log["odom"]), 30)  # 20 Hz for about 2 s
         self.assertGreater(len(log["scans"]), 15)
+
+    def test_velocity_loop_sets_the_command(self):
+        clock = Clock()
+        wheels = FakeWheels(clock)
+        session = FakeSession(clock, room_scan((0, 0, 0), half=3.0))
+        log = new_log()
+
+        class Loop:
+            seen = 0
+
+            def command(self, t, odom, scan, sent, sent_at):
+                Loop.seen += 1
+                return (0.10, 0.02)
+
+        base_check.drive(wheels, session, P, "line", 0.15, 0.3, log, clock, clock.sleep, loop=Loop())
+        self.assertEqual(log["stop_reason"], "target")
+        self.assertGreater(Loop.seen, 30)
+        self.assertEqual(wheels.sends[0], (0.15, 0.0))  # nothing measured yet: the asked speed
+        self.assertEqual(wheels.sends[-1], (0.10, 0.02))
+        self.assertEqual(log["sent"][-1][1:], [0.10, 0.02])
+        self.assertEqual(wheels.calls[-1], "stop")
+
+    def test_real_velocity_loop_stays_under_its_cap(self):
+        clock = Clock()
+        wheels = FakeWheels(clock)
+        session = FakeSession(clock, room_scan((0, 0, 0), half=3.0))
+        log = new_log()
+        loop = base_check.Loop(P, 0.15, 0.3)
+        base_check.drive(wheels, session, P, "line", 0.15, 0.3, log, clock, clock.sleep, loop=loop)
+        self.assertEqual(wheels.calls[-1], "stop")
+        self.assertLessEqual(max(v for v, _ in wheels.sends), loop.top + 1e-9)
+        self.assertAlmostEqual(loop.top, 0.15 * (0.3 + base_check.LINE_MARGIN) / (0.3 + base_check.LINE_OVERRUN))
 
     def test_point_close_ahead_is_an_emergency(self):
         clock = Clock()
