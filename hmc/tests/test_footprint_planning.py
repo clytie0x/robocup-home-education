@@ -12,9 +12,9 @@ from hmc.world import Circle, Robot
 @pytest.fixture(autouse=True)
 def close_plan():
     """These tests are about the close plan, which only the real base uses."""
-    navigation.CLOSE_PLAN = True
+    navigation.CLOSE_PLAN, navigation._tight_skip = True, 0
     yield
-    navigation.CLOSE_PLAN = False
+    navigation.CLOSE_PLAN, navigation._tight_skip = False, 0
 
 
 def walls(gap: float, y_mid: float = 0.0) -> list[Circle]:
@@ -101,6 +101,26 @@ def test_the_close_plan_walks_up_to_the_operator_it_follows():
     operator = Circle(3.0, 0.0, 0.25)
     path = plan_path((0, 0), (3.0, 0.0), walls(0.65) + [operator], near_side=True, heading=0.0)
     assert path is not None and path[-1][0] > 2.0
+
+
+def test_the_exact_outline_distance_matches_the_sampled_outline():
+    import random
+    rng = random.Random(1)
+    for _ in range(200):
+        c = Circle(rng.uniform(-0.6, 0.6), rng.uniform(-0.6, 0.6), 0.05)
+        pos, heading = (rng.uniform(-0.1, 0.1), rng.uniform(-0.1, 0.1)), rng.uniform(-3, 3)
+        sampled = min(c.clearance(p) for p in navigation.hmc_world.outline(pos[0], pos[1], heading, step=0.002))
+        exact = navigation._outline_distance(c.x, c.y, pos, heading) - c.r
+        if exact > 0:  # the sampled outline only knows the outside
+            assert abs(exact - sampled) < 0.002
+
+
+def test_a_failed_close_plan_is_not_retried_for_a_few_calls():
+    plan_path((0, 0), (3, 0), walls(0.50))  # the close plan finds nothing
+    assert navigation._tight_skip == navigation.TIGHT_COOLDOWN
+    assert plan_path((0, 0), (3, 0), walls(0.65)) is None  # skipped
+    navigation._tight_skip = 0
+    assert plan_path((0, 0), (3, 0), walls(0.65)) is not None
 
 
 def test_the_close_plan_gives_up_when_its_checks_run_out():

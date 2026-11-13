@@ -9,7 +9,7 @@ import heapq
 import math
 
 from hmc import world as hmc_world
-from hmc.world import Point, Robot, Shape, distance, wrap_angle
+from hmc.world import Circle, Point, Robot, Shape, distance, wrap_angle
 
 FOLLOW_DISTANCE = 1.5  # metres to keep behind the operator
 GOAL_TOLERANCE = 0.5  # metres, "close enough" for go_to
@@ -51,6 +51,10 @@ CORNER_STEP = math.radians(5)  # headings checked where the path turns
 TIGHT_ROUNDS = 3  # tries to plan around the spots where the outline did not fit
 # Outline checks one close plan may spend (on the Pi a plan with 200 shapes took 0.29 s at 5 rounds).
 CHECK_BUDGET = 400
+# After a close plan found nothing, the next calls skip it (the planner is called about every
+# 0.1 s on the robot, and a failed close plan cost 0.19 s on the Pi): about half a second.
+TIGHT_COOLDOWN = 4
+_tight_skip = 0  # calls still to skip
 NEAR = 0.3  # metres: a shape farther than this from the corner circle cannot come within the margin
 # True when the last plan_path needed the close plan. The Navigator then judges the room ahead by
 # the real outline too, or the circle would stop it in front of the gap it just planned through.
@@ -70,12 +74,25 @@ def plan_path(start: Point, goal: Point, shapes: list[Shape],
     finds nothing, closer, with the real outline checked along the path (TIGHT_SLACK).
     `heading` is where the robot faces at the start, for the turn onto the first segment.
     """
-    global LAST_PLAN_TIGHT
+    global LAST_PLAN_TIGHT, _tight_skip
     LAST_PLAN_TIGHT = False
     path = _grid_path(start, goal, shapes, near_side, hmc_world.ROBOT_RADIUS + SAFETY, [])
     if path is not None or not CLOSE_PLAN:
         return path
-    LAST_PLAN_TIGHT = True
+    if _tight_skip > 0:
+        _tight_skip -= 1
+        return None
+    path = _close_plan(start, goal, shapes, near_side, heading)
+    if path is None:
+        _tight_skip = TIGHT_COOLDOWN
+    else:
+        LAST_PLAN_TIGHT = True
+    return path
+
+
+def _close_plan(start: Point, goal: Point, shapes: list[Shape], near_side: bool,
+                heading: float | None) -> list[Point] | None:  # fmt: skip
+    """The close plan of plan_path: the half-width on the grid, the outline along the path."""
     avoid: list[Point] = []
     # The goal itself (the operator we follow) is not checked: the robot stops short of it anyway.
     others = [s for s in shapes if s.clearance(goal) > 0]
@@ -104,17 +121,34 @@ def outline_gap(pos: Point, heading: float, shapes: list[Shape]) -> float:
     above NEAR, so the answer is exact wherever it is below NEAR.
     """
     reach = max(math.hypot(px, py) for px, py in hmc_world.FOOTPRINT)
-    near, far = [], math.inf
+    near, gap = [], math.inf
     for s in shapes:
         here = s.clearance(pos)
-        if here < reach + NEAR:
-            near.append(s)
+        if here >= reach + NEAR:
+            gap = min(gap, here - reach)
+        elif isinstance(s, Circle):
+            gap = min(gap, _outline_distance(s.x, s.y, pos, heading) - s.r)  # exact, and 10 times cheaper
         else:
-            far = min(far, here - reach)
-    if not near:
-        return far
-    body = hmc_world.outline(pos[0], pos[1], heading)
-    return min(far, min(s.clearance(p) for s in near for p in body))
+            near.append(s)
+    if near:
+        body = hmc_world.outline(pos[0], pos[1], heading)
+        gap = min(gap, min(s.clearance(p) for s in near for p in body))
+    return gap
+
+
+def _outline_distance(px: float, py: float, pos: Point, heading: float) -> float:
+    """Distance from the point to the robot's outline at pos, facing heading; negative inside."""
+    c, s = math.cos(heading), math.sin(heading)
+    dx, dy = px - pos[0], py - pos[1]
+    x, y = c * dx + s * dy, -s * dx + c * dy  # in the robot frame
+    best, inside = math.inf, True
+    corners = hmc_world.FOOTPRINT
+    for (ax, ay), (bx, by) in zip(corners, corners[1:] + corners[:1]):
+        ex, ey = bx - ax, by - ay
+        t = max(0.0, min(1.0, ((x - ax) * ex + (y - ay) * ey) / (ex * ex + ey * ey)))
+        best = min(best, math.hypot(x - ax - t * ex, y - ay - t * ey))
+        inside = inside and ex * (y - ay) - ey * (x - ax) >= 0  # left of every edge (counter-clockwise)
+    return -best if inside else best
 
 
 def path_clear(path: list[Point], start: Point, start_heading: float | None,
