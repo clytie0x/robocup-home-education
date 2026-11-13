@@ -2,7 +2,13 @@
 
 from dataclasses import dataclass
 
-from hmc.world import CAR_RADIUS, PERSON_RADIUS, ROBOT_RADIUS, World, distance
+from hmc.world import (
+    CAR_RADIUS, PERSON_RADIUS, ROBOT_RADIUS, World, body_clearance, distance,
+)  # fmt: skip
+
+
+def _person_clearance(person):
+    return lambda p: distance(p, person.pos) - PERSON_RADIUS
 
 MAIN, BONUS, PENALTY, DEM, SPECIAL = "main", "bonus", "penalty", "deus_ex", "special"
 
@@ -162,14 +168,16 @@ class Referee:
 
     def _watch_obstacles(self, world: World) -> None:
         robot = world.robot.pos
-        clearances = [(o.kind, o.shape.clearance(robot)) for o in world.obstacles]
+        clearances = [(o.kind, o.shape.clearance(robot), o.shape.clearance) for o in world.obstacles]
         clearances += [
-            ("crowd", distance(robot, p.pos) - PERSON_RADIUS) for p in world.people
+            ("crowd", distance(robot, p.pos) - PERSON_RADIUS, _person_clearance(p))
+            for p in world.people
         ]
-        for kind, clearance in clearances:
+        for kind, clearance, of in clearances:
             if clearance <= FACED:
                 self.faced.add(kind)
-            if clearance < ROBOT_RADIUS:
+            # Judge touching with the real outline, only when the circle says it is close.
+            if clearance < ROBOT_RADIUS and body_clearance(world.robot, of) < 0:
                 self.touched.add(kind)
 
     def _watch_queue(self, world: World) -> None:
@@ -195,7 +203,9 @@ class Referee:
             self.sheet.award("queue")
             return
         touched = any(
-            distance(robot, p.pos) - PERSON_RADIUS < ROBOT_RADIUS for p in walking
+            distance(robot, p.pos) - PERSON_RADIUS < ROBOT_RADIUS
+            and body_clearance(world.robot, _person_clearance(p)) < 0
+            for p in walking
         )
         if not behind or gap > QUEUE_STAY or touched:
             self.queue_left = True

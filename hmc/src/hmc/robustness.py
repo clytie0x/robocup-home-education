@@ -15,7 +15,7 @@ from hmc.maps import MAPS
 from hmc.run import run_scenario
 from hmc.scoresheet import MAX_TOTAL
 from hmc.task import State
-from hmc.world import PERSON_RADIUS, ROBOT_RADIUS, distance
+from hmc.world import PERSON_RADIUS, ROBOT_RADIUS, body_clearance, distance
 
 SCORED_ROWS = [
     "follow_to_car", "perceive_bag", "pick_bag", "avoid_crowd", "avoid_small_object",
@@ -39,11 +39,17 @@ def check(
     closest = [float("inf")]
 
     def record(world, task):
+        # Clearance of the robot's real outline (negative means touching). The circle
+        # check first, so the outline is only measured when something is close.
         robot = world.robot.pos
-        for obstacle in world.obstacles:
-            closest[0] = min(closest[0], obstacle.shape.clearance(robot))
-        for person in world.people + world.bystanders + [world.operator]:
-            closest[0] = min(closest[0], distance(robot, person.pos) - PERSON_RADIUS)
+        near = [o.shape.clearance for o in world.obstacles if o.shape.clearance(robot) < ROBOT_RADIUS]
+        near += [
+            (lambda p, q=person.pos: distance(p, q) - PERSON_RADIUS)
+            for person in world.people + world.bystanders + [world.operator]
+            if distance(robot, person.pos) - PERSON_RADIUS < ROBOT_RADIUS
+        ]
+        for clearance in near:
+            closest[0] = min(closest[0], body_clearance(world.robot, clearance))
 
     result = run_scenario(
         map_name=map_name,
@@ -63,8 +69,8 @@ def check(
     ]
     if result.task.state != State.DONE:
         problems.append(f"ended in {result.task.state.value}")
-    if closest[0] <= ROBOT_RADIUS:
-        problems.append(f"touched something ({closest[0]:.2f} m)")
+    if closest[0] < 0:
+        problems.append(f"touched something ({closest[0]:.2f} m into it)")
     if result.sheet.total() != MAX_TOTAL and not problems:
         problems.append(f"scored {result.sheet.total()}")
     return problems

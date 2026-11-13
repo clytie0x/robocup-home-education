@@ -13,7 +13,11 @@ TIME_LIMIT = 300.0  # seconds, the 5:00 limit from the score sheet
 DT = 0.1  # seconds per simulation step
 
 # The real base is a 0.40 m square with 0.04 m corners cut off.
+# ROBOT_RADIUS is a circle around that outline: the planner uses it, on the safe side.
 ROBOT_RADIUS = 0.26  # metres
+# The outline itself, in the robot frame (x forward), used by the referee to judge touching.
+FOOTPRINT = [(0.20, 0.16), (0.16, 0.20), (-0.16, 0.20), (-0.20, 0.16),
+             (-0.20, -0.16), (-0.16, -0.20), (0.16, -0.20), (0.20, -0.16)]  # fmt: skip
 PERSON_RADIUS = 0.25  # metres, a person seen from above
 CAR_RADIUS = 3.0  # metres, the robot counts as "at the car" inside this
 # After the robot reaches the car, the crowd waits this long, then starts to queue.
@@ -44,6 +48,33 @@ def distance(a: Point, b: Point) -> float:
 def wrap_angle(angle: float) -> float:
     """Wrap an angle to the range -pi .. pi."""
     return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def outline(x: float, y: float, heading: float, step: float = 0.02) -> list[Point]:
+    """Points every `step` metres along the robot's real outline, in the world frame."""
+    c, s = math.cos(heading), math.sin(heading)
+    points = []
+    for (ax, ay), (bx, by) in zip(FOOTPRINT, FOOTPRINT[1:] + FOOTPRINT[:1]):
+        n = max(1, int(math.hypot(bx - ax, by - ay) / step))
+        for k in range(n):
+            px, py = ax + (bx - ax) * k / n, ay + (by - ay) * k / n
+            points.append((x + c * px - s * py, y + s * px + c * py))
+    return points
+
+
+def body_clearance(robot, clearance) -> float:
+    """Smallest clearance(point) over the robot's real body. Below 0 means touching.
+
+    The outline, a half-size outline and the centre: anything wider than 0.1 m that is
+    under the robot crosses one of them (the smallest object is 0.24 m wide).
+    """
+    points = outline(robot.x, robot.y, robot.heading)
+    points += [
+        (robot.x + (px - robot.x) / 2, robot.y + (py - robot.y) / 2)
+        for px, py in points
+    ]
+    points.append(robot.pos)
+    return min(clearance(p) for p in points)
 
 
 @dataclass(frozen=True)
@@ -262,6 +293,20 @@ class Operator:
     def pos(self) -> Point:
         return (self.x, self.y)
 
+    def _step_round(self, robot: Point, x: float, y: float, dt: float) -> None:
+        """A person walks round a robot standing in their way, never into it."""
+        near = ROBOT_RADIUS + PERSON_RADIUS + 0.1
+        if distance(self.pos, robot) >= near or distance(self.pos, robot) >= distance((x, y), robot):
+            return
+        # Step sideways instead, on the side we already are, at walking speed.
+        ax, ay = x - robot[0], y - robot[1]
+        length = math.hypot(ax, ay) or 1.0
+        mx, my = self.x - x, self.y - y
+        side = (-ay / length, ax / length)
+        if mx * side[0] + my * side[1] < 0:
+            side = (-side[0], -side[1])
+        self.x, self.y = x + side[0] * self.speed * dt, y + side[1] * self.speed * dt
+
     def start_walking(self) -> None:
         self.walking = True
 
@@ -278,7 +323,7 @@ class Operator:
         self.waiting = False  # coming back overrides an earlier "please wait for me"
         self.pointing, self._stopped_for = False, 0.0
 
-    def step(self, dt: float) -> None:
+    def step(self, dt: float, robot: Point | None = None) -> None:
         if not self.walking:
             return
         if self._wait > 0:
@@ -287,7 +332,10 @@ class Operator:
         if self.route:
             if not self.waiting:
                 before = len(self.route)
+                x, y = self.x, self.y
                 walk_route(self, dt)
+                if robot is not None:
+                    self._step_round(robot, x, y, dt)
                 if (
                     self.coming_back and len(self.route) < before
                 ):  # standing in front now
@@ -370,7 +418,7 @@ class World:
     def step(self, dt: float = DT) -> None:
         if self.odometry is not None:
             self.odometry.update(self.robot, self.time)
-        self.operator.step(dt)
+        self.operator.step(dt, self.robot.pos)
         # The rulebook: after the robot has reached the car, the crowd returns in a queue.
         if (
             self.queue_start_time is None
@@ -419,11 +467,12 @@ def build_world(target_bag: str = "blue", robot_speed: float = 1.0) -> World:
         Obstacle("barriers", Box(9.4, 5.2, 10.6, 6.6)),
     ]
     # The crowd stands across the operator's path. The gaps fit a person, not the robot.
-    queue_route = [(8.0, -1.0), (-4.0, -1.0)]  # back past the start, then away
+    # The queue walks back and stops in a line next to the start (as on every map), each
+    # person 0.7 m behind the one in front. A queue that walked on past the start could
+    # only be joined by a robot much faster than people walk.
     people = [
-        Person(1, 7.35, 3.0, list(queue_route)),
-        Person(2, 8.65, 3.0, list(queue_route)),
-        Person(3, 9.95, 3.0, list(queue_route)),
+        Person(i + 1, x, 3.0, [(8.0, -1.0), (0.5 + 0.7 * i, -1.0)])
+        for i, x in enumerate((7.35, 8.65, 9.95))
     ]
     robot = Robot(x=start[0], y=start[1], max_speed=robot_speed)
     return World(

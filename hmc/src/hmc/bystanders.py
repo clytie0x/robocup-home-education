@@ -9,6 +9,7 @@ to let the robot pass when it comes close, as polite people do. A fixed seed mak
 run the same.
 """
 
+import math
 import random
 from dataclasses import dataclass, field
 
@@ -44,10 +45,17 @@ class Bystander:
             # two people standing next to the robot can box it in.
             self.route = []
             if gap > 1e-9:
-                step = STEP_AWAY_SPEED * dt / gap
+                # Step to the side of the robot's way, the side we already stand on.
+                # Stepping straight away from it kept people walking just ahead of a
+                # robot in a corridor, so it could never pass.
+                h = world.robot.heading
+                side = (-math.sin(h), math.cos(h))
+                ax, ay = self.x - robot[0], self.y - robot[1]
+                if ax * side[0] + ay * side[1] < 0:
+                    side = (-side[0], -side[1])
                 spot = (
-                    self.x + (self.x - robot[0]) * step,
-                    self.y + (self.y - robot[1]) * step,
+                    self.x + side[0] * STEP_AWAY_SPEED * dt,
+                    self.y + side[1] * STEP_AWAY_SPEED * dt,
                 )
                 if all(
                     o.shape.clearance(spot) > PERSON_RADIUS for o in world.obstacles

@@ -80,12 +80,12 @@ def eindhoven2024(target_bag: str = "blue", robot_speed: float = 1.0) -> World:
         target_bag=target_bag,
     )
     # The crowd stands in the aisle. The queue walks back along the aisle, down the left
-    # side, and passes the start on its left, so it never walks into the robot there.
-    queue_route = [(19.0, 16.4), (0.95, 16.4), (0.95, 9.6), (-0.8, 8.6), (-0.8, 4.0)]
+    # side, and stops in a line on the start's left (as on every map), each person 0.7 m
+    # behind the one in front, so it never walks into the robot there.
+    path = [(19.0, 16.4), (0.95, 16.4), (0.95, 9.6), (-0.2, 9.0)]
     people = [
-        Person(1, 20.0, 16.0, list(queue_route)),
-        Person(2, 20.0, 16.75, list(queue_route)),
-        Person(3, 20.75, 16.4, list(queue_route)),
+        Person(i + 1, x, y, path + [(-0.2, 7.0 + 0.7 * i)])
+        for i, (x, y) in enumerate(((20.0, 16.0), (20.0, 16.75), (20.75, 16.4)))
     ]
     robot = Robot(x=start[0], y=start[1], heading=1.5708, max_speed=robot_speed)
     return World(
