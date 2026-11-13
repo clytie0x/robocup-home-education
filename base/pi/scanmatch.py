@@ -31,16 +31,38 @@ def tangents(pts):
     return np.divide(b - a, length, out=np.zeros_like(pts), where=length > 0)
 
 
-def _closest(moved, fixed, along):
+def reach(pts, keep):
+    """How far along its surface each kept return stands for: to the farthest of the returns it
+    replaces (half a stride either side) that are joined to it by gaps under SURFACE_GAP, at least
+    SURFACE_GAP / 2. A thinned return must stand for the wall between it and the next one kept."""
+    n = len(pts)
+    half = max(1, math.ceil((keep[1] - keep[0]) / 2)) if len(keep) > 1 else 1
+    gap = np.hypot(*(pts[1:] - pts[:-1]).T)  # gap[i]: from return i to i + 1
+    far = np.full(len(keep), SURFACE_GAP / 2)
+    for direction in (1, -1):
+        joined = np.ones(len(keep), dtype=bool)
+        for s in range(1, half + 1):
+            j = keep + direction * s
+            inside = (j >= 0) & (j < n)
+            jc = np.clip(j, 0, n - 1)
+            step = np.clip(np.minimum(jc, jc - direction), 0, n - 2)  # the gap crossed by this step
+            joined &= inside & (gap[step] < SURFACE_GAP)
+            far = np.where(joined, np.maximum(far, np.hypot(*(pts[jc] - pts[keep]).T)), far)
+    return far
+
+
+def _closest(moved, fixed, along, half=SURFACE_GAP / 2):
     """For every moved point, the closest point on the fixed surface, and the distance to it.
 
-    The surface near a return is the short line through it along its tangent. Matching to the
-    returns themselves (3.5 cm apart at 2 m) pulls small steps toward zero along walls.
+    The surface near a return is the short line through it along its tangent, `half` long either
+    side (one value or one per fixed return). Matching to the returns themselves (3.5 cm apart at
+    2 m) pulls small steps toward zero along walls.
     """
     d2 = ((moved[:, None, :] - fixed[None, :, :]) ** 2).sum(axis=2)
     index = d2.argmin(axis=1)
     q, u = fixed[index], along[index]
-    s = np.clip(((moved - q) * u).sum(axis=1), -SURFACE_GAP / 2, SURFACE_GAP / 2)
+    h = half[index] if np.ndim(half) else half
+    s = np.clip(((moved - q) * u).sum(axis=1), -h, h)
     target = q + s[:, None] * u
     return target, np.hypot(*(moved - target).T)
 
@@ -60,8 +82,9 @@ def match(before, after, p=None, guess=(0.0, 0.0, 0.0), iterations=60, max_point
     guess is a starting motion; ICP only finds the nearest fit, so a big turn needs one.
     dyaw is returned within 180 deg of the guessed yaw, not wrapped to +-180 deg.
     max_points: match at most this many returns of each scan (every k-th), for speed. The surface
-    lines of `before` come from all its returns first: thinned returns stand too far apart to be
-    one surface, and matching to bare returns pulls the motion toward zero.
+    lines of `before` come from all its returns first, and each kept return's line reaches over the
+    returns it replaces: thinned returns stand too far apart to be one surface, and matching to bare
+    returns pulls the motion toward zero (all the more the further the walls).
     Raises ValueError when a scan has fewer than 20 usable points or they do not overlap.
     """
     p = p or params.load()
@@ -69,9 +92,11 @@ def match(before, after, p=None, guess=(0.0, 0.0, 0.0), iterations=60, max_point
     if len(fixed) < 20 or len(moving) < 20:
         raise ValueError("too few usable points: %d and %d" % (len(fixed), len(moving)))
     along = tangents(fixed)
+    half = SURFACE_GAP / 2
     if max_points:
-        k = math.ceil(len(fixed) / max_points)
-        fixed, along = fixed[::k], along[::k]
+        keep = np.arange(0, len(fixed), math.ceil(len(fixed) / max_points))
+        half = reach(fixed, keep)
+        fixed, along = fixed[keep], along[keep]
         moving = moving[::math.ceil(len(moving) / max_points)]
     x, y, yaw = guess
     r = np.array([[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]])
@@ -79,17 +104,19 @@ def match(before, after, p=None, guess=(0.0, 0.0, 0.0), iterations=60, max_point
     reject = 0.5  # m, pairs farther apart are ignored; the band narrows as the fit improves
     for _ in range(iterations):
         moved = moving @ r.T + t
-        target, dist = _closest(moved, fixed, along)
+        target, dist = _closest(moved, fixed, along, half)
         keep = dist < reject
         if keep.sum() < 10:
             raise ValueError("the scans do not overlap")
         step_r, step_t = _best_rotation(moved[keep], target[keep])
         r, t = step_r @ r, step_r @ t + step_t
-        small = np.hypot(*step_t) < 1e-5 and abs(math.atan2(step_r[1, 0], step_r[0, 0])) < 1e-5
+        # 3e-5 m / rad: 1e-5 took twice the iterations with the longer thinned surface lines (37 ms median
+        # on the Pi); 5e-5 left a 0.012 m step over 1.5 % short (test_scanmatch)
+        small = np.hypot(*step_t) < 3e-5 and abs(math.atan2(step_r[1, 0], step_r[0, 0])) < 3e-5
         if small and reject <= 0.1:
             break
         reject = max(0.1, reject * 0.7)
-    _, dist = _closest(moving @ r.T + t, fixed, along)
+    _, dist = _closest(moving @ r.T + t, fixed, along, half)
     turned = math.atan2(r[1, 0], r[0, 0])
     turned = yaw + math.atan2(math.sin(turned - yaw), math.cos(turned - yaw))  # near the guess, so 190 deg stays 190
     return float(t[0]), float(t[1]), turned, float((dist < AGREE).mean())

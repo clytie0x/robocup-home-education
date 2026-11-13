@@ -49,6 +49,7 @@ MAX_SPEED_LIMIT = 0.6  # m/s, the highest rung of the ladder
 MAX_TURN_LIMIT = 1.2  # rad/s, the highest turn rung: each wheel then runs at about 0.19 m/s
 SCALE_RANGE = (0.5, 2.0)  # allowed --linear-scale
 SETTLE = 2.0  # s to wait after S# before the final scan
+TOP_RATIO = 1.3  # --velocity-loop may command up to this times the asked speed (a slow base needs more)
 
 
 def wrap(angle):
@@ -141,13 +142,14 @@ class Loop:
     """--velocity-loop for a line: the run_follow chain (motion.MotionEstimator, calib.BaseEstimates,
     velocity.VelocityLoop) turns the asked true speed into the command, from the LiDAR-checked motion.
 
-    top caps the command so that, with the odometry dead, top for the run's time limit still stays
-    inside the strip clear_to_drive checked (target + LINE_MARGIN).
+    top caps the command at TOP_RATIO times the asked speed. With the odometry dead the run's time
+    limit then covers up to top * limit, so the strip must be clear that far plus the margin left
+    for braking: clear_metres() is what clear_to_drive is given.
     """
 
     def __init__(self, p, rate, target):
         self.rate = rate
-        self.top = rate * (target + LINE_MARGIN) / (target + LINE_OVERRUN)
+        self.top = rate * TOP_RATIO
         self.motion = motion.MotionEstimator(p)
         self.estimates = calib.BaseEstimates(p)
         self.velocity = velocity.VelocityLoop(p, self.estimates)
@@ -157,6 +159,11 @@ class Loop:
         self.estimates.observe(measured, sent, sent_at)
         return self.velocity.command(self.rate, 0.0, measured, self.top)
 
+    @staticmethod
+    def clear_metres(target):
+        """The metres clear_to_drive must find free (it adds LINE_MARGIN) for a loop run."""
+        return (target + LINE_OVERRUN) * TOP_RATIO - LINE_OVERRUN
+
     def summary(self):
         names = ("speed_gain", "turn_gain", "drift_per_m", "latency")
         return {n: [getattr(self.estimates, n)[0], getattr(self.estimates, n)[2]] for n in names}
@@ -165,7 +172,8 @@ class Loop:
 def drive(wheels, session, p, mode, rate, target, log, clock=time.monotonic, sleep=time.sleep, loop=None):
     """send() at 20 Hz until odometry covers target (m, or rad for a turn). S# however it ends.
 
-    loop: a Loop (line only) that sets each command after the first from the measured motion.
+    loop: a Loop (line only) that sets the command from the measured motion each time a new scan
+    has come in (between scans the last command holds: without a new scan nothing is measured).
     """
     v, w = (rate, 0.0) if mode == "line" else (0.0, rate)
     # Even with odometry reading zero, the asked speed for this long stays inside the checked-clear length.
@@ -176,13 +184,15 @@ def drive(wheels, session, p, mode, rate, target, log, clock=time.monotonic, sle
         log["drive_start"] = last_scan = clock()
         turned, last_send = 0.0, None
         newest = log["scans"][-1][1] if log["scans"] else None  # the newest revolution, for the loop
+        fresh = False  # a scan came in that the loop has not seen
         while True:
+            if loop is not None and fresh:
+                v, w = loop.command(clock(), odom, newest, (v, w), last_send)
+                fresh = False
             tick = clock()
             if last_send is not None and tick - last_send > SEND_GAP:
-                log["stop_reason"] = "send gap"  # a slow odometry read: the base may have stopped and restarted
+                log["stop_reason"] = "send gap"  # a slow odometry read or loop: the base may have stopped and restarted
                 break
-            if loop is not None and last_send is not None:
-                v, w = loop.command(tick, odom, newest, (v, w), last_send)
             wheels.send(v, w)
             last_send = clock()
             log["sent"].append([last_send, v, w])
@@ -191,7 +201,7 @@ def drive(wheels, session, p, mode, rate, target, log, clock=time.monotonic, sle
             scan = log_scan(session, log)
             if scan:
                 last_scan = clock()
-                newest = scan
+                newest, fresh = scan, True
             done = math.hypot(odom[0] - start[0], odom[1] - start[1]) if mode == "line" else abs(turned)
             if scan and emergency(scan, p, mode, v):
                 log["stop_reason"] = "emergency"
@@ -404,16 +414,17 @@ def main():
         sys.exit("REFUSED: " + wheels_module.NOT_SAFE_RUN)
 
     loop = Loop(p, rate, target) if args.velocity_loop else None
+    clear_metres = target if loop is None else Loop.clear_metres(target)
     log = {"mode": name, "rate": rate, "target": target, "velocity_loop": args.velocity_loop, "date": time.strftime("%Y-%m-%d %H:%M:%S"),
            "params": p, "odom": [], "scans": []}
     path = args.out / ("%s-%s-%s.json" % (time.strftime("%Y%m%d-%H%M%S"), name, rate))
     session = lidar.LidarSession()
     try:
-        ok, nearest = clear_to_drive(first_full_scan(session, log, time.monotonic, time.sleep), p, name, target)
+        ok, nearest = clear_to_drive(first_full_scan(session, log, time.monotonic, time.sleep), p, name, clear_metres)
         what = "ahead of the front in the strip" if line else "from the turning centre"
         print("nearest usable point %s: %s" % (what, "none" if nearest is None else "%.2f m" % nearest))
         if not ok:
-            sys.exit("REFUSED: not clear (need %.2f m)" % (target + LINE_MARGIN if line else TURN_CLEAR))
+            sys.exit("REFUSED: not clear (need %.2f m)" % (clear_metres + LINE_MARGIN if line else TURN_CLEAR))
         for sig in STOP_SIGNALS[1:]:  # SIGINT already raises KeyboardInterrupt
             signal.signal(sig, _interrupt)
         wheels = wheels_module.Wheels(p)

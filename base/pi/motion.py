@@ -22,7 +22,8 @@ MAX_YAW = math.radians(2)
 MAX_POINTS = 120
 # s: v and w come from a match against the scan this long ago. Matched 0.1 s apart (one revolution),
 # each step read short: on the base_check line of 2026-11-14 05:13 the 0.1 s steps summed to
-# -0.0015 rad/s where the start-to-end match said -0.0071; 0.5 s apart they gave -0.0065 (18.7 ms median).
+# -0.0015 rad/s where the start-to-end match said -0.0071; 0.5 s apart -0.0054, v 0.100 (0.103 by the
+# middle-second match). On the Pi, per new scan: 24.6 ms median, 44 ms at 95 %, 90 ms worst (234 scans).
 BASELINE = 0.5
 KEEP = 2.0  # s of recent scans kept to match against
 

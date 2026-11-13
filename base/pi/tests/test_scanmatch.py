@@ -41,26 +41,28 @@ def offset_scan(pose, half, step_deg, start_deg):
 
 class Thinned(unittest.TestCase):
     def test_thinned_match_keeps_the_surfaces_of_the_full_scan(self):
-        # 400 returns a revolution, as on the robot; the rays of the second start half a step later.
+        # 400 returns a revolution, as on the robot, each revolution's rays starting somewhere else.
         # Thinning the scans first left too few neighbours for the surface lines and turned a
-        # 0.05 deg step right into a left one on the robot (base_check log 2026-11-14 05:13).
-        moved = (0.012, 0.0, math.radians(-0.05))
-        a = offset_scan((0, 0, 0), 2.5, 0.9, 0.0)
-        b = offset_scan(moved, 2.5, 0.9, 0.45)
-        dx, dy, dyaw, agree = scanmatch.match(a, b, P, max_points=120)
-        self.assertAlmostEqual(dx, 0.012, delta=0.002)
-        self.assertAlmostEqual(dy, 0.0, delta=0.002)
-        # thinned before the surfaces: dx 0.0059 m, -0.45 deg. Small steps still read a little short.
-        self.assertAlmostEqual(math.degrees(dyaw), -0.05, delta=0.03)
-        self.assertGreater(agree, 0.9)
+        # right drift into a left one on the robot (base_check log 2026-11-14 05:13); thinned
+        # surface lines no longer than SURFACE_GAP read 0.5 s at 0.12 m/s 9 % short in a 5 m room.
+        for dt in (0.1, 0.5):  # one revolution, and M1's BASELINE
+            moved = (0.12 * dt, 0.0, -0.0071 * dt)
+            for phase in (0.1, 0.45, 0.8):
+                a = offset_scan((0, 0, 0), 2.5, 0.9, 0.0)
+                b = offset_scan(moved, 2.5, 0.9, 0.9 * phase)
+                dx, dy, dyaw, agree = scanmatch.match(a, b, P, max_points=120)
+                self.assertAlmostEqual(dx / moved[0], 1.0, delta=0.015)
+                self.assertAlmostEqual(dy, 0.0, delta=0.002)
+                self.assertAlmostEqual(math.degrees(dyaw - moved[2]), 0.0, delta=0.035)
+                self.assertGreater(agree, 0.9)
 
     def test_max_points_bounds_the_work(self):
         seen = []
         real = scanmatch._closest
 
-        def counting(moved, fixed, along):
+        def counting(moved, fixed, along, half):
             seen.append((len(moved), len(fixed)))
-            return real(moved, fixed, along)
+            return real(moved, fixed, along, half)
         scanmatch._closest = counting
         try:
             scanmatch.match(offset_scan((0, 0, 0), 2.5, 0.9, 0.0), offset_scan((0.01, 0, 0), 2.5, 0.9, 0.3), P, max_points=120)

@@ -134,22 +134,38 @@ class Drive(unittest.TestCase):
 
         base_check.drive(wheels, session, P, "line", 0.15, 0.3, log, clock, clock.sleep, loop=Loop())
         self.assertEqual(log["stop_reason"], "target")
-        self.assertGreater(Loop.seen, 30)
+        self.assertGreater(Loop.seen, 15)
+        self.assertLess(Loop.seen, len(wheels.sends) * 0.75)  # once per new scan (10 Hz), not every send (20 Hz)
         self.assertEqual(wheels.sends[0], (0.15, 0.0))  # nothing measured yet: the asked speed
         self.assertEqual(wheels.sends[-1], (0.10, 0.02))
         self.assertEqual(log["sent"][-1][1:], [0.10, 0.02])
         self.assertEqual(wheels.calls[-1], "stop")
 
-    def test_real_velocity_loop_stays_under_its_cap(self):
+    def test_real_velocity_loop_measures_and_stays_under_its_cap(self):
         clock = Clock()
         wheels = FakeWheels(clock)
-        session = FakeSession(clock, room_scan((0, 0, 0), half=3.0))
+
+        class Moving(FakeSession):  # the room as seen from where the fake base really is
+            def latest(self):
+                self.stream.updated_at = math.floor(self.clock() / 0.1) * 0.1
+                return room_scan((wheels.x, 0.0, 0.0), half=3.0)
+        session = Moving(clock, [])
         log = new_log()
-        loop = base_check.Loop(P, 0.15, 0.3)
-        base_check.drive(wheels, session, P, "line", 0.15, 0.3, log, clock, clock.sleep, loop=loop)
+        loop = base_check.Loop(P, 0.10, 0.6)
+        states = []
+        update = loop.motion.update
+        loop.motion.update = lambda *a: states.append(update(*a)) or states[-1]
+        base_check.drive(wheels, session, P, "line", 0.10, 0.6, log, clock, clock.sleep, loop=loop)
+        self.assertEqual(log["stop_reason"], "target")
         self.assertEqual(wheels.calls[-1], "stop")
+        self.assertGreater(sum(s.trusted for s in states), 0.8 * len(states))  # fresh scans each time
+        self.assertAlmostEqual(loop.top, 0.10 * base_check.TOP_RATIO)
         self.assertLessEqual(max(v for v, _ in wheels.sends), loop.top + 1e-9)
-        self.assertAlmostEqual(loop.top, 0.15 * (0.3 + base_check.LINE_MARGIN) / (0.3 + base_check.LINE_OVERRUN))
+
+    def test_a_loop_run_needs_the_strip_its_top_speed_can_cover(self):
+        need = base_check.Loop.clear_metres(2.5) + base_check.LINE_MARGIN
+        covered = base_check.TOP_RATIO * (2.5 + base_check.LINE_OVERRUN)  # top for the whole time limit
+        self.assertAlmostEqual(need - covered, base_check.LINE_MARGIN - base_check.LINE_OVERRUN)  # braking room kept
 
     def test_point_close_ahead_is_an_emergency(self):
         clock = Clock()
