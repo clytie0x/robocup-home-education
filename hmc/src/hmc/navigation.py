@@ -37,19 +37,113 @@ FREE_STEP = 0.02  # metres
 # object of the rulebook, seen only up close (sensors.py, task spec).
 SURE_SEEN = 1.5  # metres
 SWEEP_STEP = math.radians(15)  # headings checked between where we face and where we turn to
+# When no path keeps that wide berth, the planner tries again closer, the way the real robot
+# fits its 0.40 m square through a 0.65 m gap: the grid keeps the half-width plus TIGHT_SLACK
+# from every shape (so a gap 0.15 m wider than the body always has a free cell, at any grid
+# offset), and the real outline, checked along the path, keeps OUTLINE_MARGIN.
+TIGHT_SLACK = 0.05  # metres
+# Off in the simulation's own base (1 m/s): under hard noise it let the robot touch more often
+# (107 against 110 of 120, 2026-11-14). The real base (0.12 m/s) and hmc.run's "real" base turn it on.
+CLOSE_PLAN = False
+OUTLINE_MARGIN = 0.07  # metres: the 0.03 m the robot must keep, plus room for not driving the line exactly
+OUTLINE_STEP = 0.05  # metres between two outline checks along a segment
+CORNER_STEP = math.radians(5)  # headings checked where the path turns
+TIGHT_ROUNDS = 5  # tries to plan around the spots where the outline did not fit
+NEAR = 0.3  # metres: a shape farther than this from the corner circle cannot come within the margin
+# True when the last plan_path needed the close plan. The Navigator then judges the room ahead by
+# the real outline too, or the circle would stop it in front of the gap it just planned through.
+LAST_PLAN_TIGHT = False
 
 Cell = tuple[int, int]
 
 
 def plan_path(start: Point, goal: Point, shapes: list[Shape],
-              near_side: bool = False) -> list[Point] | None:  # fmt: skip
+              near_side: bool = False, heading: float | None = None) -> list[Point] | None:  # fmt: skip
     """Shortest free path from start to goal as a list of points, or None if there is none.
 
     If the goal itself is blocked (for example a person we want to walk behind), the
     path ends at the free cell closest to the goal instead. With near_side, it ends at
     the free cell on our side of the goal (see follow_step).
+    First with the wide berth (the circle around the robot plus SAFETY); only when that
+    finds nothing, closer, with the real outline checked along the path (TIGHT_SLACK).
+    `heading` is where the robot faces at the start, for the turn onto the first segment.
     """
-    inflate = hmc_world.ROBOT_RADIUS + SAFETY
+    global LAST_PLAN_TIGHT
+    LAST_PLAN_TIGHT = False
+    path = _grid_path(start, goal, shapes, near_side, hmc_world.ROBOT_RADIUS + SAFETY, [])
+    if path is not None or not CLOSE_PLAN:
+        return path
+    LAST_PLAN_TIGHT = True
+    avoid: list[Point] = []
+    for _ in range(TIGHT_ROUNDS):
+        path = _grid_path(start, goal, shapes, near_side, hmc_world.INSCRIBED + TIGHT_SLACK, avoid)
+        if path is None:
+            return None
+        bad = path_clear(path, start, heading, shapes, OUTLINE_MARGIN)
+        if bad is None:
+            return path
+        points = [start] + path
+        a, b = points[bad], points[bad + 1]
+        # block the middle of the segment that did not fit, or its end if the middle is where we stand
+        mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+        avoid.append(b if distance(mid, start) < CELL else mid)
+    return None
+
+
+def outline_gap(pos: Point, heading: float, shapes: list[Shape]) -> float:
+    """Smallest clearance of the robot's real outline at pos, facing heading, to the shapes.
+
+    Shapes farther than the outline can reach plus NEAR only give a lower bound, which is
+    above NEAR, so the answer is exact wherever it is below NEAR.
+    """
+    reach = max(math.hypot(px, py) for px, py in hmc_world.FOOTPRINT)
+    near, far = [], math.inf
+    for s in shapes:
+        here = s.clearance(pos)
+        if here < reach + NEAR:
+            near.append(s)
+        else:
+            far = min(far, here - reach)
+    if not near:
+        return far
+    body = hmc_world.outline(pos[0], pos[1], heading)
+    return min(far, min(s.clearance(p) for s in near for p in body))
+
+
+def path_clear(path: list[Point], start: Point, start_heading: float | None,
+               shapes: list[Shape], margin: float) -> int | None:  # fmt: skip
+    """Index of the first segment of start + path where the outline comes within margin, else None.
+
+    Along a segment the robot faces the segment; where the path turns, it turns on the spot
+    through the headings between (CORNER_STEP). On the first segment a shape the robot already
+    stands closer to than margin only has to get no closer.
+    """
+    points = [start] + path
+    facing = start_heading
+    for i, (a, b) in enumerate(zip(points, points[1:])):
+        length = distance(a, b)
+        if length < 1e-9:
+            continue
+        along = math.atan2(b[1] - a[1], b[0] - a[0])
+        least = margin
+        if i == 0:
+            least = min(margin, outline_gap(a, along if facing is None else facing, shapes)) - 1e-6
+        checks: list[tuple[Point, float]] = []
+        if facing is not None:
+            turn = wrap_angle(along - facing)
+            n = int(abs(turn) / CORNER_STEP)
+            checks += [(a, facing + turn * k / (n + 1)) for k in range(1, n + 1)]
+        n = max(1, math.ceil(length / OUTLINE_STEP))
+        checks += [((a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n), along) for k in range(n + 1)]
+        if any(outline_gap(p, h, shapes) < least for p, h in checks):
+            return i
+        facing = along
+    return None
+
+
+def _grid_path(start: Point, goal: Point, shapes: list[Shape], near_side: bool,
+               inflate: float, avoid: list[Point]) -> list[Point] | None:  # fmt: skip
+    """A* on a grid whose cells closer than inflate to a shape, or holding an avoid point, are blocked."""
     x0 = min(start[0], goal[0]) - MARGIN
     y0 = min(start[1], goal[1]) - MARGIN
     width = int((max(start[0], goal[0]) + MARGIN - x0) / CELL) + 1
@@ -74,6 +168,7 @@ def plan_path(start: Point, goal: Point, shapes: list[Shape],
             for j in range(max(lo[1], 0), min(hi[1], height - 1) + 1):
                 if shape.clearance(centre((i, j))) < inflate:
                     blocked.add((i, j))
+    blocked.update(cell_of(p) for p in avoid)
 
     # If we ended up inside the safety zone, there would be no way out. So free the cells
     # around us that are no closer to anything than we are now: we may only move away.
@@ -138,6 +233,7 @@ class Navigator:
         self._goal: Point | None = None
         self._shape_count = -1
         self._planned_at = -math.inf
+        self.tight = False  # the path came from the close plan (LAST_PLAN_TIGHT)
 
     def _needs_plan(self, goal: Point, shapes: list[Shape], now: float) -> bool:
         return (
@@ -162,7 +258,8 @@ class Navigator:
             robot.brake(dt)
             return True
         if self._needs_plan(goal, shapes, now):
-            self.path = plan_path(robot.pos, goal, shapes, near_side) or []  # no path: wait here
+            self.path = plan_path(robot.pos, goal, shapes, near_side, robot.heading) or []  # no path: wait here
+            self.tight = LAST_PLAN_TIGHT
             self._goal, self._shape_count, self._planned_at = goal, len(shapes), now
         # Keep the last waypoint, the goal itself, until we are there.
         while len(self.path) > 1 and distance(robot.pos, self.path[0]) <= WAYPOINT_REACHED:
@@ -177,12 +274,12 @@ class Navigator:
             # also needs room to stop when the plan changes (it rolls on while it brakes),
             # so it slows down when something is close in front of it, both where it
             # faces now and where it is turning to.
-            free_there = free_ahead(robot, shapes, _heading_to(robot, aim))
+            free_there = free_ahead(robot, shapes, _heading_to(robot, aim), self.tight)
             if free_there == 0.0:
                 # The straight line to the far waypoint cuts too close to something:
                 # aim at the next waypoint instead, the planner says it is free.
                 aim = self.path[0]
-                free_there = free_ahead(robot, shapes, _heading_to(robot, aim))
+                free_there = free_ahead(robot, shapes, _heading_to(robot, aim), self.tight)
             # While it turns toward the aim it also rolls through every heading in between,
             # so check those too. Checking only the two ends let a fast robot swing into
             # something beside its path before it could brake.
@@ -190,12 +287,12 @@ class Navigator:
             turn = wrap_angle(_heading_to(robot, aim) - here)
             steps = int(abs(turn) / SWEEP_STEP)
             swept = min(
-                (free_ahead(robot, shapes, here + turn * k / (steps + 1)) for k in range(1, steps + 1)),
+                (free_ahead(robot, shapes, here + turn * k / (steps + 1), self.tight) for k in range(1, steps + 1)),
                 default=math.inf,
             )
             stop_in = min(
                 distance(robot.pos, goal) - stop_distance,
-                free_ahead(robot, shapes, robot.heading),
+                free_ahead(robot, shapes, robot.heading, self.tight),
                 free_there,
                 swept,
                 # Never drive faster than we can stop within what we are sure to see:
@@ -212,21 +309,31 @@ def _heading_to(robot: Robot, point: Point) -> float:
     return math.atan2(point[1] - robot.y, point[0] - robot.x)
 
 
-def free_ahead(robot: Robot, shapes: list[Shape], heading: float) -> float:
+def free_ahead(robot: Robot, shapes: list[Shape], heading: float, outline: bool = False) -> float:
     """How far the robot can roll straight on in this heading before it gets too close.
 
     A shape only counts when rolling on brings us closer to it, so we can still drive
     along a wall or away from something we are already close to (like the planner).
+    With outline, a shape the circle flags still counts only if the real outline gets that close.
     """
     free = 0.0
     here = [s.clearance(robot.pos) for s in shapes]
+    body_now: dict[int, float] = {}  # outline gap now, per shape, worked out only when needed
     while free < LOOK_AHEAD:
         x = robot.x + math.cos(heading) * (free + FREE_STEP)
         y = robot.y + math.sin(heading) * (free + FREE_STEP)
-        for shape, now in zip(shapes, here):
+        for k, (shape, now) in enumerate(zip(shapes, here)):
             there = shape.clearance((x, y))
             if there <= hmc_world.ROBOT_RADIUS + STOP_MARGIN and there < now:
-                return free
+                if not outline:
+                    return free
+                # The circle around the robot is too close; the real outline may still pass
+                # (a side of the square beside a door post). It decides, by the same rule.
+                if k not in body_now:
+                    body_now[k] = outline_gap(robot.pos, heading, [shape])
+                body = outline_gap((x, y), heading, [shape])
+                if body <= STOP_MARGIN and body < body_now[k]:
+                    return free
         free += FREE_STEP
     return free
 

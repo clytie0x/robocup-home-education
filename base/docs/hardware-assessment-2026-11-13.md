@@ -442,3 +442,58 @@ At 0.12 m/s the robot can earn the main 615 points on 5 of 6 maps but never the 
 the queue. Asking the operator to walk slower does not help (0.096 m/s is already the asked
 pace). The simulation does not model the measured braking (0.064 m/s^2 plus 0.27 s), so these
 numbers are optimistic.
+
+## The board, from the owner's photos and the original team's code, 2026-11-14
+
+Read from photos (not checked with a meter): carrier board "@Home Low Level Electronic Board",
+"RobotCitiZens 2025", "Designed by NT+KS". Blue Pill (8 MHz crystal, RESET, yellow BOOT0/BOOT1
+jumpers, 4-pin SWD header at its end; the chip marking is not readable yet). USB-to-serial is
+a purple CH340E module with USB-C (pins GND, +5V, TXD, RXD, DTR, 3V3); the Pi's USB cable goes
+there, the Blue Pill's own micro USB is unused. Red L298N module: 6 control wires (likely ENA,
+IN1 to IN4, ENB, so PWM on the enable pins), 220 uF 35 V capacitor, 3-pin power terminal.
+Green terminals "12V", "EStop", "Motor2", "Motor1"; headers ENCODER1, ENCODER2 (4 pin),
+PWMEXP2, I2CExpansion, ADCExpansion; LEDs on PC14, PC15, 3V3. Motors marked "X" and "Y" by
+hand, magnetic encoder discs on the back; finned DC-DC converter next to the tool battery.
+
+The board's QR code decodes to https://www.robotcitizens.org/home (404); the site links to
+https://gitlab.com/robotcitizens. Public there: `workshop/robotcitizens_athome_robot/
+software-team/` (rct_ahr_driver, rct_ahr_description, rct_ahr_bringup, rct_ahr_wiki; robot
+name CheeseCake-01). No firmware or hardware repository is public. From that code (their
+configuration, not measured):
+- driver.py speaks our protocol and adds `R#` (reset odometry); port 115200 8E1 with
+  rtscts and dsrdtr on (ours has both off and works); sends at 30 Hz; MAX_VEL_X 0.25,
+  MAX_VEL_TH 0.5. udev: CH340 1a86:7523 -> /dev/rct_ahr_robot.
+- URDF: wheels at +-0.1295 m, so a 0.259 m wheel separation. bringup: LiDAR 0.27 m up,
+  turned 180 deg (agrees with our lidar_front_deg 178.7), placed at the centre (the photo
+  shows it at the front edge; our lidar_x is measured).
+- velocity_smoother: speed_lim_v 0.2, accel_lim_v 0.4, speed_lim_w 1.0.
+
+From the web (third-party datasheet copies, see sources in the chat): the L298 loses 1.8 V
+typical, 3.2 V worst at 1 A and up to 4.9 V at 2 A (source plus sink), so a 12 V supply leaves
+the motors about 8.8 to 10.2 V at 1 A. Blue Pill clones (CKS32, APM32, GD32) are common and
+can carry an STM32 marking; a CKS32 answers SWD with id 0x2ba01477 (OpenOCD needs
+`set CPUTAPID 0x2ba01477`). The STM32F103 ROM bootloader listens on USART1 (PA9/PA10) at 8E1
+with BOOT0 high, the same framing as this protocol: if the CH340 is wired to PA9/PA10 the
+Pi could flash with stm32flash over the existing cable. Not checked: which pins the CH340
+is wired to, and whether DTR reaches RESET.
+Close-up photos later the same day: the chip top shows no readable marking even with contrast
+enhancement (blank or worn), so the chip must be identified electronically (SWD IDCODE, or
+the ROM bootloader's GET_ID over serial). Level shifter: 4 channels LV1-4/HV1-4. CH340E
+module "BTE17-06B" has a solder jumper marked 5 (logic level, read from the photo only).
+Pi unreachable over ssh at the time (both addresses timed out).
+A sharper photo (same day) shows the marking after all: ST logo, "STM32F 103C8T6" and lot and
+date lines (not fully readable). The marking says genuine ST STM32F103C8T6; clones can carry
+the same marking, so the SWD or bootloader id is still to be read before flashing.
+
+## Old firmware backed up over the serial bootloader, 2026-11-14
+
+Owner moved BOOT0 to 1 (BOOT1 left at 0) and pressed RESET; the motors were cut with the red
+button. `stm32flash -b 115200 /dev/rct_ahr_robot` (installed by the owner) answered, so the
+CH340 is wired to USART1 (PA9/PA10) and the Pi can flash without an ST-Link. Bootloader
+version 0x22, option bytes 0x00 0x00, Device ID 0x0410 (STM32F10xxx medium density), flash
+read 128 KiB with no read protection. Read twice, both
+SHA-256 5924421ea558a965d5519a98514ddeb8c92a08ea88528dca0b71876d4b849ef9. 29 pages of 1 KiB
+used (0x08000000 to 0x08007400), the rest erased; stack 0x20005000, reset 0x08004c6d, so the
+application starts at 0x08000000 with no separate bootloader. Copies: Pi
+`~/firmware-backup/old-1.bin` and `old-2.bin`; here
+`base/firmware-original/stm32-old-firmware-2026-11-14.bin` (not committed).

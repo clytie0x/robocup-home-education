@@ -245,8 +245,10 @@ class Loop(unittest.TestCase):
 
     def test_obstacle_in_the_braking_strip_overrides_the_brain(self):
         base = FakeBase()
-        clear = self.cycle(self.state(base), 0.0)
+        state = self.state(base)
+        clear = self.cycle(state, 0.0)
         self.assertEqual((clear["v"], clear["stop"]), (0.1, None))
+        self.assertEqual(state.coast.parts["v"], (0.1, 0.0))  # the last-resort stop knows the base now rolls
 
         base = FakeBase()
         state = self.state(base, scan=scan_of([(0.25, 0.0)]))  # 0.225 m ahead of the front, inside the strip
@@ -255,6 +257,68 @@ class Loop(unittest.TestCase):
         self.assertEqual((record["v"], record["w"], record["stop"]), (0.0, 0.0, "obstacle"))
         self.assertEqual(base.sent[-1], (0.0, 0.0))
         self.assertEqual(state.body.robot.speed, 0.0)
+
+    def search_state(self, base, people, scan=WALL_ONLY):
+        """Not locked yet, the Jetson link up, the camera answering `people` (bearings in degrees)."""
+        link = SimpleNamespace(latest=lambda: Answer(self.now, [Seen(b, 0.9, LOOK, [0, 0, 1, 1]) for b in people]),
+                               alive=lambda now, silence: True, send=lambda frame: None)
+        state = run_follow.State(P, base, Scans(scan), Camera(), link, self.log, clock=lambda: self.now)
+        state.follower = Pushy(state.body.robot)
+        state.follower.operator_look = SimpleNamespace(count=0)  # nothing learned yet: enrol may lock
+        return state
+
+    def test_before_the_first_lock_it_turns_on_the_spot_to_find_the_operator(self):
+        base = FakeBase()
+        record = self.cycle(self.search_state(base, []), 0.0)
+        self.assertEqual((record["v"], record["w"], record["search"]), (0.0, run_follow.SEARCH_TURN, "turn"))
+        self.assertEqual(base.sent[-1], (0.0, run_follow.SEARCH_TURN))
+
+    def test_a_person_near_the_middle_of_the_image_stops_the_turn_and_enrol_is_tried(self):
+        base = FakeBase()
+        record = self.cycle(self.search_state(base, [5.0]), 0.0)
+        self.assertEqual((record["v"], record["w"], record["search"]), (0.0, 0.0, "hold"))
+        self.assertIsNotNone(record["enrol"])  # enrol ran this cycle (nobody on the LiDAR there: refused)
+        record = self.cycle(self.search_state(FakeBase(), [25.0]), 0.0)  # off to the side: keep turning
+        self.assertEqual(record["search"], "turn")
+
+    def test_the_hold_lasts_between_answers_and_ends_on_a_person_who_never_locks(self):
+        # The link hands each answer out once; the next cycles get None. The hold must last anyway.
+        answers = [Answer(0.0, [Seen(3.0, 0.9, LOOK, [0, 0, 1, 1])])]
+        link = SimpleNamespace(latest=lambda: answers.pop() if answers else None,
+                               alive=lambda now, silence: True, send=lambda frame: None)
+        state = run_follow.State(P, FakeBase(), Scans(WALL_ONLY), Camera(), link, self.log, clock=lambda: self.now)
+        state.follower = Pushy(state.body.robot)
+        state.follower.operator_look = SimpleNamespace(count=0)
+        got = [self.cycle(state, t)["search"] for t in (0.0, 0.1, 0.2, 0.3)]
+        self.assertEqual(got, ["hold"] * 4)
+        got = self.cycle(state, 0.6)["search"]  # the answer is 0.6 s old now: no fresh view, no blind turn
+        self.assertEqual(got, "hold")
+        self.assertEqual(state.body.robot.turn_speed, 0.0)
+
+    def test_a_centred_person_who_never_locks_is_turned_past_after_a_while(self):
+        state = self.search_state(FakeBase(), [3.0])
+        holds = [self.cycle(state, round(0.1 * i, 1))["search"] for i in range(0, 35)]
+        self.assertEqual(holds[:30], ["hold"] * 30)  # 3 s
+        self.assertEqual(holds[30:], ["turn"] * 5)
+
+    def test_the_search_turn_still_stops_for_what_its_outline_would_hit(self):
+        r, deg = 0.30, math.radians(65)  # a leg beside the front-left corner the left turn swings toward
+        scan = scan_of([(r * math.cos(deg) - P["lidar_x"], r * math.sin(deg))])
+        record = self.cycle(self.search_state(FakeBase(), [], scan=scan), 0.0)
+        self.assertEqual((record["v"], record["w"], record["stop"]), (0.0, 0.0, "obstacle"))
+
+    def test_after_two_full_turns_it_stands_and_waits(self):
+        base = FakeBase()
+        state = self.search_state(base, [])
+        state.searched = run_follow.SEARCH_MAX
+        self.assertEqual(self.cycle(state, 0.0)["search"], "hold")
+
+    def test_the_brain_plans_from_where_the_commands_on_their_way_will_take_it(self):
+        base = FakeBase()
+        state = self.state(base)
+        state.history = [(9.0, 0.1, 0.0)]  # driving straight at 0.1 since 9.0 s
+        self.cycle(state, 10.0)
+        self.assertAlmostEqual(state.body.robot.x, base.read_odom()[0] + 0.1 * P["command_latency"], places=9)
 
     def test_ambiguous_scene_holds_still(self):
         base = FakeBase()

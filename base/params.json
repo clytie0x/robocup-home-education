@@ -9,6 +9,7 @@
   "turn_accel": 0.7,
   "decel": 0.064,
   "stop_delay": 0.27,
+  "command_latency": 0.17,
   "robot_radius": 0.29,
   "robot_half_width": 0.20,
   "robot_height": 0.24,

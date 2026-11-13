@@ -18,6 +18,7 @@ ROBOT_RADIUS = 0.26  # metres
 # The outline itself, in the robot frame (x forward), used by the referee to judge touching.
 FOOTPRINT = [(0.20, 0.16), (0.16, 0.20), (-0.16, 0.20), (-0.20, 0.16),
              (-0.20, -0.16), (-0.16, -0.20), (0.16, -0.20), (0.20, -0.16)]  # fmt: skip
+INSCRIBED = 0.20  # metres, half the width of that square: the closest its outline comes to the centre
 PERSON_RADIUS = 0.25  # metres, a person seen from above
 CAR_RADIUS = 3.0  # metres, the robot counts as "at the car" inside this
 # After the robot reaches the car, the crowd waits this long, then starts to queue.
@@ -35,6 +36,15 @@ MAX_ACCEL = 0.5  # m/s^2
 # The same wheel acceleration on a two-wheel base about 0.34 m wide, turning on the spot:
 # each wheel at 0.5 m/s^2 gives 2 * 0.5 / 0.34 = about 3 rad/s^2.
 MAX_TURN_ACCEL = 3.0  # rad/s^2
+# Braking. None means the base brakes as hard as it speeds up (the simulation). The real base,
+# measured on 2026-11-13, slows at only 0.064 m/s^2, and only 0.27 s after it is told to stop.
+MAX_DECEL: float | None = None  # m/s^2
+STOP_DELAY = 0.0  # seconds from the stop command to the base starting to slow down
+# Turning on the spot to face a point (turn_toward), the robot does not turn for a heading error
+# smaller than this. 0 in the simulation; the real base, waiting behind the operator, turned back
+# and forth for a few degrees. Only there: driving still corrects every error (a deadband in
+# drive_toward made the ladder touch an obstacle, 2026-11-14).
+HEADING_DEADBAND = 0.0  # radians
 # When the robot asks the operator to come back, they stand this far in front of it,
 # and wait there this long so the robot can see them, before they walk on.
 COME_BACK_DISTANCE = 1.5  # metres
@@ -186,6 +196,9 @@ class Robot:
         self.speed = 0.0
         wanted = math.atan2(target[1] - self.y, target[0] - self.x)
         error = wrap_angle(wanted - self.heading)
+        if abs(error) < HEADING_DEADBAND:
+            self.turn_speed = 0.0  # close enough: facing them within the deadband
+            return error
         return error - self._turn(error, dt)
 
     def drive_toward(
@@ -217,7 +230,7 @@ class Robot:
         speed = 0.0 if left > TURN_ON_SPOT else self.max_speed * math.cos(left)
         if stop_in is not None:
             speed = min(speed, braking_speed(stop_in, dt))
-        self.speed = _ramp(self.speed, speed, MAX_ACCEL * dt)
+        self.speed = _ramp(self.speed, speed, (MAX_ACCEL if speed > self.speed else _decel()) * dt)
         step = min(self.speed * dt, remaining)
         self.x += math.cos(self.heading) * step
         self.y += math.sin(self.heading) * step
@@ -225,21 +238,30 @@ class Robot:
     def brake(self, dt: float) -> None:
         """Nothing to drive to: slow down. The robot still rolls on while it brakes."""
         self.turn_speed = 0.0  # shortcut: stops turning at once, ramp it if it matters
-        self.speed = _ramp(self.speed, 0.0, MAX_ACCEL * dt)
+        self.speed = _ramp(self.speed, 0.0, _decel() * dt)
         self.x += math.cos(self.heading) * self.speed * dt
         self.y += math.sin(self.heading) * self.speed * dt
+
+
+def _decel() -> float:
+    return MAX_ACCEL if MAX_DECEL is None else MAX_DECEL
 
 
 def braking_speed(room: float, dt: float) -> float:
     """The top speed from which the robot can still stop within `room` metres.
 
-    v = sqrt(2 * a * room), less one step of braking because we only brake from the
-    next step on. Close to the end we still creep at one step of braking, so we arrive.
+    It rolls on STOP_DELAY seconds, then brakes at a: v * delay + v^2 / (2 a) = room, so
+    v = a * (sqrt(delay^2 + 2 room / a) - delay); with no delay that is sqrt(2 a room).
+    Less one step of braking because we only brake from the next step on. Close to the end
+    we still creep at one step of braking, so we arrive.
     """
     if room <= 0:
         return 0.0
-    step = MAX_ACCEL * dt
-    return max(math.sqrt(2 * MAX_ACCEL * room) - step, step)
+    a = _decel()
+    step = a * dt
+    if STOP_DELAY == 0:
+        return max(math.sqrt(2 * a * room) - step, step)  # the same sum as before, to the last bit
+    return max(a * (math.sqrt(STOP_DELAY**2 + 2 * room / a) - STOP_DELAY) - step, step)
 
 
 def _ramp(now: float, wanted: float, max_change: float) -> float:

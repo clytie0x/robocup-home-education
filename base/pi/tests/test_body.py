@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import body
@@ -15,6 +16,12 @@ class BodyTest(unittest.TestCase):
         self.assertEqual(world.MAX_ACCEL, P["accel"])
         self.assertEqual(world.MAX_TURN_ACCEL, P["turn_accel"])
         self.assertEqual(world.ROBOT_RADIUS, P["robot_radius"])
+
+    def test_body_sets_decel_delay_and_deadband(self):
+        body.Body(P)
+        self.assertEqual(world.MAX_DECEL, P["decel"])
+        self.assertEqual(world.STOP_DELAY, P["stop_delay"])
+        self.assertAlmostEqual(world.HEADING_DEADBAND, math.radians(4))
 
     def test_command_comes_from_the_brain_step(self):
         b = body.Body(P)

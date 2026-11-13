@@ -26,6 +26,15 @@ COMPANY = MAX_WIDTH  # m; someone this close to the operator can become one LiDA
 # (600 runs, link down) 0.3 and 0.6 s both left 2 silent stranger follows, but a lone walker's own
 # stride (a sine-leg model, not real data) dropped the track in 51 of 96 gaits at 0.3 s, 6 at 0.6 s.
 COMPANY_MIN = 0.6
+# Furniture is not a person (chair and table legs look like legs). A candidate counts as a person
+# once it moved MOVED from where it was first seen, or the camera saw a person at it in the last
+# CAMERA_KEEP, or it was first seen within COMPANY of the operator (it may have come out of them).
+# Until then it is an obstacle for the brain and it cannot crowd the operator. It still counts for
+# the company rules (vanished, split): a still stranger the operator walks into must drop the track
+# (review 2026-11-14), and a track fix that lands where furniture stood is refused.
+MOVED = 0.25  # m
+CAMERA_KEEP = 2.0  # s
+STATIC_NEAR = 0.1  # m; a candidate this close to last cycle's furniture is that furniture
 
 
 class RealSenses:
@@ -44,6 +53,11 @@ class RealSenses:
         self._people = {}  # id -> odometry point, last cycle
         self._next_id = 1
         self._born = {}  # id -> when that person was first seen
+        self._first = {}  # id -> (odometry point, time) where and when that candidate was first seen
+        self._person = set()  # ids that showed they are people (moved, seen by the camera, or came out of the operator)
+        self._camera_at = {}  # id -> last time the camera saw a person at it
+        self._furniture = []  # odometry points of the candidates that are not people, last cycle
+        self._operator_at = None  # odometry point of the operator at the last fix
 
     @property
     def locked(self):
@@ -91,7 +105,7 @@ class RealSenses:
             predicted, last_fix = self.tracker.pos, self.tracker.seen_at
             pos = self.tracker.update(scan, now)  # coasts (no fix) up to track_coast_max
             fixed = pos is not None and self.tracker.seen_at == now
-            if fixed and not self._fix_ok(now, pos, predicted, last_fix, cands, score):
+            if fixed and (not self._fix_ok(now, pos, predicted, last_fix, cands, score) or self._is_furniture(pos)):
                 self.tracker = self._new_tracker()  # lost: only a camera look can lock again (rule 4)
                 self.why = "fix rejected"
             elif fixed:
@@ -118,10 +132,12 @@ class RealSenses:
 
         fixed = self.locked and self.tracker.seen_at == now
         operator = geometry.base_to_odom(self._base(self.tracker.pos), pose) if fixed else None
-        others = [self._base(c) for c in cands if c != self.tracker.pos]
-        others = [geometry.base_to_odom(b, pose) for b in others if PEOPLE_RANGE[0] <= math.hypot(*b) <= PEOPLE_RANGE[1]]
-        people = self._ids(others)
-        mixed = self._mixed_up(now, operator, people)
+        if operator is not None:
+            self._operator_at = operator
+        others = [c for c in cands if c != self.tracker.pos and PEOPLE_RANGE[0] <= math.hypot(*self._base(c)) <= PEOPLE_RANGE[1]]
+        everybody = self._ids([geometry.base_to_odom(self._base(c), pose) for c in others])
+        people = self._sort_out(now, dict(zip(everybody, others)), everybody, seen)
+        mixed = self._mixed_up(now, operator, everybody)  # furniture too: it may be a stranger who never moved
         if mixed:
             # They may now be one LiDAR object; when it splits, nobody can say which piece is the
             # operator (spec criterion 4). Drop the track and hold: only a camera look may lock again.
@@ -138,6 +154,27 @@ class RealSenses:
         obstacles = self.memory.update(now, pose, scan, depth_points, everyone)
         return Senses(now, operator, look, people, obstacles)
 
+    def _sort_out(self, now, cand_of, everybody, seen):
+        """The people among all the candidates; the rest is furniture, kept for the next cycle."""
+        track_bearing = self._camera_bearing(self.tracker.pos) if self.locked else None
+        for pid, c in cand_of.items():
+            if pid not in self._first:
+                self._first[pid] = (everybody[pid], now)
+                if self._operator_at is not None and math.dist(everybody[pid], self._operator_at) <= COMPANY:
+                    self._person.add(pid)  # it may have come out of the operator
+            for bearing, _ in seen:
+                if track_bearing is not None and abs(bearing - track_bearing) <= MATCH_DEG:
+                    continue  # that camera person is the operator
+                if abs(self._camera_bearing(c) - bearing) <= MATCH_DEG:
+                    self._camera_at[pid] = now  # every candidate at that bearing: the person may be the farther one
+        people = {pid: pt for pid, pt in everybody.items() if self._is_person(pid, now)}
+        self._furniture = [pt for pid, pt in everybody.items() if pid not in people]
+        for gone in [pid for pid in self._first if pid not in everybody]:  # forget ids no longer seen
+            self._first.pop(gone)
+            self._person.discard(gone)
+            self._camera_at.pop(gone, None)
+        return people
+
     def _mixed_up(self, now, operator, people):
         """True when the LiDAR may have mixed the operator up with someone next to them.
 
@@ -148,7 +185,7 @@ class RealSenses:
         Both need an id alive COMPANY_MIN, so a leg the pairing missed for a scan or two does not count.
         """
         for pid in people:
-            self._born.setdefault(pid, now)
+            self._born.setdefault(pid, self._first[pid][1] if pid in self._first else now)
         doubt = None
         if operator is not None:  # no fix this cycle: keep what we knew, judge on the next fix
             near = {pid for pid, pt in people.items() if math.dist(pt, operator) <= COMPANY}
@@ -200,7 +237,20 @@ class RealSenses:
         return min(near, key=lambda c: abs(self._camera_bearing(c) - bearing), default=None)
 
     def _crowded(self, point, cands):
-        return any(0 < math.dist(c, point) <= CROWDED for c in cands)
+        return any(0 < math.dist(c, point) <= CROWDED and not self._is_furniture(c) for c in cands)
+
+    def _is_furniture(self, c):
+        """A lidar-frame candidate standing where a non-person candidate stood last cycle."""
+        at = geometry.base_to_odom(self._base(c), self._pose)
+        return any(math.dist(at, f) <= STATIC_NEAR for f in self._furniture)
+
+    def _is_person(self, pid, now):
+        """Has the candidate with this id shown it is a person? Latched: once a person, always."""
+        if pid not in self._person:
+            (start, _), at = self._first[pid], self._people[pid]
+            if math.dist(start, at) >= MOVED or now - self._camera_at.get(pid, -math.inf) <= CAMERA_KEEP:
+                self._person.add(pid)
+        return pid in self._person
 
     def _fresh(self, now, answer, max_age=FRESH):
         """(bearing now, look) for each camera person, or [] when the answer is missing or late."""

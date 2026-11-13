@@ -164,11 +164,12 @@ class Rules(unittest.TestCase):
 
     def test_rule5_people_keep_their_ids_and_obstacles_leave_people_out(self):
         s = enrolled()
-        first = read(s, 0.1, scan_of(person(1.5, 0.0) + person(1.0, 1.5), wall=2.5))
+        first = read(s, 0.1, scan_of(person(1.5, 0.0) + person(1.0, 1.5), wall=2.5),
+                     Answer(0.1, [seen(1.0, 1.5, OTHER)]))  # seen by the camera: a person, not furniture
         self.assertEqual(len(first.people), 1)
         (pid, where), = first.people.items()
         second = read(s, 0.2, scan_of(person(1.5, 0.0) + person(1.1, 1.5) + person(-1.0, -1.0), wall=2.5))
-        self.assertEqual(len(second.people), 2)
+        self.assertEqual(len(second.people), 1)  # the one at (-1, -1) never moved and no camera saw them: furniture
         self.assertAlmostEqual(second.people[pid][0], where[0] + 0.1, delta=0.05)
         for everyone in [second.operator] + list(second.people.values()):
             self.assertFalse(any(math.dist((c.x, c.y), everyone) < 0.3 for c in second.obstacles))
@@ -362,6 +363,73 @@ class Merge(unittest.TestCase):
                     enrolled(), self.frames(split),
                     lambda t, people: Answer(t, [seen(*people[0], OPERATOR)]) if len(people) > 1 else Answer(t, []))
 
+
+
+class Furniture(unittest.TestCase):
+    """A chair leg is a LiDAR candidate that never moves: it must not count as a person (Task 6)."""
+
+    CHAIR = (2.4, -0.3)  # one leg, 0.3 m beside the operator's path
+
+    def walk_past(self, s, extra=lambda i: [], answer=lambda t, op: None):
+        """The operator walks from 1.5 m to 2.8 m along y = 0 at 0.5 m/s, past the chair (room radius 3 m)."""
+        frames = [(1.5 + 0.05 * i, 0.0) for i in range(27)]
+        for i, op in enumerate(frames):
+            t = round(0.1 * (i + 1), 1)
+            got = read(s, t, scan_of(person(*op) + [self.CHAIR] + extra(i)), answer(t, op),
+                       link_alive=answer(t, op) is not None)
+            yield t, op, got
+
+    def test_walking_past_a_chair_leg_keeps_the_track(self):
+        s = enrolled()
+        for t, op, got in self.walk_past(s):
+            self.assertTrue(s.locked, t)
+            self.assertFalse(s.ambiguous, (t, s.why))
+            self.assertAlmostEqual(got.operator[0], op[0] + P["lidar_x"], delta=0.1)
+        self.assertNotIn(True, [math.dist(pt, (self.CHAIR[0] + P["lidar_x"], self.CHAIR[1])) < 0.1
+                                for pt in got.people.values()])  # an obstacle, not a person
+
+    def test_a_still_stranger_seen_by_the_camera_is_a_person(self):
+        s = enrolled()
+        cam = lambda t, op: Answer(t, [seen(*op, OPERATOR), seen(*self.CHAIR, OTHER)])
+        ambiguous = [s.ambiguous for _, _, _ in self.walk_past(s, answer=cam)]
+        self.assertIn(True, ambiguous)  # the camera says someone stands there: crowded
+
+    def test_a_still_stranger_never_takes_the_track_when_the_operator_is_hidden(self):
+        # Review 2026-11-14: a stranger standing still from the first moment (furniture by the rule)
+        # beside where the operator stops. The operator's legs drop out for k scans while the stranger
+        # walks off, then the operator is seen again. Link down.
+        for side in (0.25, 0.34):
+            for k in (3, 6, 8, 12):
+                with self.subTest(side=side, hidden=k):
+                    s = enrolled(1.5, 0.0)
+                    st = lambda n: (2.4, -side - 0.05 * n)
+                    frames = [([(1.5 + 0.05 * i, 0.0), st(0)], st(0)) for i in range(19)]  # walks up to (2.4, 0)
+                    frames += [([(2.4, 0.0), st(0)], st(0))] * 10  # stands beside the stranger
+                    frames += [([st(n)], st(n)) for n in range(k)]  # hidden; the stranger walks off
+                    frames += [([(2.4, 0.0), st(n)], st(n)) for n in range(k, k + 15)]  # seen again
+                    for i, (people, stranger) in enumerate(frames):
+                        t = round(0.1 * (i + 1), 1)
+                        got = read(s, t, scan_of(sum((person(*p) for p in people), [])), link_alive=False)
+                        if s.locked and got.operator is not None and not s.ambiguous:  # driving
+                            here = s.tracker.pos
+                            self.assertGreater(math.dist(here, stranger), math.dist(here, (2.4, 0.0)) - 1e-9,
+                                               "following the stranger at %.1f s" % t)
+
+    def test_a_stranger_who_stops_next_to_a_chair_still_counts(self):
+        # Review Focus 3: the robot has seen the chair for a while; a stranger walks up and stops
+        # right beside it, then the operator walks past them both. Link down.
+        s = enrolled()
+        for i in range(30):  # 3 s: operator still, chair seen all along
+            read(s, round(0.1 * (i + 1), 1), scan_of(person(1.5, 0.0) + [self.CHAIR]), link_alive=False)
+        stranger = lambda i: person(2.15, -0.3 - 0.05 * max(0, 10 - i))  # walks in 0.5 m, stops 0.25 m from the chair
+        s2 = s
+        ambiguous = []
+        for i in range(37):  # the operator ends at 2.75 m, inside the 3 m room
+            t = round(3.1 + 0.1 * i, 1)
+            op = (1.5 + 0.05 * (i - 12), 0.0) if i >= 12 else (1.5, 0.0)  # starts walking once the stranger stands
+            read(s2, t, scan_of(person(*op) + [self.CHAIR] + stranger(i)), link_alive=False)
+            ambiguous.append(s2.ambiguous or not s2.locked)
+        self.assertIn(True, ambiguous)  # held or dropped next to the stranger, never drove on blind
 
 if __name__ == "__main__":
     unittest.main()

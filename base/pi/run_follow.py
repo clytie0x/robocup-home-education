@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy
 
 import hmc.follower as hmc_follower
-from hmc.follower import Follower
+from hmc.follower import Follower, Mode
 
 import camera
 import depth_obstacles
@@ -48,10 +48,10 @@ _plan_path = hmc_navigation.plan_path
 NO_PATH = {}
 
 
-def _plan_path_logged(start, goal, shapes, near_side=False):
-    path = _plan_path(start, goal, shapes, near_side)
+def _plan_path_logged(start, goal, shapes, near_side=False, heading=None):
+    path = _plan_path(start, goal, shapes, near_side, heading)
     if path is None:
-        NO_PATH.update(start=list(start), goal=list(goal), near_side=near_side,
+        NO_PATH.update(start=list(start), goal=list(goal), near_side=near_side, heading=heading,
                        shapes=[[type(s).__name__] + [round(v, 3) for v in vars(s).values()] for s in shapes])
     return path
 
@@ -62,6 +62,14 @@ PERIOD = 0.1  # s, one LiDAR revolution
 SLOW_CYCLE = 0.4  # s; a longer cycle stops the wheels and ends the run
 SAVE_EVERY = 10  # save every 10th JPEG; every scan is saved, so a lost track can be replayed
 SEARCH_AGAIN_EVERY = 10.0  # s; after asking the operator back, turn on the spot again (hmc.follower)
+# Finding the operator before the first lock (Task 7): turn on the spot while every frame goes to the
+# detector, and stop the moment a person is near the middle of the image, so enrol can lock onto them.
+SEARCH_TURN = 0.3  # rad/s, slow enough for the camera answers (about 0.3 s old) to stop it in time
+SEARCH_CENTRE_DEG = 20.0  # a camera person within this of the axis stops the turn
+SEARCH_MAX = 4 * math.pi  # rad; after two full turns, stand and wait
+SEARCH_HOLD = 3.0  # s held on a centred person who does not lock (a stranger, too far): then turn past them
+SEARCH_SKIP = 1.5  # s of turning on, past them, before a centred person can stop the turn again
+HISTORY = 2.0  # s of sent commands kept for the latency prediction
 CLOSED_GATE_SPEED = 0.15  # m/s; above this --drive needs the braking numbers measured (params.speed_gates_open)
 STILL = (0.0, 0.0, 0.0)  # the dry run's pose: zero motion
 LOG_ROOT = Path(__file__).resolve().parent / "logs"  # on the Pi: ~/hmc-base/logs
@@ -124,6 +132,12 @@ class State:
         self.follower = Follower(self.body.robot, Speech(log), follow_distance=p["follow_gap"] + safety.FRONT,
                                  search_again_every=SEARCH_AGAIN_EVERY)
         self.sent = (0.0, 0.0)  # the last command the wheels got: the motion since the last scan
+        self.coast = safety.Coast(p)  # what the base may still be doing: it slows at decel, not at once
+        self.history = []  # (time, v, w) of every command sent in the last HISTORY seconds
+        self.searched = 0.0  # rad turned while searching before the first lock
+        self.search_yaw = None  # yaw at the previous search cycle
+        self.hold_since = None  # when the search started holding on a centred person
+        self.skip_until = -math.inf  # until then a centred person does not stop the search
         self.last_now = None
         self.n = 0  # cycles so far
         self.enrol_said = None
@@ -152,6 +166,65 @@ def _end(state, now, reason, detail):
     return record
 
 
+def predict(pose, v, w, seconds):
+    """Where the base will be after driving (v, w) for `seconds` from pose (an arc)."""
+    x, y, th = pose
+    if abs(w) < 1e-9:
+        return (x + v * seconds * math.cos(th), y + v * seconds * math.sin(th), th)
+    end = th + w * seconds
+    r = v / w
+    return (x + r * (math.sin(end) - math.sin(th)), y - r * (math.cos(end) - math.cos(th)), end)
+
+
+def ahead(pose, sent, now, latency):
+    """The pose once the commands sent in the last `latency` seconds have played out.
+
+    sent: (time, v, w) in time order. A command sent at t runs until the next one is sent; the
+    part of that run inside (now - latency, now] has not reached the wheels yet.
+    """
+    for (t, v, w), end in zip(sent, [s[0] for s in sent[1:]] + [now]):
+        run = min(end, now) - max(t, now - latency)
+        if run > 0:
+            pose = predict(pose, v, w, run)
+    return pose
+
+
+def _search(state, follower, pose, answer, link_alive, now):
+    """(v, w) to search with, or None to keep the brain's command.
+
+    Before the first lock the brain only stands still: turn on the spot instead, slowly, while the
+    Jetson answers. In both that and the brain's own search, hold the moment a camera person is
+    near the middle of the image, so enrol or the camera re-lock can take them.
+    """
+    if state.senses.locked or not link_alive:
+        state.search_yaw = None
+        return None
+    never_locked = follower.last_operator_pos is None
+    if not never_locked and follower.mode is not Mode.SEARCH:
+        return None  # following on a short gap: the brain drives to where it saw them
+    # The link hands each answer out once (about every 0.3 s); the senses keep the newest one.
+    answer = getattr(state.senses, "_answer", None) or answer
+    fresh = answer is not None and now - answer.t <= state.p["jetson_silence"]
+    centred = fresh and any(abs(s.bearing_deg) <= SEARCH_CENTRE_DEG for s in answer.people)
+    if centred and now >= state.skip_until:
+        state.hold_since = now if state.hold_since is None else state.hold_since
+        if now - state.hold_since < SEARCH_HOLD:
+            state.search_yaw = None
+            return (0.0, 0.0)
+        state.skip_until = now + SEARCH_SKIP  # they never locked: turn on past them
+    if not centred:
+        state.hold_since = None
+    if not never_locked:
+        return None  # the brain's own search turns; it is only stopped above
+    if not fresh:
+        state.search_yaw = None
+        return (0.0, 0.0)  # no recent answer: turning would be blind
+    if state.search_yaw is not None:
+        state.searched += abs(math.atan2(math.sin(pose[2] - state.search_yaw), math.cos(pose[2] - state.search_yaw)))
+    state.search_yaw = pose[2]
+    return (0.0, SEARCH_TURN) if state.searched < SEARCH_MAX else (0.0, 0.0)
+
+
 def cycle(state, now):
     """One control cycle. Returns the log record; a record with "end" means stop the run."""
     p = state.p
@@ -176,7 +249,9 @@ def cycle(state, now):
     if frame is not None and params.depth_gates_open(p):
         depth_points = depth_obstacles.points(frame.depth, p)
     state.body.limit(min(state.max_speed, safety.speed_cap(depth_points, p)))
-    state.body.sync(pose)
+    # The base acts on a command command_latency after it is sent: the brain plans from where the
+    # commands already on their way will have taken it, not from where it is now (Task 5).
+    state.body.sync(ahead(pose, state.history, now, p["command_latency"]))
 
     # 3. The brain. While learning, RealSenses cannot lock by itself: enrol again whenever unlocked.
     senses, follower = state.senses, state.follower
@@ -204,7 +279,11 @@ def cycle(state, now):
     if depth_points is not None:
         points = numpy.vstack([points, depth_points])
     v, w = state.body.command()
-    if stop is None and safety.must_stop(points, v, w, p):
+    search = _search(state, follower, pose, answer, link_alive, now)
+    if search is not None:
+        v, w = search
+    # SLOW_CYCLE: the next cycle may come that late (a later one ends the run), so the command runs that long
+    if stop is None and any(safety.must_stop(points, mv, mw, p, cycle=SLOW_CYCLE) for mv, mw in state.coast.motions(v, w, now)):
         stop = "obstacle"
     if stop is None and not scan:
         stop = "no scan"  # the LiDAR went quiet: blind, so do not move
@@ -222,6 +301,8 @@ def cycle(state, now):
         except (ValueError, OSError) as error:
             return _end(state, now, "wheels", error)
         state.sent = (v, w)
+        state.history = [h for h in state.history if h[0] > now - HISTORY] + [(now, v, w)]  # only what reached the wheels
+    state.coast.sent(v, w, now)
     if frame is not None and state.link is not None:
         state.link.send(frame)
     if state.n % SAVE_EVERY == 0:
@@ -247,6 +328,7 @@ def cycle(state, now):
         "memory": len(getattr(follower, "obstacle_memory", {}) or {}),  # the brain's remembered obstacles
         "nearest": float(numpy.hypot(points[:, 0], points[:, 1]).min()) if len(points) else None,  # m from the base centre
         "stop": stop,
+        "search": None if search is None else ("hold" if search == (0.0, 0.0) else "turn"),
         "why": getattr(senses, "why", None),  # the senses rule behind an ambiguous cycle or a dropped track
         "enrol": enrol,
         "cycle_time": cycle_time,  # s from cycle start to send

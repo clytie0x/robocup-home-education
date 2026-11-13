@@ -1,5 +1,9 @@
 """The robot's body for the brain: an hmc Robot with this base's limits."""
-from hmc import world
+import math
+
+from hmc import navigation, world
+
+HEADING_DEADBAND_DEG = 4.0  # standing still, no turn for less: it turned back and forth 12 times in one run
 
 
 class Body:
@@ -9,6 +13,10 @@ class Body:
         world.MAX_ACCEL = p["accel"]
         world.MAX_TURN_ACCEL = p["turn_accel"]
         world.ROBOT_RADIUS = p["robot_radius"]
+        world.MAX_DECEL = p["decel"]  # measured: the brain brakes like the base, not 4 times harder
+        world.STOP_DELAY = p["stop_delay"]
+        world.HEADING_DEADBAND = math.radians(HEADING_DEADBAND_DEG)
+        navigation.CLOSE_PLAN = True  # plan through gaps the 0.40 m body fits, checked with its outline
         self.robot = world.Robot(max_speed=p["max_speed"], max_turn_rate=p["max_turn_rate"])
 
     def sync(self, pose):

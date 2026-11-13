@@ -8,6 +8,10 @@ WHEEL_PORT = "/dev/rct_ahr_robot"
 BAUD = 115200
 TIMEOUT = 0.3  # seconds of silence before the watchdog sends S#
 PERIOD = 0.04
+# One odometry step longer than this cannot be real (0.12 m/s top speed, reads every 0.1 s): a garbled
+# line that still parses, or a firmware reset (raw back to 0). It is refused like a bad line (review 2026-11-14).
+STEP_MAX = 0.5  # m
+TURN_MAX = 1.0  # rad
 STOP_REPEATS = 3  # S# writes per stop: one byte lost to a parity error must not leave the base driving
 SAFE_RUN_ENV = "HMC_SAFE_RUN"  # set by tools/safe_run.py for the program it starts
 NOT_SAFE_RUN = ("start it through tools/safe_run.py, which sends S# however it ends (the firmware has no"
@@ -39,8 +43,8 @@ def packet(v, w, p):
     return f"F{dv}|{'+' if w >= 0 else '-'}{dw}#".encode("ascii")
 
 
-def parse_odom(line, p):
-    """'Ox:+001.00,y:+000.50,th:+000.86#' to true (x, y, yaw)."""
+def parse_odom(line):
+    """'Ox:+001.00,y:+000.50,th:+000.86#' to the firmware's own (x, y, th), unscaled."""
     line = line.strip()
     if not (line.startswith("O") and line.endswith("#")):
         raise ValueError(f"bad odom {line!r}")
@@ -53,8 +57,27 @@ def parse_odom(line, p):
         raise ValueError(f"bad odom {line!r}") from None
     if not all(math.isfinite(n) for n in (x, y, th)):
         raise ValueError(f"bad odom {line!r}")
-    d = p["odom_distance_scale"]
-    return (x / d, y / d, th / p["odom_yaw_scale"])
+    return (x, y, th)
+
+
+def true_step(pose, before, after, p):
+    """Add one firmware odometry step to the true pose.
+
+    The firmware sums x and y along its own, unscaled heading. Scaling its absolute heading
+    (th / odom_yaw_scale) turned the pose away from the way x and y grow, further with every
+    turn: the SLAM replay of 2026-11-13 found the logged pose about 170 degrees off its motion.
+    So the step is read in the firmware's frame (along its heading halfway through the step),
+    then scaled and added along the true heading.
+    """
+    (x0, y0, t0), (x1, y1, t1) = before, after
+    mid = (t0 + t1) / 2
+    dx, dy = x1 - x0, y1 - y0
+    forward = (dx * math.cos(mid) + dy * math.sin(mid)) / p["odom_distance_scale"]
+    side = (-dx * math.sin(mid) + dy * math.cos(mid)) / p["odom_distance_scale"]
+    x, y, th = pose
+    turn = (t1 - t0) / p["odom_yaw_scale"]
+    h = th + turn / 2
+    return (x + forward * math.cos(h) - side * math.sin(h), y + forward * math.sin(h) + side * math.cos(h), th + turn)
 
 
 class Wheels:
@@ -71,6 +94,8 @@ class Wheels:
         self.lock = threading.Lock()
         self.last = b"S#"
         self.sent_at = clock()
+        self._raw = None  # the firmware's last (x, y, th)
+        self._pose = None  # the true pose built from it, step by step (true_step)
         self._write_stop()  # a base left driving by a crashed run stops as soon as we open the port
         self.done = threading.Event()
         self.thread = None
@@ -115,9 +140,20 @@ class Wheels:
                 self.port.write(b"O#")
             line = self.port.read_until(b"#").decode("ascii", "replace")
             try:
-                return parse_odom(line, self.p)
+                raw = parse_odom(line)
             except ValueError:
-                pass
+                continue
+            if self._raw is not None and (math.hypot(raw[0] - self._raw[0], raw[1] - self._raw[1]) > STEP_MAX
+                                          or abs(raw[2] - self._raw[2]) > TURN_MAX):
+                line = "jump from %s to %s" % (self._raw, raw)
+                continue
+            if self._pose is None:  # the first reading: start where the old scaling put it
+                d = self.p["odom_distance_scale"]
+                self._pose = (raw[0] / d, raw[1] / d, raw[2] / self.p["odom_yaw_scale"])
+            else:
+                self._pose = true_step(self._pose, self._raw, raw, self.p)
+            self._raw = raw
+            return self._pose
         raise ValueError(f"bad odom {line!r}")
 
     def stop(self):

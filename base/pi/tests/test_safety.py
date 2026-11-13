@@ -1,7 +1,9 @@
+import math
 import unittest
 
 import numpy
 
+import footprint
 import params
 import safety
 
@@ -41,15 +43,84 @@ class SafetyTest(unittest.TestCase):
         operator = safety.FRONT + P["follow_gap"]
         self.assertFalse(safety.must_stop([(operator, 0.0)], P["max_speed"], 0.0, P))
 
-    def test_turning_checks_both_sides(self):
-        for w in (0.3, -0.3):
-            for pt in [(0.2, 0.2), (0.2, -0.2), (0.0, -0.27), (0.0, 0.27)]:
-                self.assertTrue(safety.must_stop([pt], 0.0, w, Q), (w, pt))
-        self.assertFalse(safety.must_stop([(0.2, 0.3)], 0.0, 0.3, Q))  # 0.36 m, outside
+    def test_turning_into_a_point_beside_the_front_stops_turning_away_does_not(self):
+        # 0.06 m beside the left side; the front-left corner swings toward it when turning left
+        self.assertTrue(safety.must_stop([(0.08, 0.26)], 0.0, 0.49, P))
+        self.assertFalse(safety.must_stop([(0.08, 0.26)], 0.0, -0.49, P))
 
-    def test_rolling_and_turning_checks_the_disc_too(self):
-        self.assertTrue(safety.must_stop([(0.2, 0.26)], 0.01, 0.49, Q))
-        self.assertFalse(safety.must_stop([(0.2, 0.26)], 0.01, 0.0, Q))
+    def test_a_wall_3_cm_beside_the_body_stops_any_turn_on_the_spot(self):
+        # the base turns about its centre: one corner swings toward the wall either way
+        wall = [(x, -0.23) for x in numpy.arange(-0.4, 0.19, 0.02)]
+        for w in (0.3, -0.3):
+            self.assertTrue(safety.must_stop(wall, 0.0, w, P), w)
+        self.assertFalse(safety.must_stop(wall, P["max_speed"], 0.0, P))  # driving straight along it
+
+    def test_turning_in_the_open_is_not_stopped_by_a_point_the_outline_never_reaches(self):
+        # inside the old 0.33 m spin circle, 0.10 m outside the side: the turn is allowed now
+        for w in (0.3, -0.3):
+            self.assertFalse(safety.must_stop([(0.0, 0.30)], 0.0, w, P), w)
+
+    def test_a_point_entering_the_swept_outline_stops(self):
+        self.assertTrue(safety.must_stop([(0.35, 0.10)], 0.10, 0.4, P))
+
+    def test_rolling_and_turning_sweeps_the_tail(self):
+        # turning left swings the rear-right corner out to the right
+        self.assertTrue(safety.must_stop([(-0.08, -0.26)], 0.01, 0.49, P))
+        self.assertFalse(safety.must_stop([(-0.08, -0.26)], 0.01, 0.0, P))
+
+    def test_a_point_in_a_cut_front_corner_stops_driving_straight(self):
+        self.assertTrue(safety.must_stop([(0.19, 0.19)], P["max_speed"], 0.0, P))
+
+    def test_a_slow_turn_cannot_creep_into_a_wall_one_cycle_at_a_time(self):
+        wall = numpy.array([(x, -0.231) for x in numpy.arange(-0.6, 0.6, 0.01)])
+        for w in (0.012, 0.02, 0.03, 0.05):
+            th = 0.0
+            for _ in range(400):  # 40 s of 0.1 s cycles, turning while nothing stops it
+                c, s = math.cos(th), math.sin(th)
+                local = numpy.c_[c * wall[:, 0] + s * wall[:, 1], -s * wall[:, 0] + c * wall[:, 1]]
+                if safety.must_stop(local, 0.0, w, P):
+                    break
+                th += w * 0.1
+            self.assertGreater(footprint.body_gap(local, 0, 0, 0).min(), 0.02, w)
+
+    def test_a_longer_cycle_sweeps_further(self):
+        # 0.27 m beside the centre: a corner (0.256 m out) reaches it only after turning about 50 degrees
+        self.assertFalse(safety.must_stop([(0.0, 0.27)], 0.0, 0.49, P))
+        self.assertTrue(safety.must_stop([(0.0, 0.27)], 0.0, 0.49, P, cycle=1.5))
+
+    def test_unmeasured_turn_braking_is_an_error(self):
+        with self.assertRaises(ValueError):
+            safety.must_stop([(0.0, 0.30)], 0.0, 0.3, dict(P, turn_accel=None))
+
+    def test_the_base_rolls_on_after_a_stop_and_that_is_checked(self):
+        coast = safety.Coast(P)
+        coast.sent(0.09, 0.0, 0.0)
+        # 0.1 s later the brain asks to turn on the spot: the roll forward is checked with it
+        self.assertEqual(coast.motions(0.0, 0.49, 0.1), [(0.09, 0.49)])
+        self.assertTrue(any(safety.must_stop([(0.27, 0.10)], v, w, P) for v, w in coast.motions(0.0, 0.49, 0.1)))
+        self.assertFalse(safety.must_stop([(0.27, 0.10)], 0.0, 0.49, P))  # the command alone passes
+        # it keeps its speed for stop_delay, then slows at decel until it stands
+        self.assertEqual(coast.motions(0.0, 0.0, 0.27), [(0.09, 0.0)])
+        self.assertAlmostEqual(coast.motions(0.0, 0.0, 0.27 + 1.0)[0][0], 0.09 - P["decel"])
+        self.assertEqual(coast.motions(0.0, 0.0, 10.0), [(0.0, 0.0)])
+
+    def test_a_turn_that_flips_direction_still_checks_the_old_one(self):
+        coast = safety.Coast(P)
+        coast.sent(0.0, 0.49, 0.0)
+        coast.sent(0.0, -0.49, 0.1)
+        self.assertEqual(coast.motions(0.0, -0.49, 0.2), [(0.0, -0.49), (0.0, 0.49)])
+        self.assertEqual(coast.motions(0.0, -0.49, 5.0), [(0.0, -0.49)])  # died away
+
+    def test_unmeasured_braking_is_refused_when_the_run_starts(self):
+        with self.assertRaises(ValueError):
+            safety.Coast(dict(P, turn_accel=None))
+
+    def test_nan_in_the_command_is_kept_so_it_stops(self):
+        coast = safety.Coast(P)
+        coast.sent(0.0, 0.2, 0.0)
+        nan = float("nan")
+        self.assertTrue(any(safety.must_stop([], v, w, P) for v, w in coast.motions(0.05, nan, 0.1)))
+        self.assertTrue(any(safety.must_stop([], v, w, P) for v, w in coast.motions(nan, 0.0, 0.1)))
 
     def test_nan_means_stop(self):
         nan = float("nan")

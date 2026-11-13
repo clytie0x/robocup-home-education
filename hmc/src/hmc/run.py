@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from hmc import hri, plotting
+from hmc import hri, navigation, plotting
 from hmc.appearance import give_looks
 from hmc.bystanders import add_bystanders
 from hmc.maps import MAPS
@@ -43,7 +43,7 @@ class Result:
 # centre to centre (base/params.json follow_gap).
 BASES = {
     "sim": dict(accel=0.5, turn_accel=3.0, turn_rate=2.0, follow_distance=1.5),
-    "real": dict(accel=0.25, turn_accel=0.7, turn_rate=0.49, follow_distance=0.8),
+    "real": dict(accel=0.25, turn_accel=0.7, turn_rate=0.49, follow_distance=0.8, deadband=math.radians(4)),
 }
 
 
@@ -51,6 +51,9 @@ def use_base(world: World, base: str) -> None:
     """Set the base's acceleration and turn limits (they are module-wide in world.py)."""
     limits = BASES[base]
     hmc_world.MAX_ACCEL, hmc_world.MAX_TURN_ACCEL = limits["accel"], limits["turn_accel"]
+    hmc_world.HEADING_DEADBAND = limits.get("deadband", 0.0)  # reset for "sim": it is module-wide too
+    hmc_world.MAX_DECEL, hmc_world.STOP_DELAY = None, 0.0  # the Pi's Body sets the measured ones; never leak them here
+    navigation.CLOSE_PLAN = base == "real"  # the slow real base may plan close through narrow gaps
     world.robot.max_turn_rate = limits["turn_rate"]
 
 

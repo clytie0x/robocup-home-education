@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import params
@@ -55,20 +56,33 @@ class Packet(unittest.TestCase):
 
 
 class Odom(unittest.TestCase):
-    def test_parse_odom_applies_the_measured_scales(self):
-        x, y, yaw = wheels.parse_odom("Ox:+000.90,y:+000.00,th:+000.86#", P)
-        self.assertAlmostEqual(x, 0.90 / 0.902, places=3)
-        self.assertAlmostEqual(yaw, 0.86 / 0.862, places=3)
+    def test_parse_odom_reads_the_firmware_units(self):
+        self.assertEqual(wheels.parse_odom("Ox:+000.90,y:-000.10,th:+000.86#"), (0.90, -0.10, 0.86))
+
+    def test_a_step_is_scaled_and_follows_the_true_heading(self):
+        d, k = P["odom_distance_scale"], P["odom_yaw_scale"]
+        step = lambda pose, a, b: wheels.true_step(pose, a, b, P)
+        # straight, with the firmware's heading far from zero (it never resets during a run)
+        x, y, th = step((0, 0, 0), (10, 10, 23.4), (10 + 0.9 * math.cos(23.4), 10 + 0.9 * math.sin(23.4), 23.4))
+        self.assertAlmostEqual(x, 0.9 / d, places=9)
+        self.assertAlmostEqual(y, 0.0, places=9)
+        self.assertAlmostEqual(th, 0.0, places=9)
+        # a turn on the spot, then straight on: the drive goes where the true heading points
+        pose = step((0, 0, 0), (0, 0, 0), (0, 0, k * 1.0))
+        self.assertAlmostEqual(pose[2], 1.0, places=9)
+        x, y, th = step(pose, (0, 0, k), (0.9 * math.cos(k), 0.9 * math.sin(k), k))
+        self.assertAlmostEqual(x, 0.9 / d * math.cos(1.0), places=9)
+        self.assertAlmostEqual(y, 0.9 / d * math.sin(1.0), places=9)
 
     def test_broken_odom_line_is_an_error(self):
         for line in ("", "Ox:+000.90,y:+000.00#", "garbage", "Ox:a,y:+0,th:+0#", "x:+0,y:+0,th:+0#", "Ox:+0,y:+0,th:+0"):
             with self.assertRaises(ValueError):
-                wheels.parse_odom(line, P)
+                wheels.parse_odom(line)
 
     def test_non_finite_odom_is_an_error(self):
         for line in ("Ox:nan,y:+0,th:+0#", "Ox:+0,y:inf,th:+0#", "Ox:+0,y:+0,th:-inf#"):
             with self.assertRaises(ValueError):
-                wheels.parse_odom(line, P)
+                wheels.parse_odom(line)
 
 
 class Watchdog(unittest.TestCase):
@@ -99,6 +113,19 @@ class Watchdog(unittest.TestCase):
         w = wheels.Wheels(P, port=port, start_thread=False)
         self.assertAlmostEqual(w.read_odom()[0], 0.90 / 0.902, places=3)
         self.assertEqual([d for d in port.written if d != b"S#"], [b"O#"])  # opening S# aside
+
+    def test_an_impossible_step_is_refused_and_a_reset_ends_the_run(self):
+        port = FakePort()
+        w = wheels.Wheels(P, port=port, start_thread=False)
+        first = w.read_odom()
+        port.odom = b"Ox:+00090,y:+000.00,th:+000.86#"  # the decimal point lost: x jumps to 90
+        with self.assertRaises(ValueError):
+            w.read_odom()  # four tries, all the same jump
+        port.odom = b"Ox:+000.91,y:+000.00,th:+000.86#"
+        self.assertAlmostEqual(math.dist(w.read_odom()[:2], first[:2]), 0.01 / P["odom_distance_scale"], places=9)
+        port.odom = b"Ox:+000.00,y:+000.00,th:+000.00#"  # the firmware restarted
+        with self.assertRaises(ValueError):
+            w.read_odom()
 
     def test_read_odom_gives_up_after_four_bad_lines(self):
         port = FakePort(odom=b"junk#")
