@@ -8,7 +8,7 @@ import math
 from hmc.follower import Senses
 
 import geometry
-from legs import GATE, LegTracker, candidates
+from legs import GATE, MAX_WIDTH, LegTracker, candidates
 from shapes import ObstacleMemory
 
 FRESH = 0.5  # s; an older camera answer is dropped, never matched
@@ -21,6 +21,8 @@ YAW_KEEP = 2.5  # s of yaw history, enough to correct any answer still used
 LOOK_KEEP = 2.0  # s a camera look can still veto a fix that ends a LiDAR gap
 UNSURE_LATCH = 1.0  # s ambiguous stays True after the last crowded cycle
 LEARNED = 20  # looks the brain must have learned before the camera may re-lock (hmc.follower.OPERATOR_LEARN)
+COMPANY = MAX_WIDTH  # m; someone this close to the operator can become one LiDAR object with them
+COMPANY_MIN = 0.3  # s next to the operator before it counts: a leg the pairing missed for a scan or two does not
 
 
 class RealSenses:
@@ -37,6 +39,7 @@ class RealSenses:
         self._yaws = []  # (time, yaw) from the poses passed to read
         self._people = {}  # id -> odometry point, last cycle
         self._next_id = 1
+        self._company = {}  # id -> since when that person stands within COMPANY of the operator
 
     @property
     def locked(self):
@@ -95,25 +98,46 @@ class RealSenses:
                 c = self._match(bearing, cands)
                 if c is None or score(l) < LOOK_MATCH:
                     continue
-                if self._crowded(c, cands):
-                    self._unsure_at = now  # never lock onto a spot where two people stand
+                two_seen = sum(abs(self._camera_bearing(c) - b) <= MATCH_DEG for b, _ in seen) > 1
+                if self._crowded(c, cands) or two_seen:
+                    self._unsure_at = now  # never lock onto a spot where two people stand (or look like one)
                     break
                 self.tracker.update(scan, now, lock_at=c)
                 look = l
                 break
 
-        self.ambiguous = now - self._unsure_at <= UNSURE_LATCH
-        self._last_now = now
-        if self.ambiguous:
-            look = None  # never learn or score a look from a merged scene
         fixed = self.locked and self.tracker.seen_at == now
         operator = geometry.base_to_odom(self._base(self.tracker.pos), pose) if fixed else None
         others = [self._base(c) for c in cands if c != self.tracker.pos]
         others = [geometry.base_to_odom(b, pose) for b in others if PEOPLE_RANGE[0] <= math.hypot(*b) <= PEOPLE_RANGE[1]]
         people = self._ids(others)
+        if self._company_vanished(now, operator, people):
+            # They may now be one LiDAR object; when it splits, nobody can say which piece is the
+            # operator (spec criterion 4). Drop the track and hold: only a camera look may lock again.
+            self.tracker = self._new_tracker()
+            self._unsure_at = now
+            operator = None
+
+        self.ambiguous = now - self._unsure_at <= UNSURE_LATCH
+        self._last_now = now
+        if self.ambiguous:
+            look = None  # never learn or score a look from a merged scene
         everyone = list(people.values()) + ([operator] if operator is not None else [])
         obstacles = self.memory.update(now, pose, scan, depth_points, everyone)
         return Senses(now, operator, look, people, obstacles)
+
+    def _company_vanished(self, now, operator, people):
+        """True when someone who stood next to the operator is gone from the scan.
+
+        Walking away keeps their id (they move less than GATE per scan); merging into the
+        operator's object, or hiding behind them, makes the id disappear.
+        """
+        if operator is None:
+            return False  # no fix this cycle: keep what we knew, judge on the next fix
+        gone = any(pid not in people and now - since >= COMPANY_MIN for pid, since in self._company.items())
+        near = [pid for pid, pt in people.items() if math.dist(pt, operator) <= COMPANY]
+        self._company = {} if gone else {pid: self._company.get(pid, now) for pid in near}
+        return gone
 
     def _new_tracker(self):
         return LegTracker(lost_after=self.p["track_coast_max"])

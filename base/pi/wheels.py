@@ -55,7 +55,9 @@ class Wheels:
         if port is None:
             import serial
 
-            port = serial.Serial(WHEEL_PORT, BAUD, timeout=0.2, parity=serial.PARITY_EVEN, dsrdtr=False, rtscts=False)
+            # write_timeout: a stuck USB write raises instead of holding the lock, so the watchdog keeps running
+            port = serial.Serial(WHEEL_PORT, BAUD, timeout=0.2, write_timeout=0.1, parity=serial.PARITY_EVEN,
+                                 dsrdtr=False, rtscts=False)
         self.p, self.port, self.clock = p, port, clock
         self.lock = threading.Lock()
         self.last = b"S#"

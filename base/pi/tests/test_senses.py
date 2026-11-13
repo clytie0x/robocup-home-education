@@ -271,5 +271,75 @@ class Gaps(unittest.TestCase):
         self.assertTrue(s.locked)  # the look agrees: keep it
 
 
+class Merge(unittest.TestCase):
+    """Spec criterion 4: a second person stands next to the operator, then they walk apart.
+    The LiDAR may see the two as one object meanwhile; at the split the track would take
+    whichever piece is nearer the blob's centre, a matter of centimetres."""
+
+    STRANGER = (1.5, -0.45)  # stands 0.45 m to the operator's right
+
+    def frames(self, split):
+        approach = [[(1.5, 0.0), (1.5, -0.8 + 0.035 * i)] for i in range(10)] + [[(1.5, 0.0), self.STRANGER]]
+        merged = [[(1.5, -0.225)]] * 20  # 2 s seen as one object between them
+        return approach + merged + split
+
+    def splits(self):
+        return {
+            "operator walks on, stranger stays": [[(1.5, 0.05 * i), self.STRANGER] for i in range(1, 21)],
+            "stranger walks off, operator stays": [[(1.5, 0.0), (1.5, -0.45 - 0.05 * i)] for i in range(1, 21)],
+            "both walk apart": [[(1.5, 0.03 * i), (1.5, -0.45 - 0.03 * i)] for i in range(1, 21)],
+        }
+
+    def check_never_on_the_stranger(self, s, frames, answer_for):
+        for i, people in enumerate(frames):
+            t = round(0.1 * (i + 1), 1)
+            got = read(s, t, scan_of(sum((person(*p) for p in people), [])), answer_for(t, people),
+                       link_alive=answer_for(t, people) is not None)
+            stranger_y = people[1][1] if len(people) > 1 else None
+            if stranger_y is not None and s.locked and got.operator is not None:
+                self.assertLess(abs(s.tracker.pos[1] - people[0][1]), abs(s.tracker.pos[1] - stranger_y),
+                                "following the stranger at %.1f s" % t)
+
+    def test_link_down_follows_the_operator_or_stops(self):
+        for name, split in self.splits().items():
+            with self.subTest(name):
+                self.check_never_on_the_stranger(enrolled(), self.frames(split), lambda t, people: None)
+
+    def test_the_camera_locks_the_operator_again_after_the_split(self):
+        # The camera sees both people where they really are, also while the LiDAR sees one object.
+        for gap in (0.45, 0.30):
+            with self.subTest(gap=gap):
+                s = enrolled()
+                s.learned = 20
+                op, st = (1.5, 0.0), (1.5, -gap)
+                phases = [([op, (1.5, -0.8)], [op, (1.5, -0.8)])] * 3 + [([op, st], [op, st])] * 5
+                phases += [([(1.5, -gap / 2)], [op, st])] * 20  # merged in the LiDAR, two in the camera
+                phases += [([(1.5, 0.05 * i), st], [(1.5, 0.05 * i), st]) for i in range(1, 31)]  # operator walks on
+                for i, (lidar_people, real) in enumerate(phases):
+                    t = round(0.1 * (i + 1), 1)
+                    cam = Answer(t, [seen(*real[0], OPERATOR), seen(*real[1], OTHER)])
+                    got = read(s, t, scan_of(sum((person(*p) for p in lidar_people), [])), cam)
+                    if got.operator is not None and len(lidar_people) > 1:
+                        self.assertLess(abs(s.tracker.pos[1] - real[0][1]), abs(s.tracker.pos[1] - real[1][1]),
+                                        "following the stranger at %.1f s" % t)
+                self.assertTrue(s.locked)
+                self.assertAlmostEqual(s.tracker.pos[1], phases[-1][1][0][1], delta=0.1)  # the operator
+
+    def test_someone_walking_past_does_not_drop_the_track(self):
+        s = enrolled()
+        frames = [[(1.5, 0.0), (1.5 - 1.0 + 0.1 * i, -0.5)] for i in range(21)]  # passes 0.5 m to the side
+        for i, people in enumerate(frames):
+            read(s, round(0.1 * (i + 1), 1), scan_of(sum((person(*p) for p in people), [])), link_alive=False)
+            self.assertTrue(s.locked, i)
+
+    def test_link_up_with_the_stranger_out_of_camera_view(self):
+        # The camera sees only the operator (the stranger is outside its 58 degrees).
+        for name, split in self.splits().items():
+            with self.subTest(name):
+                self.check_never_on_the_stranger(
+                    enrolled(), self.frames(split),
+                    lambda t, people: Answer(t, [seen(*people[0], OPERATOR)]) if len(people) > 1 else Answer(t, []))
+
+
 if __name__ == "__main__":
     unittest.main()
