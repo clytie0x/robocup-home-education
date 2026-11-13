@@ -313,6 +313,26 @@ class Loop(unittest.TestCase):
         state.searched = run_follow.SEARCH_MAX
         self.assertEqual(self.cycle(state, 0.0)["search"], "hold")
 
+    def test_the_motion_is_measured_and_the_velocity_loop_corrects_a_slow_base(self):
+        base = FakeBase()
+        state = run_follow.State(P, base, Scans(WALL_ONLY), Camera(), None, self.log, clock=lambda: self.now,
+                                 velocity_loop=True)
+        state.follower = Pushy(state.body.robot)  # always wants 0.1 m/s
+        state.estimates._avg["speed_gain"].value, state.estimates._avg["speed_gain"].samples = 0.8, 100
+        record = None
+        for i in range(3):
+            record = self.cycle(state, 0.1 * i)
+            base.advance(0.1)
+        self.assertIsNotNone(record["measured"])
+        self.assertEqual(record["estimates"]["speed_gain"], [0.8, True])
+        self.assertAlmostEqual(base.sent[-1][0], 0.12, delta=0.001)  # 0.1 / 0.8 = 0.125, capped at max_speed
+
+    def test_without_the_flag_the_brain_command_goes_out_as_it_is(self):
+        base = FakeBase()
+        state = self.state(base)
+        self.cycle(state, 0.0)
+        self.assertEqual(base.sent[-1], (0.1, 0.0))
+
     def test_the_page_can_pause_slow_and_end_a_run(self):
         base = FakeBase()
         state = self.state(base)

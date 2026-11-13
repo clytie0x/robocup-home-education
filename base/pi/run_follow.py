@@ -23,17 +23,21 @@ from pathlib import Path
 import numpy
 
 import hmc.follower as hmc_follower
+from hmc import world as hmc_world
 from hmc.follower import Follower, Mode
 
+import calib
 import camera
 import dashboard as dashboard_module
 import depth_obstacles
 import geometry
 import lidar
 import link as link_module
+import motion as motion_module
 import params
 import remote_plan
 import safety
+import velocity
 import wheels as wheels_module
 from body import Body
 from senses import LEARNED, LOOK_MATCH, RealSenses
@@ -138,7 +142,8 @@ class State:
     encode: frame -> JPEG bytes, for the saved frames. clock: the same clock as cycle's `now`.
     """
 
-    def __init__(self, p, wheels, lidar, camera, link, log, max_speed=None, encode=_no_jpeg, clock=time.monotonic):
+    def __init__(self, p, wheels, lidar, camera, link, log, max_speed=None, encode=_no_jpeg, clock=time.monotonic,
+                 velocity_loop=False):
         self.p = p
         self.wheels, self.lidar, self.camera, self.link, self.log = wheels, lidar, camera, link, log
         self.max_speed = p["max_speed"] if max_speed is None else max_speed
@@ -161,6 +166,10 @@ class State:
         self.n = 0  # cycles so far
         self.enrol_said = None
         self.controls = dashboard_module.Controls(self.max_speed)  # the page's switches (dashboard.py)
+        self.motion = motion_module.MotionEstimator(p)  # measured motion: odometry checked by scan matching (M1)
+        self.estimates = calib.BaseEstimates(p)  # how the base really drives, measured while it drives (M2)
+        self.velocity = velocity.VelocityLoop(p, self.estimates) if velocity_loop else None  # M3, --velocity-loop
+        self.measured = None  # the newest motion.MotionState
         self.dashboard = None  # the page's server, when main started one
 
 
@@ -269,6 +278,11 @@ def cycle(state, now):
     answer = state.link.latest() if state.link is not None else None
     link_alive = state.link is not None and state.link.alive(now, p["jetson_silence"])
 
+    if state.wheels is not None:  # a dry run has no motion to measure
+        state.measured = state.motion.update(now, pose, scan, state.sent)
+        state.estimates.observe(state.measured, state.sent, now)
+        world_decel, world_delay = state.estimates.safe_braking()  # never better than params.json
+        hmc_world.MAX_DECEL, hmc_world.STOP_DELAY = world_decel, world_delay
     t_read = state.clock() - now
     # 2. Depth obstacles (only once the camera pose is measured), the speed cap, the pose.
     depth_points = None
@@ -311,6 +325,8 @@ def cycle(state, now):
     search = _search(state, follower, pose, answer, link_alive, now)
     if search is not None:
         v, w = search
+    if state.velocity is not None and state.measured is not None:
+        v, w = state.velocity.command(v, w, state.measured)  # what makes the base drive (v, w); 0 stays 0
     # SLOW_CYCLE: the next cycle may come that late (a later one ends the run), so the command runs that long
     if stop is None and any(safety.must_stop(points, mv, mw, p, cycle=SLOW_CYCLE) for mv, mw in state.coast.motions(v, w, now)):
         stop = "obstacle"
@@ -365,6 +381,10 @@ def cycle(state, now):
         "cycle_time": cycle_time,  # s from cycle start to send
         "t": [round(x, 4) for x in (t_read, t_depth, t_senses, t_brain)],  # s from cycle start: sensors read, depth, senses, brain
         "planner": dict(PLANNER),
+        "measured": None if state.measured is None else [round(state.measured.v, 4), round(state.measured.w, 4),
+                                                          state.measured.trusted, round(state.measured.agree, 2)],
+        "estimates": {name: [round(getattr(state.estimates, name)[0], 4), getattr(state.estimates, name)[2]]
+                      for name in ("speed_gain", "turn_gain", "drift_per_m", "latency", "decel", "stop_delay")},
         "period": period,  # s since the previous cycle started
     }
     state.log.write(record)
@@ -436,6 +456,8 @@ def main(argv=None):
     parser.add_argument("--planner", choices=["pi", "jetson", "here"], default="pi",
                         help="where paths are planned: a second process on the Pi (default), the Jetson's"
                              " plan_server.py, or in the cycle itself (slow on the Pi)")
+    parser.add_argument("--velocity-loop", action="store_true",
+                        help="correct the commands until the measured speed matches (Task M3; off until field-checked)")
     parser.add_argument("--dashboard", type=int, default=dashboard_module.PORT, metavar="PORT",
                         help="serve the status page on this port (0: no page)")
     args = parser.parse_args(argv)
@@ -467,7 +489,8 @@ def main(argv=None):
             link = link_module.JetsonLink(p["jetson_host"], p["jetson_port"], p["camera_hfov_deg"])
             link.start()
         wheels = open_wheels(args.drive, p)
-        state = State(p, wheels, session, cam, link, log, args.max_speed, encode=link_module._encode_jpeg)
+        state = State(p, wheels, session, cam, link, log, args.max_speed, encode=link_module._encode_jpeg,
+                      velocity_loop=args.velocity_loop)
         if REMOTE is not None:
             hmc_navigation.REPLAN_ON_NEW_SHAPES = True  # a plan is only a message now: ask every cycle
         if args.dashboard:
