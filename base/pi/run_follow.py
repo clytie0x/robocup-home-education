@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy
 
+import hmc.follower as hmc_follower
 from hmc.follower import Follower
 
 import camera
@@ -32,6 +33,12 @@ import safety
 import wheels as wheels_module
 from body import Body
 from senses import LEARNED, LOOK_MATCH, RealSenses
+
+# The simulation keeps a small obstacle near the robot for ever while the camera cannot see it.
+# This camera sees only 58 deg ahead, so every LiDAR and depth cell the robot turned away from
+# stayed, until no path was left (2026-11-13, second drive: no path from 21 s on). Forget them
+# after MEMORY_KEEP like everything else; the camera turns toward where the robot will drive.
+hmc_follower.KEEP_NEAR = 0.0
 
 PERIOD = 0.1  # s, one LiDAR revolution
 SLOW_CYCLE = 0.4  # s; a longer cycle stops the wheels and ends the run
@@ -219,6 +226,7 @@ def cycle(state, now):
         "obstacles": len(seen.obstacles),
         "path": len(getattr(getattr(follower, "navigator", None), "path", []) or []),  # 0 while following: no way found
         "depth_points": None if depth_points is None else len(depth_points),
+        "memory": len(getattr(follower, "obstacle_memory", {}) or {}),  # the brain's remembered obstacles
         "nearest": float(numpy.hypot(points[:, 0], points[:, 1]).min()) if len(points) else None,  # m from the base centre
         "stop": stop,
         "why": getattr(senses, "why", None),  # the senses rule behind an ambiguous cycle or a dropped track
