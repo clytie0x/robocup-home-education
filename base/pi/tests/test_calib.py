@@ -32,6 +32,18 @@ def drive(est, commands, gain=1.0, turn_gain=1.0, lag=0.0, decel=None, delay=0.0
 
 
 class EstimatesTest(unittest.TestCase):
+    def test_a_speed_averaged_over_a_command_change_is_not_a_gain_sample(self):
+        est = calib.BaseEstimates(P)
+        for k in range(10):
+            est.observe(MotionState(0.1 * k, (0, 0, 0), 0.05, 0.0, True, 0.9), (0.05, 0.0), 0.1 * k)
+        samples = est._avg["speed_gain"].samples
+        est.observe(MotionState(1.0, (0, 0, 0), 0.05, 0.0, True, 0.9), (0.10, 0.0), 1.0)  # 0.10 from 1.0 s
+        est.observe(MotionState(1.1, (0, 0, 0), 0.05, 0.0, True, 0.9, 0.5), (0.10, 0.0), 1.0)  # still the 0.05, 0.17 s late
+        samples = est._avg["speed_gain"].samples
+        for k in range(12, 20):  # until 1.97 s (latency 0.17, STEADY, span) a 0.5 s average still mixes in the 0.05
+            est.observe(MotionState(0.1 * k, (0, 0, 0), 0.075, 0.0, True, 0.9, 0.5), (0.10, 0.0), 1.0)
+        self.assertEqual(est._avg["speed_gain"].samples, samples)
+
     def test_too_few_samples_report_the_params_values_untrusted(self):
         est = calib.BaseEstimates(P)
         for name, key in (("decel", "decel"), ("stop_delay", "stop_delay"), ("latency", "command_latency")):

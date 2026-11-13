@@ -25,6 +25,50 @@ def room_scan(pose, half=2.0, step_deg=1.0):
     return scan
 
 
+def offset_scan(pose, half, step_deg, start_deg):
+    """room_scan with the first ray at start_deg: each revolution of the LDS-03 starts somewhere else."""
+    x, y, yaw = pose
+    sx, sy = geometry.base_to_odom((P["lidar_x"], 0.0), pose)
+    scan = []
+    for i in range(int(360 / step_deg)):
+        deg = -180 + start_deg + i * step_deg
+        a = yaw + math.radians(deg)
+        c, s = math.cos(a), math.sin(a)
+        hits = [(w - sx) / c for w in (-half, half) if abs(c) > 1e-9] + [(w - sy) / s for w in (-half, half) if abs(s) > 1e-9]
+        scan.append((deg, min(t for t in hits if t > 0)))
+    return scan
+
+
+class Thinned(unittest.TestCase):
+    def test_thinned_match_keeps_the_surfaces_of_the_full_scan(self):
+        # 400 returns a revolution, as on the robot; the rays of the second start half a step later.
+        # Thinning the scans first left too few neighbours for the surface lines and turned a
+        # 0.05 deg step right into a left one on the robot (base_check log 2026-11-14 05:13).
+        moved = (0.012, 0.0, math.radians(-0.05))
+        a = offset_scan((0, 0, 0), 2.5, 0.9, 0.0)
+        b = offset_scan(moved, 2.5, 0.9, 0.45)
+        dx, dy, dyaw, agree = scanmatch.match(a, b, P, max_points=120)
+        self.assertAlmostEqual(dx, 0.012, delta=0.002)
+        self.assertAlmostEqual(dy, 0.0, delta=0.002)
+        # thinned before the surfaces: dx 0.0059 m, -0.45 deg. Small steps still read a little short.
+        self.assertAlmostEqual(math.degrees(dyaw), -0.05, delta=0.03)
+        self.assertGreater(agree, 0.9)
+
+    def test_max_points_bounds_the_work(self):
+        seen = []
+        real = scanmatch._closest
+
+        def counting(moved, fixed, along):
+            seen.append((len(moved), len(fixed)))
+            return real(moved, fixed, along)
+        scanmatch._closest = counting
+        try:
+            scanmatch.match(offset_scan((0, 0, 0), 2.5, 0.9, 0.0), offset_scan((0.01, 0, 0), 2.5, 0.9, 0.3), P, max_points=120)
+        finally:
+            scanmatch._closest = real
+        self.assertLessEqual(max(max(s) for s in seen), 120)
+
+
 class ScanShift(unittest.TestCase):
     def test_square_room_shift_and_turn(self):
         moved = (0.30, 0.0, math.radians(10))

@@ -77,16 +77,44 @@ class MotionTest(unittest.TestCase):
         self.assertAlmostEqual(state.pose[0], 0.010, places=9)
         self.assertFalse(state.trusted)
 
-    def test_long_scans_are_thinned_before_matching(self):
+    def test_the_default_matcher_thins_inside_scanmatch(self):
         seen = []
+        real = motion.scanmatch.match
 
-        def match(before, after, p, guess):
-            seen.append((len(before), len(after)))
+        def spy(before, after, p, guess, max_points=None):
+            seen.append((len(before), len(after), max_points))
             return (0.0, 0.0, 0.0, 1.0)
+        motion.scanmatch.match = spy
+        try:
+            est = motion.MotionEstimator(P)
+            est.update(0.0, (0.0, 0.0, 0.0), [(d / 2.0, 2.0) for d in range(-360, 360)])
+            est.update(0.1, (0.0, 0.0, 0.0), [(d / 2.0, 2.1) for d in range(-360, 360)])
+        finally:
+            motion.scanmatch.match = real
+        self.assertEqual(seen, [(720, 720, motion.MAX_POINTS)])  # whole scans in: the surfaces need them
+
+    def test_motion_is_matched_against_the_scan_a_baseline_ago(self):
+        before = []
+
+        def match(a, b, p, guess):
+            before.append(a[0][1])
+            return guess + (0.9,)  # agrees with the odometry
         est = motion.MotionEstimator(P, match=match)
-        est.update(0.0, (0.0, 0.0, 0.0), [(d / 2.0, 2.0) for d in range(-360, 360)])
-        est.update(0.1, (0.0, 0.0, 0.0), [(d / 2.0, 2.1) for d in range(-360, 360)])
-        self.assertLessEqual(max(max(s) for s in seen), motion.MAX_POINTS)
+        for k in range(8):  # a new scan every 0.1 s, 0.012 m forward each
+            state = est.update(0.1 * k, (0.012 * k, 0.0, 0.0), [(0.0, 2.0 + k)])
+        self.assertEqual(before[-1], 2.0 + 2)  # at 0.7 s: the scan of 0.2 s, 0.5 s before
+        self.assertTrue(state.trusted)
+        self.assertAlmostEqual(state.span, motion.BASELINE)
+        self.assertAlmostEqual(state.v, 0.12, places=6)
+        self.assertAlmostEqual(state.pose[0], 0.012 * 7, places=6)
+
+    def test_an_odometry_only_update_spans_its_own_step(self):
+        est = motion.MotionEstimator(P, match=fake_match((0.012, 0.0, 0.0), 0.9))
+        est.update(0.0, (0.0, 0.0, 0.0), SCAN_A)
+        state = est.update(0.05, (0.005, 0.0, 0.0), SCAN_A)
+        self.assertFalse(state.trusted)
+        self.assertAlmostEqual(state.span, 0.05)
+        self.assertAlmostEqual(state.v, 0.1, places=6)
 
 
 if __name__ == "__main__":

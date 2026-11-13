@@ -51,7 +51,8 @@ class VelocityLoop:
         v = v_wanted / gain_v
         w = w_wanted / gain_w - drift * v_wanted  # the base turns drift rad per metre by itself
         if state.trusted:
-            then_v, then_w = self._wanted_at(state.t - self.estimates.latency[0])
+            # v, w average over the state's span: compare with what was wanted at its middle
+            then_v, then_w = self._wanted_at(state.t - self.estimates.latency[0] - state.span / 2)
             err_v, err_w = then_v - state.v, then_w - state.w
             at_cap_v = v + KP_V * err_v + self.integral_v >= top and err_v > 0
             if not at_cap_v:  # no wind-up while the command is already at the cap

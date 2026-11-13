@@ -54,11 +54,14 @@ def _best_rotation(src, dst):
     return r, cd - r @ cs
 
 
-def match(before, after, p=None, guess=(0.0, 0.0, 0.0), iterations=60):
+def match(before, after, p=None, guess=(0.0, 0.0, 0.0), iterations=60, max_points=None):
     """(dx, dy, dyaw, agree): the motion, and the share of points that agree within AGREE.
 
     guess is a starting motion; ICP only finds the nearest fit, so a big turn needs one.
     dyaw is returned within 180 deg of the guessed yaw, not wrapped to +-180 deg.
+    max_points: match at most this many returns of each scan (every k-th), for speed. The surface
+    lines of `before` come from all its returns first: thinned returns stand too far apart to be
+    one surface, and matching to bare returns pulls the motion toward zero.
     Raises ValueError when a scan has fewer than 20 usable points or they do not overlap.
     """
     p = p or params.load()
@@ -66,6 +69,10 @@ def match(before, after, p=None, guess=(0.0, 0.0, 0.0), iterations=60):
     if len(fixed) < 20 or len(moving) < 20:
         raise ValueError("too few usable points: %d and %d" % (len(fixed), len(moving)))
     along = tangents(fixed)
+    if max_points:
+        k = math.ceil(len(fixed) / max_points)
+        fixed, along = fixed[::k], along[::k]
+        moving = moving[::math.ceil(len(moving) / max_points)]
     x, y, yaw = guess
     r = np.array([[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]])
     t = np.array([x, y], dtype=float)

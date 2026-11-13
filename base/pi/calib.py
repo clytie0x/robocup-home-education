@@ -80,14 +80,15 @@ class BaseEstimates:
         if changed:
             self.sent.append((sent_at, float(command[0]), float(command[1])))
         self.sent = [s for s in self.sent if s[0] > state.t - WINDOW - 1.0] or self.sent[-1:]
-        self.seen = [s for s in self.seen if s[0] > state.t - WINDOW] + [(state.t, state.v, state.w)]
+        mid = state.t - state.span / 2  # v and w average over the span: they belong to its middle
+        self.seen = [s for s in self.seen if s[0] > state.t - WINDOW] + [(mid, state.v, state.w)]
         self._stops(state, changed)
         if not state.trusted:
             return  # gains only from motion the LiDAR confirmed
         lag = self.latency[0]
         acting = self._command_at(state.t - lag)
-        if acting is None or state.t - lag - acting[0] < STEADY:
-            return
+        if acting is None or state.t - lag - acting[0] < STEADY + state.span:
+            return  # the command must have held over the whole span the speed averages
         _, v_cmd, w_cmd = acting
         if v_cmd >= MIN_V and abs(w_cmd) < STRAIGHT:
             self._avg["speed_gain"].add(state.v / v_cmd)
@@ -135,7 +136,7 @@ class BaseEstimates:
         if cmd is None or cmd[1] != 0.0:
             self._stop = None  # driving again before it stood: no clean stop
             return
-        trace.append((state.t, state.v))
+        trace.append((state.t - state.span / 2, state.v))
         if state.v > 0.02 * v0:
             return
         # it stands: the delay is until it fell below 90 % of v0; the decel is the slope from 90 % to 10 %

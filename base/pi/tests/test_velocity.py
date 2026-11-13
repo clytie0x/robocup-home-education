@@ -29,6 +29,14 @@ def run(loop, wanted, seconds, gain=0.8, cap=0.12, drift=0.0, turn_gain=1.0):
 
 
 class VelocityLoopTest(unittest.TestCase):
+    def test_a_span_averaged_speed_is_compared_with_the_wish_at_its_middle(self):
+        loop = velocity.VelocityLoop(P, FakeEstimates())
+        for k in range(11):
+            loop.command(0.10, 0.0, MotionState(0.1 * k, (0, 0, 0), 0.10, 0.0, True, 0.9))
+        # asked less at 1.1 s; the 0.5 s average still shows 0.10, which was right for its middle
+        v, _ = loop.command(0.05, 0.0, MotionState(1.1, (0, 0, 0), 0.10, 0.0, True, 0.9, 0.5))
+        self.assertAlmostEqual(v, 0.05, places=6)
+
     def test_a_slow_base_is_brought_to_the_wanted_speed(self):
         loop = velocity.VelocityLoop(P, FakeEstimates())
         v, _, _ = run(loop, (0.10, 0.0), 3.0, gain=0.8)
