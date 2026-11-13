@@ -313,6 +313,26 @@ class Loop(unittest.TestCase):
         state.searched = run_follow.SEARCH_MAX
         self.assertEqual(self.cycle(state, 0.0)["search"], "hold")
 
+    def test_the_page_can_pause_slow_and_end_a_run(self):
+        base = FakeBase()
+        state = self.state(base)
+        state.controls.apply({"pause": True})
+        record = self.cycle(state, 0.0)
+        self.assertEqual((record["v"], record["w"], record["stop"]), (0.0, 0.0, "paused"))
+        state.controls.apply({"pause": False})
+        state.controls.apply({"max_speed": 0.05})
+        self.cycle(state, 0.1)
+        self.assertEqual(state.body.robot.max_speed, 0.05)
+        state.controls.apply({"end": True})
+        record = self.cycle(state, 0.2)
+        self.assertIn("dashboard", record["end"])
+        self.assertEqual(base.sent[-1], (0.0, 0.0))
+
+    def test_the_page_can_switch_the_search_turn_off(self):
+        state = self.search_state(FakeBase(), [])
+        state.controls.apply({"search": False})
+        self.assertIsNone(self.cycle(state, 0.0)["search"])
+
     def test_the_brain_plans_from_where_the_commands_on_their_way_will_take_it(self):
         base = FakeBase()
         state = self.state(base)

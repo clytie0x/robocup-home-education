@@ -4,7 +4,7 @@
 
 One JSON object per line each way.
   request: {"id", "start", "goal", "shapes": [["Circle", x, y, r] or ["Box", x0, y0, x1, y1]],
-            "near_side", "heading", "robot_radius"}
+            "near_side", "heading", "robot_radius", "close_plan"}
   answer:  {"id", "path": [[x, y], ...] or null, "seconds"}
 Only the newest request waiting in the socket is planned; older ones are dropped unanswered.
 The planner is hmc.navigation.plan_path with the real base's settings (the close plan on).
@@ -24,7 +24,7 @@ KINDS = {"Circle": Circle, "Box": Box}
 def answer(request):
     """The planner's answer to one request (a dict), as a dict."""
     world.ROBOT_RADIUS = request["robot_radius"]
-    navigation.CLOSE_PLAN = True
+    navigation.CLOSE_PLAN = request.get("close_plan", True)
     shapes = [KINDS[kind](*values) for kind, *values in request["shapes"]]
     t = time.perf_counter()
     path = navigation.plan_path(tuple(request["start"]), tuple(request["goal"]), shapes,

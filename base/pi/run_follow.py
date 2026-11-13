@@ -14,6 +14,7 @@ import contextlib
 import json
 import math
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -25,6 +26,7 @@ import hmc.follower as hmc_follower
 from hmc.follower import Follower, Mode
 
 import camera
+import dashboard as dashboard_module
 import depth_obstacles
 import geometry
 import lidar
@@ -56,6 +58,8 @@ PLANNER = {"remote": 0, "local": 0}  # plans of each kind since the last log rec
 
 
 def _plan_path_logged(start, goal, shapes, near_side=False, heading=None):
+    if REMOTE is not None:
+        REMOTE.close_plan = hmc_navigation.CLOSE_PLAN  # the page's switch goes with each request
     if REMOTE is not None and REMOTE.alive():
         path = REMOTE.plan(start, goal, shapes, near_side, heading)
         PLANNER["remote"] += 1
@@ -156,6 +160,8 @@ class State:
         self.last_now = None
         self.n = 0  # cycles so far
         self.enrol_said = None
+        self.controls = dashboard_module.Controls(self.max_speed)  # the page's switches (dashboard.py)
+        self.dashboard = None  # the page's server, when main started one
 
 
 def scan_points(scan, p):
@@ -211,7 +217,7 @@ def _search(state, follower, pose, answer, link_alive, now):
     Jetson answers. In both that and the brain's own search, hold the moment a camera person is
     near the middle of the image, so enrol or the camera re-lock can take them.
     """
-    if state.senses.locked or not link_alive:
+    if state.senses.locked or not link_alive or not state.controls.search:
         state.search_yaw = None
         return None
     never_locked = follower.last_operator_pos is None
@@ -248,6 +254,10 @@ def cycle(state, now):
         return _end(state, now, "slow cycle", "%.2f s since the last cycle" % period)
     dt = PERIOD if period is None else period
     state.last_now = now
+    switches = state.controls.snapshot()
+    if switches["end"]:
+        return _end(state, now, "dashboard", "STOP pressed on the page")
+    hmc_navigation.CLOSE_PLAN = switches["close_plan"]
 
     # 1. Sensors. Broken odometry means we no longer know where we are: stop (Review Focus 5).
     try:
@@ -264,7 +274,7 @@ def cycle(state, now):
     depth_points = None
     if frame is not None and params.depth_gates_open(p):
         depth_points = depth_obstacles.points(frame.depth, p)
-    state.body.limit(min(state.max_speed, safety.speed_cap(depth_points, p)))
+    state.body.limit(min(state.max_speed, switches["max_speed"], safety.speed_cap(depth_points, p)))
     # The base acts on a command command_latency after it is sent: the brain plans from where the
     # commands already on their way will have taken it, not from where it is now (Task 5).
     state.body.sync(ahead(pose, state.history, now, p["command_latency"]))
@@ -306,6 +316,8 @@ def cycle(state, now):
         stop = "obstacle"
     if stop is None and not scan:
         stop = "no scan"  # the LiDAR went quiet: blind, so do not move
+    if stop is None and switches["paused"]:
+        stop = "paused"  # from the page: hold still, the senses and the brain keep running
     if stop is not None:
         v = w = 0.0
         state.body.robot.speed = state.body.robot.turn_speed = 0.0  # the brain ramps up again from standstill
@@ -356,6 +368,8 @@ def cycle(state, now):
         "period": period,  # s since the previous cycle started
     }
     state.log.write(record)
+    if state.dashboard is not None:
+        state.dashboard.latest = record
     PLANNER.update(remote=0, local=0)
     if NO_PATH and state.n % 20 == 0:  # at most one dump every 2 s
         state.log.write({"time": now, "no_path": dict(NO_PATH)})
@@ -422,6 +436,8 @@ def main(argv=None):
     parser.add_argument("--planner", choices=["pi", "jetson", "here"], default="pi",
                         help="where paths are planned: a second process on the Pi (default), the Jetson's"
                              " plan_server.py, or in the cycle itself (slow on the Pi)")
+    parser.add_argument("--dashboard", type=int, default=dashboard_module.PORT, metavar="PORT",
+                        help="serve the status page on this port (0: no page)")
     args = parser.parse_args(argv)
     p = params.load()
     why = refusal(args.drive, args.max_speed, p)
@@ -434,7 +450,7 @@ def main(argv=None):
         signal.signal(sig, _interrupt)
     log = Log(LOG_ROOT / time.strftime("%Y%m%d-%H%M%S"))
     print("logging to", log.folder)
-    session = cam = link = wheels = server = None
+    session = cam = link = wheels = server = page = None
     global REMOTE
     try:
         if args.planner == "pi":
@@ -454,6 +470,11 @@ def main(argv=None):
         state = State(p, wheels, session, cam, link, log, args.max_speed, encode=link_module._encode_jpeg)
         if REMOTE is not None:
             hmc_navigation.REPLAN_ON_NEW_SHAPES = True  # a plan is only a message now: ask every cycle
+        if args.dashboard:
+            state.dashboard = page = dashboard_module.Dashboard(state.controls, {"drive": args.drive, "seconds": args.seconds},
+                                                                 port=args.dashboard)
+            page.start()
+            print("dashboard: http://%s:%d/" % (socket.gethostname(), args.dashboard))
         print("%s. Operator: stand alone within 2.5 m in front of the robot, then press Enter."
               % ("DRIVE" if args.drive else "DRY RUN, the wheels stay off"))
         input()
@@ -469,7 +490,7 @@ def main(argv=None):
         with signals_ignored():
             if wheels is not None:
                 wheels.close()  # S# again, before anything else is shut down
-            for device in (link, cam, REMOTE):
+            for device in (link, cam, REMOTE, page):
                 if device is not None:
                     device.stop()
             if server is not None:

@@ -27,6 +27,7 @@ class RemotePlanner:
         self.path = None  # the newest answer's path (None: no way found)
         self.seconds = None  # how long the server took for it
         self.next_id = 1
+        self.close_plan = True  # sent with every request (the dashboard's switch)
         self.done = threading.Event()
         self.thread = None
 
@@ -45,7 +46,7 @@ class RemotePlanner:
     def plan(self, start, goal, shapes, near_side=False, heading=None):
         """Ask for a plan and return the newest answer (a list of points, or None)."""
         request = {"start": list(start), "goal": list(goal), "near_side": near_side, "heading": heading,
-                   "robot_radius": self.robot_radius,
+                   "robot_radius": self.robot_radius, "close_plan": self.close_plan,
                    "shapes": [[type(s).__name__] + list(vars(s).values()) for s in shapes]}
         with self.lock:
             request["id"], self.next_id = self.next_id, self.next_id + 1
