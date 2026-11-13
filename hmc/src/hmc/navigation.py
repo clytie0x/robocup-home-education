@@ -34,11 +34,13 @@ LOOK_AHEAD = 1.5  # metres; more than the 1.0 m the robot needs to stop from 1 m
 Cell = tuple[int, int]
 
 
-def plan_path(start: Point, goal: Point, shapes: list[Shape]) -> list[Point] | None:
+def plan_path(start: Point, goal: Point, shapes: list[Shape],
+              near_side: bool = False) -> list[Point] | None:  # fmt: skip
     """Shortest free path from start to goal as a list of points, or None if there is none.
 
     If the goal itself is blocked (for example a person we want to walk behind), the
-    path ends at the free cell closest to the goal instead.
+    path ends at the free cell closest to the goal instead. With near_side, it ends at
+    the free cell on our side of the goal (see follow_step).
     """
     inflate = hmc_world.ROBOT_RADIUS + SAFETY
     x0 = min(start[0], goal[0]) - MARGIN
@@ -86,6 +88,12 @@ def plan_path(start: Point, goal: Point, shapes: list[Shape]) -> list[Point] | N
             (i, j) for i in range(width) for j in range(height) if (i, j) not in blocked
         ]
         goal_cell = min(free, key=lambda c: (distance(centre(c), goal), c))
+        if near_side:
+            # The free cells around a person form a ring, all almost as close to the
+            # goal. Take the one on our side, or the path end jumps around the person.
+            nearest = distance(centre(goal_cell), goal)
+            ring = [c for c in free if distance(centre(c), goal) <= nearest + CELL]
+            goal_cell = min(ring, key=lambda c: (distance(centre(c), start), c))
 
     # A* search. Steps go to the 8 neighbours. A diagonal step needs both side cells free.
     came_from: dict[Cell, Cell] = {}
@@ -140,13 +148,14 @@ class Navigator:
         now: float,
         dt: float,
         stop_distance: float = GOAL_TOLERANCE,
+        near_side: bool = False,
     ) -> bool:
         """One step toward the goal. Returns True once we are within stop_distance."""
         if distance(robot.pos, goal) <= stop_distance + 1e-9:
             robot.brake(dt)
             return True
         if self._needs_plan(goal, shapes, now):
-            self.path = plan_path(robot.pos, goal, shapes) or []  # no path: wait here
+            self.path = plan_path(robot.pos, goal, shapes, near_side) or []  # no path: wait here
             self._goal, self._shape_count, self._planned_at = goal, len(shapes), now
         # Keep the last waypoint, the goal itself, until we are there.
         while len(self.path) > 1 and distance(robot.pos, self.path[0]) <= WAYPOINT_REACHED:
@@ -205,4 +214,9 @@ def follow_step(navigator: Navigator, robot: Robot, operator_pos: Point,
                 shapes: list[Shape], now: float, dt: float,
                 follow_distance: float = FOLLOW_DISTANCE) -> bool:  # fmt: skip
     """One step of following: close the gap, but stop follow_distance away."""
-    return navigator.step(robot, operator_pos, shapes, now, dt, follow_distance)
+    # The real robot stops so close (0.8 m) that it drives right up to the free ring
+    # around the operator, where it matters which ring cell the path ends at. The
+    # simulation (1.5 m) keeps its old choice, so its six maps stay byte-identical.
+    ring = hmc_world.PERSON_RADIUS + hmc_world.ROBOT_RADIUS + SAFETY
+    near_side = follow_distance < ring + 0.3
+    return navigator.step(robot, operator_pos, shapes, now, dt, follow_distance, near_side)

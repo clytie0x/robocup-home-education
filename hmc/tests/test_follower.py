@@ -139,3 +139,22 @@ def test_search_turns_again_every_ten_seconds_when_asked_to():
     # Standing still is commanded: the wheels get 0, not the turn from before.
     assert turning != 0.0
     assert body.turn_speed == 0.0 and body.speed == 0.0
+
+
+def test_robot_keeps_up_with_an_operator_who_walks_away(monkeypatch):
+    # The real base: wider, slow, and it stops only 0.8 m from the operator (centre to
+    # centre). There the path once ended on a random side of the operator's ring and
+    # the robot turned on the spot instead of following.
+    from hmc import world
+    monkeypatch.setattr(world, "ROBOT_RADIUS", 0.29)
+    monkeypatch.setattr(world, "MAX_ACCEL", 0.25)
+    monkeypatch.setattr(world, "MAX_TURN_ACCEL", 0.7)
+    body = Robot(max_speed=0.12, max_turn_rate=0.49)
+    follower = Follower(body, hri.Speech(), follow_distance=0.8)
+    dt = 0.1  # the robot's cycle
+    for i in range(300):
+        operator = (0.9 + 0.1 * i * dt, 0.0)  # walks away at 0.1 m/s
+        senses = seen(i * dt, operator=operator)
+        follower.watch(senses)
+        follower.step(senses, dt)
+    assert distance(body.pos, operator) < 0.8 + 0.15
