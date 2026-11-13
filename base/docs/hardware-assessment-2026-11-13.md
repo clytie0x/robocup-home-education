@@ -395,3 +395,8 @@ Firmware odometry has a 0.01 m step (11 mm after `odom_distance_scale`), so at 0
   ahead (the bare floor stays clear) at pitch 11.3, 12.33 and 13.3 deg; the wall lands
   1.517 m from the turning centre against 1.495 m by LiDAR (2.2 cm). Not yet checked: a
   0.12 m box and a chair (Task 6 step 3), and a longer floor view.
+- Depth layer time on the Pi (`depth_obstacles.points`, 320 x 240, 30 calls): an empty view
+  (every pixel past 3 m) 16.6 ms before, 0.7 ms after building the pixel rays once and
+  skipping pixels past 3 m; a view with every pixel near 42.4 ms before, 37.2 ms after
+  (same points, checked on 50 random frames). The 0.1 s loop has room; striding pixels would
+  cut it further if a busy scene ever pushes a cycle near `SLOW_CYCLE`.
