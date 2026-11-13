@@ -15,8 +15,8 @@ push() { # <host> <remote dir> <local dir> [tar args...]
 push "$PI" hmc-base/hmc hmc/src/hmc
 push "$PI" hmc-base base/pi
 scp -q base/params.json "$PI":hmc-base/params.json
-# the Pi tests import server.py (test_link.py looks in ../jetson there)
-ssh "$PI" "mkdir -p hmc-base/jetson" && scp -q base/jetson/server.py "$PI":hmc-base/jetson/server.py
+# the Pi tests import server.py and slam_bridge.py (the tests look in ../jetson there)
+ssh "$PI" "mkdir -p hmc-base/jetson" && scp -q base/jetson/server.py base/jetson/slam_bridge.py "$PI":hmc-base/jetson/
 
 if [ -d base/jetson ]; then
   push "$JETSON" hmc-follow base/jetson
