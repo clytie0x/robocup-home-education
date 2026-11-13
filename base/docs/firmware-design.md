@@ -93,6 +93,9 @@ The ROS driver in `~/catkin_ws` carries its own copies of these scales (changed
   `kff` from the measured speed per PWM percent (section 5), so the PI only corrects.
   Integral clamped and frozen while the PWM is saturated (anti-windup). Gains tuned with
   the wheels off the floor, then on the floor, with step logs from `E#`.
+- **PWM frequency:** 1 kHz on the L298N enable pins (the old firmware used 100 Hz).
+  Decided by the owner on 2026-11-14. `kff` comes from the section 5 ladder at this
+  frequency, since the speed per PWM percent may differ from the old firmware's.
 - **Odometry:** from encoder count changes every tick, midpoint integration
   (`th += dth`, `x += ds * cos(th - dth/2)`). Float32 on the MCU is enough for a 10-minute
   run (errors far below the scan-match error). `O#` reports the latest pose.

@@ -66,7 +66,8 @@
 #define INTEGRAL_MAX_M 0.02f
 #define PWM_MAX_PCT 100.0f
 /* L298N PWM frequency. The old firmware used 100 Hz. 1 kHz gives a smoother current at
- * low speed and is still slow for the L298N's 2 us switching. Owner's choice. */
+ * low speed and is still slow for the L298N's 2 us switching. Owner chose 1 kHz on
+ * 2026-11-14. */
 #define PWM_HZ 1000u
 
 /* ---- Safety ---- */

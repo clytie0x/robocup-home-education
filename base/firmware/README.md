@@ -103,8 +103,9 @@ parity or framing error drops the message it is in. `\r` and `\n` are ignored.
 1. Approve or change the design draft (nothing gets flashed before that).
 2. Letter and format of the fine odometry reply (`P#` above is a proposal). The old
    firmware answers only `F B S O R`, so `P`, `M` and `E` were free.
-3. PWM frequency: 1 kHz (`PWM_HZ`) instead of the old 100 Hz. Smoother at low speed;
-   the speed per PWM percent may change, so the PWM ladder (design 5) sets `KFF`.
+3. PWM frequency: **decided 2026-11-14, the owner chose 1 kHz** (`PWM_HZ`) instead of
+   the old 100 Hz. Smoother at low speed; the speed per PWM percent may change, so the
+   PWM ladder (design 5) sets `KFF`.
 4. `METERS_PER_COUNT` and `TRACK_M` are derived from the old firmware and the LiDAR scales
    (0.902 distance, 0.862 yaw), not measured on their own: calibrate (design 4.2, 4.3).
 5. `BRAKE_MPS2` 0.5 m/s² (draft value). Higher stops shorter but may slip on a smooth
