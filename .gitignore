@@ -13,3 +13,6 @@ models/
 .robot_voice_local.yaml
 # audio clips with unclear copyright (keep locally)
 voice/sounds/cat_beatbox.wav
+# pip and pytest scratch folders that Windows sometimes leaves in the working folder
+pip-*/
+pytest-of-*/
