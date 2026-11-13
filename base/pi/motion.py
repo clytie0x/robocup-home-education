@@ -14,7 +14,10 @@ import scanmatch
 AGREE_MIN = 0.6  # share of points that must agree (spec: below 60 % the estimate is not trusted)
 MAX_POS = 0.05  # m; a match further than this from the odometry step is refused
 MAX_YAW = math.radians(5)
-MAX_POINTS = 150  # returns per scan given to the matcher (time on the Pi)
+# Returns per scan given to the matcher. On the Pi (235 pairs of saved scans 1 s apart, no guess):
+# 150 points took 26.9 ms median, 91 ms worst (over the 80 ms budget), 84 % trusted; 120 points
+# 14.4 ms median, 63 ms worst, 71 % trusted. Scans 0.1 s apart with the odometry guess agree more.
+MAX_POINTS = 120
 
 
 @dataclass
