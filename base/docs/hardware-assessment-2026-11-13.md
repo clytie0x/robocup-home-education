@@ -400,3 +400,20 @@ Firmware odometry has a 0.01 m step (11 mm after `odom_distance_scale`), so at 0
   skipping pixels past 3 m; a view with every pixel near 42.4 ms before, 37.2 ms after
   (same points, checked on 50 random frames). The 0.1 s loop has room; striding pixels would
   cut it further if a busy scene ever pushes a cycle near `SLOW_CYCLE`.
+
+## Task 6 step 3: box and chair, 2026-11-13 (wheels still)
+
+Owner placed a low box (about 0.12 m, under the 0.22 m LiDAR plane) on the centre line 1.0 m
+ahead of the front edge and a chair 1.5 m ahead, about 0.3 m left. Picture:
+`~/hmc-base/logs/scene-20261113-215304.png` (LiDAR points, depth obstacle cells, the obstacle
+circles the follower plans with, the robot, a planned path).
+- **The box appears in the depth layer and not in the LiDAR**: in the box zone (x 1.05 to
+  1.55 m, |y| < 0.25 m from the turning centre) 50 depth cells over 10 frames, 0 LiDAR points
+  over 5 scans.
+- **The bare floor stays clear**: 0 depth cells between 0.25 and 1.0 m ahead (|y| < 0.45 m).
+- The chair shows in both, around x 1.8 m, y +0.55 m.
+- `hmc.navigation.plan_path` on the Pi for this scene (231 obstacle circles, goal 2.6 m
+  ahead): median 44.7 ms, worst 45.6 ms of 50, under the 150 ms limit, so no planner thread.
+  The path goes round the back and along the far side of the wall on the right: the box, the
+  chair and that wall, each grown by the robot radius plus 0.1 m, close every gap ahead. Real
+  geometry, not a planner fault, but it shows how little room 0.39 m of inflation leaves.

@@ -335,7 +335,7 @@ def test_shapes_are_in_the_odometry_frame(self): ...
 ```
 
 - [x] **Step 2:** Implement with numpy, run, pass.
-- [ ] **Step 3:** On the Pi (wheels closed): a box 0.12 m high at 1.0 m and a chair at 1.5 m. Save a top-down PNG of LiDAR circles, depth circles and the robot to `~/hmc-base/logs/`. Report whether the box appears and whether the bare floor is clear. Report `hmc.navigation.plan_path` time on the Pi for that scene (median and worst of 50). If the worst is over 150 ms, say so; Task 10 then plans in a worker thread. Commit.
+- [x] **Step 3:** On the Pi (wheels closed): a box 0.12 m high at 1.0 m and a chair at 1.5 m. Save a top-down PNG of LiDAR circles, depth circles and the robot to `~/hmc-base/logs/`. Report whether the box appears and whether the bare floor is clear. Report `hmc.navigation.plan_path` time on the Pi for that scene (median and worst of 50). If the worst is over 150 ms, say so; Task 10 then plans in a worker thread. Commit.
 
 ### Task 7: Body and last-resort stop
 
