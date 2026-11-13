@@ -29,8 +29,8 @@ class FakeWheels:
     odom_zero: the odometry reads 0 whatever the wheels do (the open -026 case).
     """
 
-    def __init__(self, clock, fail_at=None, slow_at=None, odom_zero=False):
-        self.clock, self.fail_at, self.slow_at, self.odom_zero = clock, fail_at, slow_at, odom_zero
+    def __init__(self, clock, fail_at=None, slow_at=None, odom_zero=False, gain=1.0):
+        self.clock, self.fail_at, self.slow_at, self.odom_zero, self.gain = clock, fail_at, slow_at, odom_zero, gain
         self.calls, self.v, self.x, self.reads, self.sends = [], 0.0, 0.0, 0, []
         self.last_t = clock()
 
@@ -45,7 +45,7 @@ class FakeWheels:
             raise RuntimeError("serial unplugged")
         if self.reads == self.slow_at:
             self.clock.t += 0.4
-        self.x += self.v * (self.clock() - self.last_t)
+        self.x += self.gain * self.v * (self.clock() - self.last_t)
         self.last_t = self.clock()
         return (0.0 if self.odom_zero else self.x, 0.0, 0.0)
 
@@ -143,7 +143,7 @@ class Drive(unittest.TestCase):
 
     def test_real_velocity_loop_measures_and_stays_under_its_cap(self):
         clock = Clock()
-        wheels = FakeWheels(clock)
+        wheels = FakeWheels(clock, gain=0.7)  # a slow base: 0.10 needs 0.143, over the loop's top of 0.13
 
         class Moving(FakeSession):  # the room as seen from where the fake base really is
             def latest(self):
@@ -151,16 +151,31 @@ class Drive(unittest.TestCase):
                 return room_scan((wheels.x, 0.0, 0.0), half=3.0)
         session = Moving(clock, [])
         log = new_log()
-        loop = base_check.Loop(P, 0.10, 0.6)
+        p = dict(P, max_speed=0.2)  # as --max-speed does: leave the loop room above the asked speed
+        loop = base_check.Loop(p, 0.10, 0.6)
         states = []
         update = loop.motion.update
         loop.motion.update = lambda *a: states.append(update(*a)) or states[-1]
-        base_check.drive(wheels, session, P, "line", 0.10, 0.6, log, clock, clock.sleep, loop=loop)
-        self.assertEqual(log["stop_reason"], "target")
+        base_check.drive(wheels, session, p, "line", 0.10, 0.6, log, clock, clock.sleep, loop=loop)
+        self.assertIn(log["stop_reason"], ("target", "timeout"))  # 0.7 * 0.13 = 0.091 m/s: maybe not in time
         self.assertEqual(wheels.calls[-1], "stop")
         self.assertGreater(sum(s.trusted for s in states), 0.8 * len(states))  # fresh scans each time
         self.assertAlmostEqual(loop.top, 0.10 * base_check.TOP_RATIO)
         self.assertLessEqual(max(v for v, _ in wheels.sends), loop.top + 1e-9)
+        self.assertAlmostEqual(max(v for v, _ in wheels.sends), loop.top, places=6)  # it did push to the cap
+
+    def test_a_slow_loop_counts_inside_the_period(self):
+        clock = Clock()
+        wheels = FakeWheels(clock)
+        session = FakeSession(clock, room_scan((0, 0, 0), half=3.0))
+        log = new_log()
+
+        class Slow:
+            def command(self, t, odom, scan, sent, sent_at):
+                clock.t += 0.11  # a slow match: with PERIOD added on top the sends were 0.16 s apart
+                return (0.15, 0.0)
+        base_check.drive(wheels, session, P, "line", 0.15, 0.3, log, clock, clock.sleep, loop=Slow())
+        self.assertEqual(log["stop_reason"], "target")
 
     def test_a_loop_run_needs_the_strip_its_top_speed_can_cover(self):
         need = base_check.Loop.clear_metres(2.5) + base_check.LINE_MARGIN

@@ -184,11 +184,7 @@ def drive(wheels, session, p, mode, rate, target, log, clock=time.monotonic, sle
         log["drive_start"] = last_scan = clock()
         turned, last_send = 0.0, None
         newest = log["scans"][-1][1] if log["scans"] else None  # the newest revolution, for the loop
-        fresh = False  # a scan came in that the loop has not seen
         while True:
-            if loop is not None and fresh:
-                v, w = loop.command(clock(), odom, newest, (v, w), last_send)
-                fresh = False
             tick = clock()
             if last_send is not None and tick - last_send > SEND_GAP:
                 log["stop_reason"] = "send gap"  # a slow odometry read or loop: the base may have stopped and restarted
@@ -201,7 +197,7 @@ def drive(wheels, session, p, mode, rate, target, log, clock=time.monotonic, sle
             scan = log_scan(session, log)
             if scan:
                 last_scan = clock()
-                newest, fresh = scan, True
+                newest = scan
             done = math.hypot(odom[0] - start[0], odom[1] - start[1]) if mode == "line" else abs(turned)
             if scan and emergency(scan, p, mode, v):
                 log["stop_reason"] = "emergency"
@@ -213,6 +209,8 @@ def drive(wheels, session, p, mode, rate, target, log, clock=time.monotonic, sle
                 log["stop_reason"] = "timeout"
             if "stop_reason" in log:
                 break
+            if loop is not None and scan:  # at once, inside this period: its time comes off the sleep
+                v, w = loop.command(clock(), odom, newest, (v, w), last_send)
             sleep(max(0.0, PERIOD - (clock() - tick)))
     finally:  # any exit, Ctrl+C and SIGTERM included: S# before anything else
         with signals_ignored():
