@@ -94,3 +94,17 @@ def test_free_ahead_lets_the_robot_drive_off_centre_through_a_0_65_m_gap():
     assert (
         navigation.free_ahead(robot, walls(0.65), 0.0, outline=True) >= navigation.LOOK_AHEAD - 1e-9
     )
+
+
+def test_the_close_plan_walks_up_to_the_operator_it_follows():
+    # The wide berth finds no way through the 0.65 m gap; the goal is the operator beyond it.
+    operator = Circle(3.0, 0.0, 0.25)
+    path = plan_path((0, 0), (3.0, 0.0), walls(0.65) + [operator], near_side=True, heading=0.0)
+    assert path is not None and path[-1][0] > 2.0
+
+
+def test_the_close_plan_gives_up_when_its_checks_run_out():
+    shapes = walls(0.65)
+    budget = [3]
+    path = navigation._grid_path((0, 0), (3, 0), shapes, False, 0.25, [])
+    assert path_clear(path, (0, 0), 0.0, shapes, OUTLINE_MARGIN, budget) == -1

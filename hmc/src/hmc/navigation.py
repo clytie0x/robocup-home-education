@@ -48,7 +48,9 @@ CLOSE_PLAN = False
 OUTLINE_MARGIN = 0.07  # metres: the 0.03 m the robot must keep, plus room for not driving the line exactly
 OUTLINE_STEP = 0.05  # metres between two outline checks along a segment
 CORNER_STEP = math.radians(5)  # headings checked where the path turns
-TIGHT_ROUNDS = 5  # tries to plan around the spots where the outline did not fit
+TIGHT_ROUNDS = 3  # tries to plan around the spots where the outline did not fit
+# Outline checks one close plan may spend (on the Pi a plan with 200 shapes took 0.29 s at 5 rounds).
+CHECK_BUDGET = 400
 NEAR = 0.3  # metres: a shape farther than this from the corner circle cannot come within the margin
 # True when the last plan_path needed the close plan. The Navigator then judges the room ahead by
 # the real outline too, or the circle would stop it in front of the gap it just planned through.
@@ -75,11 +77,16 @@ def plan_path(start: Point, goal: Point, shapes: list[Shape],
         return path
     LAST_PLAN_TIGHT = True
     avoid: list[Point] = []
+    # The goal itself (the operator we follow) is not checked: the robot stops short of it anyway.
+    others = [s for s in shapes if s.clearance(goal) > 0]
+    budget = [CHECK_BUDGET]
     for _ in range(TIGHT_ROUNDS):
         path = _grid_path(start, goal, shapes, near_side, hmc_world.INSCRIBED + TIGHT_SLACK, avoid)
         if path is None:
             return None
-        bad = path_clear(path, start, heading, shapes, OUTLINE_MARGIN)
+        bad = path_clear(path, start, heading, others, OUTLINE_MARGIN, budget)
+        if bad == -1:
+            return None  # out of checks: no close plan this time, the next replan tries again
         if bad is None:
             return path
         points = [start] + path
@@ -111,8 +118,10 @@ def outline_gap(pos: Point, heading: float, shapes: list[Shape]) -> float:
 
 
 def path_clear(path: list[Point], start: Point, start_heading: float | None,
-               shapes: list[Shape], margin: float) -> int | None:  # fmt: skip
+               shapes: list[Shape], margin: float, budget: list[int] | None = None) -> int | None:  # fmt: skip
     """Index of the first segment of start + path where the outline comes within margin, else None.
+
+    budget, if given, is a one-item list of outline checks left; when it runs out the answer is -1.
 
     Along a segment the robot faces the segment; where the path turns, it turns on the spot
     through the headings between (CORNER_STEP). On the first segment a shape the robot already
@@ -135,6 +144,10 @@ def path_clear(path: list[Point], start: Point, start_heading: float | None,
             checks += [(a, facing + turn * k / (n + 1)) for k in range(1, n + 1)]
         n = max(1, math.ceil(length / OUTLINE_STEP))
         checks += [((a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n), along) for k in range(n + 1)]
+        if budget is not None:
+            budget[0] -= len(checks)
+            if budget[0] < 0:
+                return -1
         if any(outline_gap(p, h, shapes) < least for p, h in checks):
             return i
         facing = along
