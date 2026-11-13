@@ -14,6 +14,7 @@ import contextlib
 import json
 import math
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -29,6 +30,7 @@ import geometry
 import lidar
 import link as link_module
 import params
+import remote_plan
 import safety
 import wheels as wheels_module
 from body import Body
@@ -48,8 +50,20 @@ _plan_path = hmc_navigation.plan_path
 NO_PATH = {}
 
 
+# The planner in its own process (plan_server.py), when run_follow started one: see main().
+REMOTE = None
+PLANNER = {"remote": 0, "local": 0}  # plans of each kind since the last log record
+
+
 def _plan_path_logged(start, goal, shapes, near_side=False, heading=None):
-    path = _plan_path(start, goal, shapes, near_side, heading)
+    if REMOTE is not None and REMOTE.alive():
+        path = REMOTE.plan(start, goal, shapes, near_side, heading)
+        PLANNER["remote"] += 1
+    else:
+        if REMOTE is not None:
+            REMOTE.plan(start, goal, shapes, near_side, heading)  # keep asking: it answers once it is up
+        path = _plan_path(start, goal, shapes, near_side, heading)
+        PLANNER["local"] += 1
     if path is None:
         NO_PATH.update(start=list(start), goal=list(goal), near_side=near_side, heading=heading,
                        shapes=[[type(s).__name__] + [round(v, 3) for v in vars(s).values()] for s in shapes])
@@ -60,6 +74,7 @@ hmc_navigation.plan_path = _plan_path_logged
 
 PERIOD = 0.1  # s, one LiDAR revolution
 SLOW_CYCLE = 0.4  # s; a longer cycle stops the wheels and ends the run
+PLAN_PORT = 5603  # plan_server.py
 SAVE_EVERY = 10  # save every 10th JPEG; every scan is saved, so a lost track can be replayed
 SEARCH_AGAIN_EVERY = 10.0  # s; after asking the operator back, turn on the spot again (hmc.follower)
 # Finding the operator before the first lock (Task 7): turn on the spot while every frame goes to the
@@ -244,6 +259,7 @@ def cycle(state, now):
     answer = state.link.latest() if state.link is not None else None
     link_alive = state.link is not None and state.link.alive(now, p["jetson_silence"])
 
+    t_read = state.clock() - now
     # 2. Depth obstacles (only once the camera pose is measured), the speed cap, the pose.
     depth_points = None
     if frame is not None and params.depth_gates_open(p):
@@ -266,10 +282,13 @@ def cycle(state, now):
         if enrol != state.enrol_said:
             print("enrol: %s" % enrol)
             state.enrol_said = enrol
+    t_depth = state.clock() - now
     v_was, w_was = state.sent
     seen = senses.read(now, pose, v_was, w_was, dt, scan, depth_points, answer, link_alive, follower.score)
+    t_senses = state.clock() - now
     follower.watch(seen)  # every cycle, before step: it keeps track of everyone
     follower.step(seen, dt)
+    t_brain = state.clock() - now
 
     # 4. The command, and the stops that override the brain.
     stop = None
@@ -332,9 +351,12 @@ def cycle(state, now):
         "why": getattr(senses, "why", None),  # the senses rule behind an ambiguous cycle or a dropped track
         "enrol": enrol,
         "cycle_time": cycle_time,  # s from cycle start to send
+        "t": [round(x, 4) for x in (t_read, t_depth, t_senses, t_brain)],  # s from cycle start: sensors read, depth, senses, brain
+        "planner": dict(PLANNER),
         "period": period,  # s since the previous cycle started
     }
     state.log.write(record)
+    PLANNER.update(remote=0, local=0)
     if NO_PATH and state.n % 20 == 0:  # at most one dump every 2 s
         state.log.write({"time": now, "no_path": dict(NO_PATH)})
         NO_PATH.clear()
@@ -397,6 +419,9 @@ def main(argv=None):
     parser.add_argument("--drive", action="store_true", help="open the wheel port and drive (default: dry run)")
     parser.add_argument("--max-speed", type=float, metavar="V", help="top speed for this run, m/s")
     parser.add_argument("--no-jetson", action="store_true", help="run without the Jetson (nobody can be enrolled)")
+    parser.add_argument("--planner", choices=["pi", "jetson", "here"], default="pi",
+                        help="where paths are planned: a second process on the Pi (default), the Jetson's"
+                             " plan_server.py, or in the cycle itself (slow on the Pi)")
     args = parser.parse_args(argv)
     p = params.load()
     why = refusal(args.drive, args.max_speed, p)
@@ -409,8 +434,16 @@ def main(argv=None):
         signal.signal(sig, _interrupt)
     log = Log(LOG_ROOT / time.strftime("%Y%m%d-%H%M%S"))
     print("logging to", log.folder)
-    session = cam = link = wheels = None
+    session = cam = link = wheels = server = None
+    global REMOTE
     try:
+        if args.planner == "pi":
+            server = subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent / "plan_server.py"),
+                                       "--host", "127.0.0.1"], stdout=subprocess.DEVNULL)
+        if args.planner != "here":
+            host = "127.0.0.1" if args.planner == "pi" else p["jetson_host"]
+            REMOTE = remote_plan.RemotePlanner(host, PLAN_PORT, p["robot_radius"])
+            REMOTE.start()
         session = lidar.LidarSession()
         cam = camera.Camera()
         cam.start()
@@ -419,6 +452,8 @@ def main(argv=None):
             link.start()
         wheels = open_wheels(args.drive, p)
         state = State(p, wheels, session, cam, link, log, args.max_speed, encode=link_module._encode_jpeg)
+        if REMOTE is not None:
+            hmc_navigation.REPLAN_ON_NEW_SHAPES = True  # a plan is only a message now: ask every cycle
         print("%s. Operator: stand alone within 2.5 m in front of the robot, then press Enter."
               % ("DRIVE" if args.drive else "DRY RUN, the wheels stay off"))
         input()
@@ -434,9 +469,11 @@ def main(argv=None):
         with signals_ignored():
             if wheels is not None:
                 wheels.close()  # S# again, before anything else is shut down
-            for device in (link, cam):
+            for device in (link, cam, REMOTE):
                 if device is not None:
                     device.stop()
+            if server is not None:
+                server.terminate()
             if session is not None:
                 session.close()
             log.close()
