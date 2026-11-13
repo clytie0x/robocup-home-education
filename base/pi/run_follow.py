@@ -217,6 +217,8 @@ def cycle(state, now):
         "operator_kept": None if operator is None else list(operator),  # the brain's smoothed operator
         "people": [list(pt) for pt in seen.people.values()],
         "obstacles": len(seen.obstacles),
+        "path": len(getattr(getattr(follower, "navigator", None), "path", []) or []),  # 0 while following: no way found
+        "depth_points": None if depth_points is None else len(depth_points),
         "nearest": float(numpy.hypot(points[:, 0], points[:, 1]).min()) if len(points) else None,  # m from the base centre
         "stop": stop,
         "why": getattr(senses, "why", None),  # the senses rule behind an ambiguous cycle or a dropped track
