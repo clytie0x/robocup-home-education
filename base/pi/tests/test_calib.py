@@ -9,9 +9,11 @@ P = params.load()
 DT = 0.1
 
 
-def drive(est, commands, gain=1.0, turn_gain=1.0, lag=0.0, decel=None, delay=0.0, drift=0.0, t0=0.0):
+def drive(est, commands, gain=1.0, turn_gain=1.0, lag=0.0, decel=None, delay=0.0, drift=0.0, t0=0.0, span=0.0):
     """A simulated base: it does gain * the command `lag` seconds late; after a stop it rolls on
-    `delay` seconds, then slows at `decel`. drift: rad per metre it turns by itself."""
+    `delay` seconds, then slows at `decel`. drift: rad per metre it turns by itself.
+    span: report v and w averaged over the last span seconds, as M1 does (0: the instant values)."""
+    past = []
     sent = []  # (time, v, w)
     v_now = 0.0
     t = t0
@@ -26,7 +28,11 @@ def drive(est, commands, gain=1.0, turn_gain=1.0, lag=0.0, decel=None, delay=0.0
         else:
             v_now = gain * va
         w_now = turn_gain * wa + drift * v_now
-        est.observe(MotionState(t, (0.0, 0.0, 0.0), v_now, w_now, True, 0.9), (v_cmd, w_cmd), t)
+        past = [x for x in past if x[0] > t - span + 1e-9] + [(t, v_now, w_now)]
+        v_seen = sum(x[1] for x in past) / len(past)
+        w_seen = sum(x[2] for x in past) / len(past)
+        reported = (len(past) - 1) * DT  # the average spans from the first sample kept to now
+        est.observe(MotionState(t, (0.0, 0.0, 0.0), v_seen, w_seen, True, 0.9, reported), (v_cmd, w_cmd), t)
         t = round(t + DT, 6)
     return t
 
@@ -84,6 +90,21 @@ class EstimatesTest(unittest.TestCase):
         self.assertTrue(trusted)
         self.assertAlmostEqual(decel, 0.064, delta=0.0064)
         self.assertAlmostEqual(delay, 0.27, delta=0.1)
+
+    def test_braking_and_latency_from_span_averaged_speeds(self):
+        # M1 reports speeds averaged over 0.5 s; stamped at the span's middle they give the same
+        # estimates as instant speeds (both: decel 0.064, delay 0.2125, latency 0.32 in this simulation)
+        est = calib.BaseEstimates(dict(P, decel=0.5, stop_delay=0.0))
+        t = 0.0
+        for _ in range(4):
+            t = drive(est, [(0.12, 0.0)] * 30 + [(0.0, 0.0)] * 40, decel=0.064, delay=0.27, t0=t, span=0.5)
+        self.assertTrue(est.decel[2])
+        self.assertAlmostEqual(est.decel[0], 0.064, delta=0.0064)
+        self.assertAlmostEqual(est.stop_delay[0], 0.27, delta=0.1)
+        est = calib.BaseEstimates(P)
+        drive(est, ([(0.0, 0.4)] * 15 + [(0.0, -0.4)] * 15) * 5, lag=0.4, span=0.5)
+        self.assertTrue(est.latency[2])
+        self.assertAlmostEqual(est.latency[0], 0.40, delta=0.1)
 
     def test_safe_braking_is_never_better_than_the_floor(self):
         est = calib.BaseEstimates(P)  # floor: decel 0.064, delay 0.27

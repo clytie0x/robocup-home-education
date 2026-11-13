@@ -385,7 +385,8 @@ def cycle(state, now):
         "t": [round(x, 4) for x in (t_read, t_depth, t_senses, t_brain)],  # s from cycle start: sensors read, depth, senses, brain
         "planner": dict(PLANNER),
         "measured": None if state.measured is None else [round(state.measured.v, 4), round(state.measured.w, 4),
-                                                          state.measured.trusted, round(state.measured.agree, 2)],
+                                                          state.measured.trusted, round(state.measured.agree, 2),
+                                                          round(state.measured.span, 3)],  # s the v and w average over
         "estimates": {name: [round(getattr(state.estimates, name)[0], 4), getattr(state.estimates, name)[2]]
                       for name in ("speed_gain", "turn_gain", "drift_per_m", "latency", "decel", "stop_delay")},
         "period": period,  # s since the previous cycle started

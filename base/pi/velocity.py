@@ -24,6 +24,17 @@ class VelocityLoop:
         before = [x for x in self.wanted if x[0] <= t + 1e-9]
         return before[-1][1:] if before else (0.0, 0.0)
 
+    def _wanted_mean(self, t0, t1):
+        """The wish averaged over [t0, t1] (it holds from each entry to the next)."""
+        if t1 - t0 < 1e-9:
+            return self._wanted_at(t1)
+        cuts = [t0] + [x[0] for x in self.wanted if t0 < x[0] < t1] + [t1]
+        total_v = total_w = 0.0
+        for a, b in zip(cuts, cuts[1:]):
+            v, w = self._wanted_at(a)
+            total_v, total_w = total_v + v * (b - a), total_w + w * (b - a)
+        return total_v / (t1 - t0), total_w / (t1 - t0)
+
     def reset(self, t):
         """A stop overrode the command: nothing was driven, so nothing may build up meanwhile."""
         self.integral_v = self.integral_w = 0.0
@@ -51,8 +62,10 @@ class VelocityLoop:
         v = v_wanted / gain_v
         w = w_wanted / gain_w - drift * v_wanted  # the base turns drift rad per metre by itself
         if state.trusted:
-            # v, w average over the state's span: compare with what was wanted at its middle
-            then_v, then_w = self._wanted_at(state.t - self.estimates.latency[0] - state.span / 2)
+            # v, w average over the state's span: compare with the wish averaged over that span, a
+            # latency earlier (the wish at one instant kicks the P term while the wish changes)
+            acted = state.t - self.estimates.latency[0]
+            then_v, then_w = self._wanted_mean(acted - state.span, acted)
             err_v, err_w = then_v - state.v, then_w - state.w
             at_cap_v = v + KP_V * err_v + self.integral_v >= top and err_v > 0
             if not at_cap_v:  # no wind-up while the command is already at the cap

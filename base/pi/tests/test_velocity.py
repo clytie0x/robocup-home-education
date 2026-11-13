@@ -29,6 +29,16 @@ def run(loop, wanted, seconds, gain=0.8, cap=0.12, drift=0.0, turn_gain=1.0):
 
 
 class VelocityLoopTest(unittest.TestCase):
+    def test_a_wish_change_inside_the_span_is_averaged_too(self):
+        loop = velocity.VelocityLoop(P, FakeEstimates())
+        for k in range(11):
+            loop.command(0.10, 0.0, MotionState(0.1 * k, (0, 0, 0), 0.10, 0.0, True, 0.9))
+        loop.command(0.05, 0.0, MotionState(1.1, (0, 0, 0), 0.10, 0.0, True, 0.9, 0.5))
+        # at 1.2 s the 0.5 s average of a base that follows the wish is 0.4 s at 0.10 and 0.1 s at 0.05
+        # (the wish at the span's middle, 0.10, read this as 0.01 too slow and pushed 0.056)
+        v, _ = loop.command(0.05, 0.0, MotionState(1.2, (0, 0, 0), 0.09, 0.0, True, 0.9, 0.5))
+        self.assertAlmostEqual(v, 0.05, places=6)
+
     def test_a_span_averaged_speed_is_compared_with_the_wish_at_its_middle(self):
         loop = velocity.VelocityLoop(P, FakeEstimates())
         for k in range(11):

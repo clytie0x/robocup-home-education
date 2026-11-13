@@ -324,6 +324,7 @@ class Loop(unittest.TestCase):
             record = self.cycle(state, 0.1 * i)
             base.advance(0.1)
         self.assertIsNotNone(record["measured"])
+        self.assertEqual(len(record["measured"]), 5)  # v, w, trusted, agree, span
         self.assertEqual(record["estimates"]["speed_gain"], [0.8, True])
         self.assertAlmostEqual(base.sent[-1][0], 0.12, delta=0.001)  # 0.1 / 0.8 = 0.125, capped at max_speed
 
