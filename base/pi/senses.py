@@ -137,6 +137,17 @@ class RealSenses:
         others = [c for c in cands if c != self.tracker.pos and PEOPLE_RANGE[0] <= math.hypot(*self._base(c)) <= PEOPLE_RANGE[1]]
         everybody = self._ids([geometry.base_to_odom(self._base(c), pose) for c in others])
         people = self._sort_out(now, dict(zip(everybody, others)), everybody, seen)
+        pid_of = {c: pid for pid, c in zip(everybody, others) if pid in people}
+        # A look goes to a person only when its bearing points at exactly one candidate (not _match's
+        # nearest-range rule, made for the operator: it hands a passer-by's look to whoever stands at the
+        # operator's range), and never a look that scores as the operator (the operator coasting off the track).
+        paired = []
+        for b, l in seen:
+            near = [c for c in cands if abs(self._camera_bearing(c) - b) <= MATCH_DEG]
+            if len(near) == 1 and near[0] in pid_of and score(l) < LOOK_MATCH:
+                paired.append((near[0], l))
+        twice = {c for c, _ in paired if sum(1 for d, _ in paired if d == c) > 1}
+        looks = {pid_of[c]: l for c, l in paired if c not in twice}  # two camera people on one track: whose look is it?
         mixed = self._mixed_up(now, operator, everybody)  # furniture too: it may be a stranger who never moved
         if mixed:
             # They may now be one LiDAR object; when it splits, nobody can say which piece is the
@@ -149,10 +160,10 @@ class RealSenses:
         self.ambiguous = now - self._unsure_at <= UNSURE_LATCH
         self._last_now = now
         if self.ambiguous:
-            look = None  # never learn or score a look from a merged scene
+            look, looks = None, {}  # never learn or score a look from a merged scene
         everyone = list(people.values()) + ([operator] if operator is not None else [])
         obstacles = self.memory.update(now, pose, scan, depth_points, everyone)
-        return Senses(now, operator, look, people, obstacles)
+        return Senses(now, operator, look, people, obstacles, looks=looks)
 
     def _sort_out(self, now, cand_of, everybody, seen):
         """The people among all the candidates; the rest is furniture, kept for the next cycle."""

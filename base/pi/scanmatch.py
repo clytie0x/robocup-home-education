@@ -125,3 +125,25 @@ def match(before, after, p=None, guess=(0.0, 0.0, 0.0), iterations=60, max_point
 def scan_shift(before, after, p=None, guess=(0.0, 0.0, 0.0)):
     """(dx, dy, dyaw) of the base from scan `before` to scan `after`; see match()."""
     return match(before, after, p, guess)[:3]
+
+
+def scan_match(reference, scan, guess=(0.0, 0.0, 0.0), p=None):
+    """(dx, dy, dyaw, share, slide): the pose `scan` was taken from in the frame of `reference`,
+    the share of its points agreeing within AGREE (see match()), and slide, 0 to 1: how freely the
+    match can slide in one direction. slide is 1 when every agreeing point lies on surfaces of one
+    direction (two parallel walls: the match says nothing along them), near 0 when the directions
+    spread evenly (a room with corners)."""
+    p = p or params.load()
+    dx, dy, dyaw, share = match(reference, scan, p, guess, max_points=120)
+    fixed, moving = points(reference, p), points(scan, p)
+    along = tangents(fixed)
+    c, s = math.cos(dyaw), math.sin(dyaw)
+    moved = moving[::math.ceil(len(moving) / 120)] @ np.array([[c, -s], [s, c]]).T + (dx, dy)
+    d2 = ((moved[:, None, :] - fixed[None, :, :]) ** 2).sum(axis=2)
+    index = d2.argmin(axis=1)
+    u = along[index[d2[np.arange(len(moved)), index] < AGREE ** 2]]
+    u = u[np.hypot(*u.T) > 0]
+    if len(u) == 0:
+        return dx, dy, dyaw, share, 1.0
+    low, high = np.linalg.eigvalsh(u.T @ u / len(u))  # spread of the surface directions
+    return dx, dy, dyaw, share, float(1.0 - low / high)

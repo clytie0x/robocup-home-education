@@ -39,6 +39,52 @@ def offset_scan(pose, half, step_deg, start_deg):
     return scan
 
 
+def world_scan(pose, walls, legs=(), step_deg=0.9, start_deg=0.0, reach=8.0):
+    """What the LiDAR sees from base pose (x, y, yaw) among wall segments ((x0, y0), (x1, y1)) and
+    0.05 m legs at (x, y); 0 (no return) where a ray meets nothing within reach. 400 rays as on the robot."""
+    sx, sy = geometry.base_to_odom((P["lidar_x"], 0.0), pose)
+    scan = []
+    for i in range(int(360 / step_deg)):
+        deg = -180 + start_deg + i * step_deg
+        a = pose[2] + math.radians(deg)
+        c, s = math.cos(a), math.sin(a)
+        hits = []
+        for (x0, y0), (x1, y1) in walls:
+            ex, ey, wx, wy = x1 - x0, y1 - y0, x0 - sx, y0 - sy
+            den = c * ey - s * ex
+            if abs(den) > 1e-12:
+                t, u = (wx * ey - wy * ex) / den, (wx * s - wy * c) / den
+                if t > 0 and 0 <= u <= 1:
+                    hits.append(t)
+        for lx, ly in legs:
+            bx, by = lx - sx, ly - sy
+            along = bx * c + by * s
+            off2 = bx * bx + by * by - along * along
+            if along > 0 and off2 < 0.05 ** 2:
+                hits.append(along - math.sqrt(0.05 ** 2 - off2))
+        t = min(hits, default=0.0)
+        scan.append((deg, t if t <= reach else 0.0))
+    return scan
+
+
+def box(x0, y0, x1, y1):
+    return [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))]
+
+
+ROOM = box(-1.5, -2.0, 3.0, 2.5)  # 4.5 m by 4.5 m, the base off centre, four corners
+CORRIDOR = [((-30.0, -0.8), (30.0, -0.8)), ((-30.0, 0.8), (30.0, 0.8))]  # ends beyond the LiDAR's reach
+
+
+def crowd(x, y, n=8, radius=0.5):
+    """Legs of n people standing in a ring around (x, y)."""
+    legs = []
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        px, py = x + radius * math.cos(a), y + radius * math.sin(a)
+        legs += [(px - 0.1 * math.sin(a), py + 0.1 * math.cos(a)), (px + 0.1 * math.sin(a), py - 0.1 * math.cos(a))]
+    return legs
+
+
 class Thinned(unittest.TestCase):
     def test_thinned_match_keeps_the_surfaces_of_the_full_scan(self):
         # 400 returns a revolution, as on the robot, each revolution's rays starting somewhere else.
@@ -94,6 +140,40 @@ class ScanShift(unittest.TestCase):
     def test_too_few_points(self):
         with self.assertRaises(ValueError):
             scanmatch.scan_shift([(0.0, 1.0)] * 5, room_scan((0, 0, 0)))
+
+
+class ScanMatch(unittest.TestCase):
+    def test_recovers_a_known_shift_in_a_room_with_corners(self):
+        moved = (0.16, -0.12, math.radians(5))  # 0.20 m and 5 deg
+        dx, dy, dyaw, share, slide = scanmatch.scan_match(world_scan((0, 0, 0), ROOM), world_scan(moved, ROOM, start_deg=0.4), p=P)
+        self.assertAlmostEqual(dx, moved[0], delta=0.02)
+        self.assertAlmostEqual(dy, moved[1], delta=0.02)
+        self.assertAlmostEqual(math.degrees(dyaw), 5.0, delta=0.5)
+        self.assertGreater(share, 0.9)
+        self.assertLess(slide, 0.2)
+
+    def test_reversed_heading_matches_the_same_place(self):
+        moved = (0.10, 0.05, math.pi + math.radians(3))
+        dx, dy, dyaw, share, _ = scanmatch.scan_match(world_scan((0, 0, 0), ROOM), world_scan(moved, ROOM, start_deg=0.4), (0.0, 0.0, math.pi), P)
+        self.assertAlmostEqual(dx, moved[0], delta=0.02)
+        self.assertAlmostEqual(dy, moved[1], delta=0.02)
+        self.assertAlmostEqual(math.degrees(dyaw), 183.0, delta=0.5)
+        self.assertGreater(share, 0.9)
+
+    def test_a_plain_corridor_slides(self):
+        # Review Focus 1: two parallel walls fix sideways and heading only
+        moved = (0.3, 0.1, math.radians(3))
+        _, dy, dyaw, share, slide = scanmatch.scan_match(world_scan((0, 0, 0), CORRIDOR), world_scan(moved, CORRIDOR, start_deg=0.4), p=P)
+        self.assertAlmostEqual(dy, 0.1, delta=0.02)
+        self.assertAlmostEqual(math.degrees(dyaw), 3.0, delta=0.5)
+        self.assertGreater(share, 0.6)  # far wall returns stand too far apart to agree within 5 cm: 0.85
+        self.assertGreater(slide, 0.8)
+
+    def test_people_in_the_scan_lower_the_share(self):
+        # Review Focus 5: the crowd hides the walls the stored scan saw
+        moved = (0.05, 0.0, 0.0)
+        *_, share, _ = scanmatch.scan_match(world_scan((0, 0, 0), ROOM), world_scan(moved, ROOM, crowd(0.05, 0.0), start_deg=0.4), p=P)
+        self.assertLess(share, 0.6)
 
 
 if __name__ == "__main__":

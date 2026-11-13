@@ -431,5 +431,76 @@ class Furniture(unittest.TestCase):
             ambiguous.append(s2.ambiguous or not s2.locked)
         self.assertIn(True, ambiguous)  # held or dropped next to the stranger, never drove on blind
 
+
+class Looks(unittest.TestCase):
+    LEFT, RIGHT = (1.5, 0.8), (1.5, -0.8)
+    A, B = (0.1, 0.2), (0.3, 0.4)
+
+    def two(self, s):
+        scan = scan_of(person(*self.LEFT) + person(*self.RIGHT))
+        return scan, read(s, 0.0, scan, Answer(0.0, [seen(*self.LEFT, self.A), seen(*self.RIGHT, self.B)]))
+
+    def test_two_people_in_view_give_two_looks_under_their_ids(self):
+        _, got = self.two(RealSenses(P))
+        self.assertEqual(len(got.people), 2)
+        self.assertEqual(set(got.looks), set(got.people))
+        for pid, look in got.looks.items():
+            self.assertEqual(look, self.A if got.people[pid][1] > 0 else self.B)
+
+    def test_a_person_seen_only_by_the_lidar_has_no_look(self):
+        s = RealSenses(P)
+        scan, _ = self.two(s)
+        got = read(s, 0.1, scan, Answer(0.1, [seen(*self.LEFT, self.A)]))
+        self.assertEqual(len(got.people), 2)  # the right one still counts: the camera saw them 0.1 s ago
+        (pid,) = got.looks
+        self.assertGreater(got.people[pid][1], 0)
+        self.assertEqual(got.looks[pid], self.A)
+
+    def test_a_stale_answer_gives_no_looks(self):
+        s = RealSenses(P)
+        scan, _ = self.two(s)
+        both = [seen(*self.LEFT, self.A), seen(*self.RIGHT, self.B)]
+        got = read(s, 1.0, scan, Answer(0.0, both))  # 1 s late
+        self.assertEqual(len(got.people), 2)
+        self.assertEqual(got.looks, {})
+        got = read(s, 1.1, scan, Answer(1.1, both), link_alive=False)
+        self.assertEqual(got.looks, {})
+
+    def test_looks_leave_the_operator_choice_unchanged(self):
+        s = enrolled()  # the operator at (1.5, 0)
+        scan = scan_of(person(1.5, 0.0) + person(*self.LEFT))
+        got = read(s, 0.1, scan, Answer(0.1, [seen(1.5, 0.0, OPERATOR), seen(*self.LEFT, self.A)]))
+        self.assertTrue(s.locked)
+        self.assertAlmostEqual(got.operator[1], 0.0, delta=0.1)
+        self.assertEqual(got.operator_look, OPERATOR)
+        self.assertEqual(set(got.looks), set(got.people))
+        self.assertEqual(list(got.looks.values()), [self.A])  # the operator's own look is not among them
+
+    def test_two_camera_people_on_one_track_give_no_look(self):
+        s = RealSenses(P)
+        scan = scan_of(person(*self.LEFT) + person(*self.RIGHT))
+        near_left = (self.LEFT[0] + 0.1, self.LEFT[1] + 0.05)  # within the bearing rule of the left track
+        got = read(s, 0.0, scan, Answer(0.0, [seen(*self.LEFT, self.A), seen(*near_left, self.B), seen(*self.RIGHT, self.B)]))
+        self.assertEqual(len(got.looks), 1)  # the right one only: whose look the left track has, nobody knows
+        (pid,) = got.looks
+        self.assertLess(got.people[pid][1], 0)
+
+    def test_a_look_is_not_handed_to_whoever_stands_at_the_operator_range(self):
+        # Fable review: locked on the operator at 2.3 m; a person at 2.3 m and another at 2.8 m, both
+        # within 8 deg of the camera bearing of the far one. The camera sees only the far one.
+        s = enrolled(2.2, -0.6)
+        front, back = (2.3, -0.05), (2.8, 0.25)  # camera bearings about -2.6 and +4.5 deg
+        scan = scan_of(person(2.2, -0.6) + person(*front) + person(*back))
+        got = read(s, 0.1, scan, Answer(0.1, [seen(2.2, -0.6, OPERATOR), seen(*back, self.B)]))
+        self.assertTrue(s.locked)
+        self.assertEqual(got.looks, {})  # two candidates in the bearing window: nobody gets B
+
+    def test_the_operators_own_look_never_goes_to_another_id(self):
+        s = enrolled()  # at (1.5, 0)
+        for i in range(5):  # the operator jumps 0.9 m sideways: the track coasts, the operator is a "person"
+            got = read(s, round(0.1 * (i + 1), 1), scan_of(person(1.5, 0.9)), Answer(round(0.1 * (i + 1), 1), [seen(1.5, 0.9, OPERATOR)]))
+            self.assertNotIn(OPERATOR, got.looks.values())
+
+
 if __name__ == "__main__":
     unittest.main()
