@@ -76,8 +76,9 @@ def test_no_corner_turn_inside_a_tight_corridor():
     path = plan_path((0, 0), (2, 2.5), shapes, heading=0.0)
     assert path is not None and path[-1][1] > 2.0
     assert path_clear(path, (0, 0), 0.0, shapes, OUTLINE_MARGIN) is None
-    # 0.65 m: the corner square leaves 0.069 m for the turn, under the margin, so no path
-    assert plan_path((0, 0), (2, 2.5), l_corridor(0.65), heading=0.0) is None
+    # 0.65 m: the corner square leaves 0.069 m for the turn, under the margin, so no path once the
+    # corner is within the outline horizon (from further away the next plans refuse it)
+    assert plan_path((1.0, 0), (2, 2.5), l_corridor(0.65), heading=0.0) is None
 
 
 def test_outline_gap_faces_the_heading():
@@ -128,3 +129,13 @@ def test_the_close_plan_gives_up_when_its_checks_run_out():
     budget = [3]
     path = navigation._grid_path((0, 0), (3, 0), shapes, False, 0.25, [])
     assert path_clear(path, (0, 0), 0.0, shapes, OUTLINE_MARGIN, budget) == -1
+
+
+def test_a_tight_spot_far_along_the_path_does_not_refuse_it():
+    # a 0.50 m gap (0.05 m each side) 2.5 m away along the path: beyond the outline horizon
+    path = [(0.1 * k, 0.0) for k in range(1, 31)]
+    shapes = walls(0.50)
+    shapes = [Circle(c.x + 1.0, c.y, c.r) for c in shapes]  # the gap at x = 2.5
+    assert path_clear(path, (0, 0), 0.0, shapes, OUTLINE_MARGIN) is None
+    near = [Circle(c.x - 1.5, c.y, c.r) for c in shapes]  # the same gap at x = 1.0: checked
+    assert path_clear(path, (0, 0), 0.0, near, OUTLINE_MARGIN) is not None

@@ -55,6 +55,10 @@ CORNER_STEP = math.radians(5)  # headings checked where the path turns
 TIGHT_ROUNDS = 3  # tries to plan around the spots where the outline did not fit
 # Outline checks one close plan may spend (on the Pi a plan with 200 shapes took 0.29 s at 5 rounds).
 CHECK_BUDGET = 400
+# The outline is checked along the first OUTLINE_HORIZON of the path only. The robot plans again
+# long before it gets further (every 0.5 s at most); a long detour around a chair was refused on
+# 2026-11-14 for a tight spot 2 m beyond where the robot would plan again.
+OUTLINE_HORIZON = 1.5  # metres along the path
 # After a close plan found nothing, the next calls skip it (the planner is called about every
 # 0.1 s on the robot, and a failed close plan cost 0.19 s on the Pi): about half a second.
 TIGHT_COOLDOWN = 4
@@ -160,6 +164,8 @@ def path_clear(path: list[Point], start: Point, start_heading: float | None,
                shapes: list[Shape], margin: float, budget: list[int] | None = None) -> int | None:  # fmt: skip
     """Index of the first segment of start + path where the outline comes within margin, else None.
 
+    Only the segments that start within OUTLINE_HORIZON of the start along the path are checked.
+
     budget, if given, is a one-item list of outline checks left; when it runs out the answer is -1.
 
     Along a segment the robot faces the segment; where the path turns, it turns on the spot
@@ -168,10 +174,14 @@ def path_clear(path: list[Point], start: Point, start_heading: float | None,
     """
     points = [start] + path
     facing = start_heading
+    along_path = 0.0
     for i, (a, b) in enumerate(zip(points, points[1:])):
         length = distance(a, b)
         if length < 1e-9:
             continue
+        if along_path >= OUTLINE_HORIZON:
+            return None  # far enough: the next plans check the rest
+        along_path += length
         along = math.atan2(b[1] - a[1], b[0] - a[0])
         least = margin
         if i == 0:
