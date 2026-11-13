@@ -1,2 +1,4 @@
 tests/run_tests
 tests/run_tests.exe
+build/
+__pycache__/

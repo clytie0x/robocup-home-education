@@ -46,6 +46,12 @@ static void encoder_fault(void)
     CHECK(s.faults == FLAG_LEFT_ENCODER_FAULT);
 
     safety_init(&s);
+    for (uint32_t t = 0u; t <= FAULT_MS; t += 5u) { /* still wheel jittering by a count */
+        safety_check_wheel(&s, WHEEL_LEFT, 50.0f, (t / 5u) % 2u ? 0.0006f : 0.0f, t);
+    }
+    CHECK(s.faults == FLAG_LEFT_ENCODER_FAULT);
+
+    safety_init(&s);
     hold(&s, FAULT_PWM_PCT, 0.0f, 0u, 2000u); /* gentle PWM may not move a heavy base */
     hold(&s, 50.0f, 0.10f, 2005u, 4000u);     /* hard PWM, wheel turning: fine */
     CHECK(s.faults == 0u);

@@ -89,7 +89,7 @@ static void motors_stay_still_after_power_up(void)
     start(&a);
     run(&a, 1000, NULL);
     CHECK(stub_pwm[0] == 0.0f && stub_pwm[1] == 0.0f);
-    CHECK_STR(ask(&a, "E#"), "Eleft:+0000000,right:+0000000,pwm:+000,+000,flags:04#");
+    CHECK_STR(ask(&a, "E#"), "Eleft:+0000000,right:+0000000,pwm:+000,+000,flags:04#\r\n");
 }
 
 static void drives_the_asked_speed(void)
@@ -112,8 +112,8 @@ static void turns_right_on_a_negative_rate(void)
     float s[2];
     run(&a, SETTLE_MS, "F000|-034#"); /* test_wheels.py: 0.40 rad/s right after the 0.862 scale */
     mean_speeds(&a, "F000|-034#", s);
-    CHECK_NEAR(s[0], 0.34f * 0.31f / 2.0f, 0.002f);
-    CHECK_NEAR(s[1], -0.34f * 0.31f / 2.0f, 0.002f);
+    CHECK_NEAR(s[0], 0.34f * TRACK_M / 2.0f, 0.002f);
+    CHECK_NEAR(s[1], -0.34f * TRACK_M / 2.0f, 0.002f);
     CHECK(a.pose.th < -0.3f);
 }
 
@@ -140,7 +140,7 @@ static void silence_ramps_to_a_stop(void)
 
     run(&a, 250, NULL); /* 0.10 m/s at 0.5 m/s^2 takes 0.2 s */
     CHECK(stub_pwm[0] == 0.0f && stub_pwm[1] == 0.0f);
-    CHECK(ask(&a, "E#")[stub_tx_length - 2] == '4'); /* flags:04#, timeout bit set */
+    CHECK(ask(&a, "E#")[stub_tx_length - 4] == '4'); /* flags:04# and CRLF, timeout bit set */
 }
 
 static void stop_message_ramps_down(void)
@@ -193,7 +193,7 @@ static void replies_and_reset(void)
     start(&a);
     run(&a, 1500, "F010|+000#");
     const char *o = ask(&a, "O#");
-    CHECK(strncmp(o, "Ox:+000.", 8) == 0 && strlen(o) == 32);
+    CHECK(strncmp(o, "Ox:+000.", 8) == 0 && strlen(o) == 34);
 
     const char *p = ask(&a, "P#");
     char want_t[16];
@@ -201,7 +201,7 @@ static void replies_and_reset(void)
     CHECK(strncmp(p, "Px:+0000", 8) == 0 && strstr(p, want_t) != NULL);
 
     ask(&a, "R#");
-    CHECK_STR(ask(&a, "O#"), "Ox:+000.00,y:+000.00,th:+000.00#");
+    CHECK_STR(ask(&a, "O#"), "Ox:+000.00,y:+000.00,th:+000.00#\r\n");
 }
 
 static void max_speed_message_lowers_the_cap(void)

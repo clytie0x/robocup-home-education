@@ -33,7 +33,7 @@ static int wheel_looks_wrong(float pwm_pct, float speed_mps)
     if (fabsf(pwm_pct) <= FAULT_PWM_PCT) {
         return 0;
     }
-    return pwm_pct > 0.0f ? speed_mps <= 0.0f : speed_mps >= 0.0f;
+    return pwm_pct > 0.0f ? speed_mps < FAULT_MIN_SPEED_MPS : speed_mps > -FAULT_MIN_SPEED_MPS;
 }
 
 void safety_check_wheel(safety_state *s, int wheel, float pwm_pct, float speed_mps, uint32_t now_ms)

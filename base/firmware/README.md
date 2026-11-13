@@ -1,14 +1,14 @@
-# Base firmware (STM32), hardware-free part
+# Base firmware (STM32F103C8T6)
 
 New firmware for the wheeled base, following the draft in
 [`../docs/firmware-design.md`](../docs/firmware-design.md). **Not approved, never
-flashed.** The chip is an STM32F103C8T6 on a Blue Pill driving an L298N (see below).
-The motor and encoder pin wiring is not known yet, so only the parts with no hardware
-calls are written; they run and are tested on the laptop.
+flashed.** The chip is an STM32F103C8T6 on a Blue Pill driving an L298N. The pin map
+below was read from the old firmware's binary. Flash, check and roll back:
+[`FLASHING.md`](FLASHING.md).
 
 - Lifecycle state: `unconfirmed` (draft until the owner approves the design)
 - Entry point on the laptop: `make test` in this folder
-- Entry point on the board: `main.c`, once `board.c` exists for the identified part
+- Entry point on the board: `make firmware` gives `build/base.bin` (starts at `main.c`)
 
 ## What is here
 
@@ -16,6 +16,9 @@ calls are written; they run and are tested on the laptop.
 |---|---|
 | `config.h` | Every constant. `MEASURE ON THE BOARD` marks placeholders |
 | `board.h` | The only hardware interface (time, tick, encoder counts, PWM, UART, watchdog) |
+| `board.c` | `board.h` for this board: clock, TIM3 PWM, TIM2/TIM4 encoders, USART1 rings, watchdog, LED |
+| `stm32f103.h` | The few registers `board.c` uses, with reference-manual sections |
+| `startup.c`, `stm32f103c8.ld` | Vector table, reset handler, memory layout (64 KiB flash, 20 KiB RAM) |
 | `protocol.c/.h` | Parse `F B S O R M E P`, format the `O`, `P`, `E` replies |
 | `control.c/.h` | Body speed to wheel speeds, accel and brake ramps, PI wheel-speed loop with anti-wind-up, speed from counts |
 | `odom.c/.h` | Pose from encoder counts, midpoint rule |
@@ -23,21 +26,52 @@ calls are written; they run and are tested on the laptop.
 | `app.c/.h` | Ties them together: one control tick, one UART poll |
 | `main.c` | Board loop: wait for the 5 ms tick, poll, tick, kick the watchdog |
 | `tests/` | Plain-C tests; `board_stub.c` stands in for the board, `test_app.c` runs the whole firmware against a model motor |
+| `tools/bringup.py` | Bring-up test on the Pi after flashing (wheels lifted); `test_bringup.py` checks it on the laptop |
 
-Not here yet: `board.c` (needs the part number), the `arm-none-eabi-gcc` build, the
-flash and restore commands.
+## Build and test
 
-## Build and test on the laptop
-
-Needs `gcc` and `make` (MinGW gcc 14.2 and GNU make were used on Windows).
+Needs `gcc` and `make` for the tests (MinGW gcc 14.2 and GNU make were used on Windows),
+and `arm-none-eabi-gcc` (Arm GNU Toolchain) for the board.
 
 ```
 cd base/firmware
 make test
+make firmware
+python -m unittest discover -s tools
 ```
 
-The last line of the test run is `<n> checks, <m> failed`; `make` fails if any check
-fails. `main.c` is only compiled for syntax, since it needs `board.c`.
+The last line of the C test run is `<n> checks, <m> failed`; `make` fails if any check
+fails. `make firmware` prints the image size and the SHA-256 of `build/base.bin`. On the
+laptop the toolchain came from `winget install Arm.GnuArmEmbeddedToolchain` (14.2.Rel1)
+and lives in `C:\Program Files (x86)\Arm GNU Toolchain arm-none-eabi\14.2 rel1\bin`; put
+that on `PATH` if a new shell does not find `arm-none-eabi-gcc`. The build is
+reproducible: a clean rebuild gives the same hash.
+
+## Pin map, read from the old firmware
+
+Source: the 2026-11-14 backup (SHA-256 `5924421e...49ef9`), disassembled with capstone.
+The old firmware is an Arduino sketch on the STM32duino core (HAL underneath): its
+`pinMode`, `digitalWrite`, `HardwareTimer` and HAL encoder calls name the pins through the
+core's Blue Pill tables, which are in the image too.
+
+| Signal | Pin | How sure | Evidence |
+|---|---|---|---|
+| Pi link | USART1, PA9 TX, PA10 RX, 115200 8E1 | high | `Serial.begin(115200, 0x26 = SERIAL_8E1)`; the bootloader answered on this cable |
+| Right motor PWM (L298N enable) | PA6, TIM3_CH1 | high | `HardwareTimer(TIM3)`, channel from the core's PWM pin table for A6 |
+| Left motor PWM | PA7, TIM3_CH2 | high | the same for A7 |
+| Right motor direction | PB13 high = forward, PB12 high = backward | high | `digitalWrite` pair driven by the right wheel's PI output sign |
+| Left motor direction | PB15 high = forward, PB14 high = backward | high | the same for the left wheel |
+| Right encoder | PB6/PB7, TIM4 encoder mode (x4) | high | HAL encoder init on TIM4, counts feed the right wheel's speed |
+| Left encoder | PA0/PA1, TIM2 encoder mode (x4) | high | the same on TIM2, for the left wheel |
+| Encoder direction | right counts up going forward, left counts down | medium-high | the old odometry negates TIM2 and not TIM4; checked by the bring-up test |
+| Which side is "right" | as above | high | the wheel fed `v + w * track / 2` and the yaw `(R - L) / track` |
+| LEDs | PC13 (Blue Pill), PC14, PC15 (blinked at 1 Hz from TIM1) | high | `pinMode` and the TIM1 callback |
+| PB0, PB1 | set as outputs, never written | medium | no `digitalWrite` found for them; the new firmware leaves them as inputs |
+
+Old firmware facts: PWM 100 Hz, 12-bit duty, a deadband of 280 of 4095; a PI loop on
+wheel speed in rad/s with doubles; a 10 ms `delay()` loop; odometry with wheel radius
+0.0762 m, 0.0872222/596 rad per count, track 0.31 m; replies end with `#` and CR LF;
+`th` "wraps" only beyond 360 rad (a degrees mix-up), so in practice it never wraps.
 
 ## Protocol
 
@@ -67,12 +101,12 @@ parity or framing error drops the message it is in. `\r` and `\n` are ignored.
 ## Open decisions for the owner
 
 1. Approve or change the design draft (nothing gets flashed before that).
-2. Letter and format of the fine odometry reply (`P#` above is a proposal). Check that the
-   old firmware does not already use `P`, `M` or `E` for something else.
-3. Does the old firmware's `B` turn the same way as `F` for a positive rate? The new code
-   keeps "left positive" for both; the Pi never sends `B`.
-4. Did the old firmware wrap `th` to plus or minus pi? The new one does not (two turns read
-   12.57), which keeps more information; Pi code that wraps angles works with both.
+2. Letter and format of the fine odometry reply (`P#` above is a proposal). The old
+   firmware answers only `F B S O R`, so `P`, `M` and `E` were free.
+3. PWM frequency: 1 kHz (`PWM_HZ`) instead of the old 100 Hz. Smoother at low speed;
+   the speed per PWM percent may change, so the PWM ladder (design 5) sets `KFF`.
+4. `METERS_PER_COUNT` and `TRACK_M` are derived from the old firmware and the LiDAR scales
+   (0.902 distance, 0.862 yaw), not measured on their own: calibrate (design 4.2, 4.3).
 5. `BRAKE_MPS2` 0.5 m/s² (draft value). Higher stops shorter but may slip on a smooth
    floor.
 6. Brake or coast at zero PWM. The L298N can do both: enable high with both inputs at the
@@ -121,12 +155,10 @@ application starts at 0x08000000 (no separate bootloader). Copies on the Pi at
 `~/firmware-backup/old-1.bin` and `old-2.bin`, and one on the laptop in the sim-ladder
 worktree (not committed: it is someone else's binary).
 
-## What the board photos must still show
+## What is still to be checked at the robot
 
-- The L298N wiring: which Blue Pill pins drive ENA/ENB (they must be timer PWM pins) and
-  IN1 to IN4, and whether the ENA/ENB jumpers are still on (then PWM goes on the IN pins).
-- The ENCODER1/ENCODER2 wiring: which Blue Pill pins the two signal wires reach (they must
-  land on TIM2, TIM3 or TIM4 channels 1 and 2 for hardware encoder mode), and the encoder
-  supply voltage (5 V encoders need 5 V tolerant pins or the level shifter).
+- The pin map above is read from the old firmware, not traced on the board. The bring-up
+  test (`FLASHING.md`, section 2) checks every motor and encoder pin and sign with the
+  wheels lifted before the base drives on the floor.
 - The motor label (rated voltage, rpm, gear ratio) and the L298N output voltage under
-  load.
+  load (one possible cause of the 0.12 m/s cap).

@@ -41,6 +41,7 @@ void app_init(app *a)
 static void reply(const char *text, int length)
 {
     board_uart_write(text, length);
+    board_uart_write("\r\n", 2); /* the old firmware ended every reply with println */
 }
 
 static void handle(app *a, const message *m)
