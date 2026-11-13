@@ -193,3 +193,35 @@ found (load 5.5 to 6.1, rviz2 about 355 % CPU):
 A 2000-frame check of YOLO11n gave median 96.9, 5th percentile 94.3. All four pass the
 15 frames per second and 1.5 GB gates with a wide margin. The choice between them waits
 for person recall on frames from this robot's low, tilted-up camera (Task 11 step 4).
+
+## Evening checks, 2026-11-13 (nothing moved)
+
+- Pi before the deploy: ROS off, no Python running, both serial ports free, not throttled.
+  `~/hmc-base` matched `feature/person-follow` (01a5f3b) file for file, plus one file not
+  in git: `~/hmc-base/air_check.py` (written 06:43, SHA-256 `a8a62ccf...2a15`, no saved
+  output, not known whether it ran). It was left in place; `base/pi/tools/air_check.py`
+  replaces it in git.
+- Firmware odometry is not reset when a program opens the wheel port: the first `O#` of
+  the five base-check runs reads x 5.28, 6.55, 7.76, 8.96, 9.73 m. So DTR does not reset
+  the STM32, and the Pi probably cannot put it into its bootloader without a hand at the
+  board (RTS not checked).
+- No ST-Link and no STMicro USB device on the Pi (`lsusb`); `openocd` is installed,
+  `st-flash`, `stm32flash`, `dfu-util` are not. No firmware project or board document
+  was found on the Pi (`~`, the archive, `catkin_ws`, `robot-deploy-kit`).
+- Deployed `sim/robustness-ladder` (e59e331) with `base/tools/deploy.sh`: the Pi now
+  matches it in 59 of 60 files (the extra one is the old `air_check.py`). Tests on the
+  Pi: 159 run, OK (1 skipped). On the Jetson `~/hmc-follow`: 17 run, OK.
+- `hmc.navigation.plan_path` on the Pi, room scene of 189 circles (walls, a box, a chair),
+  50 runs each: operator 2.2 m ahead median 27.9 ms, worst 28.8 ms; goal 3.5 m past the box
+  and chair median 33.7 ms, worst 34.3 ms. Under the 150 ms limit, so no planner thread
+  is needed. Synthetic scene, not the plan's real box and chair (Task 6 step 3 still open).
+- Pi to Jetson ping over Wi-Fi: 5.2 / 23.5 / 59.0 ms (min / avg / max, 3 packets), worse
+  than the morning. From the laptop the LAN addresses timed out later in the evening
+  while Tailscale still worked.
+- The ROS driver still uses `distance_scale` 0.902 (`driver.py` default); the follower
+  uses 0.882. Only the ROS path (voice moves over `/cmd_vel`) is affected.
+
+New risk for Help Me Carry: retractable barriers have a belt about 0.9 m above the floor.
+The LiDAR plane (0.22 m) sees only the posts, and the robot (0.24 m high) fits under the
+belt, so it may drive into the blocked area without touching anything. Only the depth
+image can see the belt, and only once `camera_pitch_deg` is known.

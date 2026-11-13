@@ -24,6 +24,7 @@ a hardware result.
 | Camera pitch known within 1° | Not measured (estimates 11 to 17° up) | `base/pi/tools/sensor_check.py --wall` with a flat board 1.2 to 1.5 m away |
 | LiDAR front angle settled | 178.7° in use; the robot's own posts suggest 180.3° | `sensor_check.py --yaw` with an object taller than 0.35 m |
 | Depth camera sees a 0.12 m object from 0.6 m | Assumed by `--sensors robot` | Person-follow plan, Task 6 step 3 |
+| Retractable barrier belt (about 0.9 m up) seen as blocked | Not handled: the LiDAR sees only the posts and the 0.24 m robot fits under the belt | Depth image once the pitch is known; check with a real barrier |
 | Re-identification looks for every person | The crowd memory, the queue and the operator check all need them | Jetson detector and OSNet looks exist (Task 11); the Pi must ask for looks of everyone (return-trip plan, Task 4) |
 | The Jetson on the robot, on a LAN cable, with its own power | Outside the room Wi-Fi drops; without looks the robot cannot tell the queue from passers-by | Waiting for parts (owner) |
 
