@@ -97,9 +97,25 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(ask(self.srv.port, header, b"")["seq"], 1)  # replaces first, must wait its turn
         self.assertFalse(state["overlap"])
 
-    def test_the_detector_seam_is_not_built_yet(self):
-        with self.assertRaises(NotImplementedError):
-            server.find_people(b"", 1, 1)
+    def test_people_get_their_box_confidence_and_look(self):
+        import cv2
+        import numpy as np
+
+        class Detector:
+            def detect(self, bgr):
+                self.shape = bgr.shape
+                return [(10.0, 20.0, 60.0, 200.0, 0.8)]
+
+        class ReId:
+            def looks(self, bgr, boxes):
+                return [(0.6, 0.8) for _ in boxes]
+
+        jpeg = cv2.imencode(".jpg", np.zeros((240, 320, 3), np.uint8))[1].tobytes()
+        det = Detector()
+        people = server.people_in(jpeg, det, ReId())
+        self.assertEqual(det.shape, (240, 320, 3))  # the frame the Pi sent, not resized
+        self.assertEqual(people, [{"box": [10.0, 20.0, 60.0, 200.0], "conf": 0.8, "look": [0.6, 0.8]}])
+        self.assertEqual(server.people_in(b"not a jpeg", det, ReId()), [])
 
 
 if __name__ == "__main__":

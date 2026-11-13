@@ -5,6 +5,7 @@ Wire format both ways: 4-byte big-endian length of the header, then the UTF-8 JS
 {"seq", "t", "people": [{"box": [x1, y1, x2, y2], "conf": float, "look": [float, ...]}]}.
 
 Run: python3 server.py --fake      (answers one person in the middle, for testing the link)
+     python3 server.py             (TensorRT detector and OSNet looks, see DETECTOR and REID)
 """
 
 import argparse
@@ -18,9 +19,30 @@ MAX_HEADER = 4096
 MAX_JPEG = 10_000_000
 
 
-def find_people(jpeg, width, height):
-    """The seam for the real detector: turn one JPEG image into a list of people dicts."""
-    raise NotImplementedError("the real detector comes in a later task, use --fake for now")
+DETECTOR = "models/yolo11n_256x320.engine"  # the choice waits for recall on this robot's frames (Task 11 step 4)
+REID = "models/osnet_x0_25_msmt17_256x128.engine"
+
+
+def people_in(jpeg, detector, reid):
+    """One JPEG to people dicts: TensorRT person boxes, then one look vector per person."""
+    import cv2
+    import numpy as np
+
+    bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+    if bgr is None:
+        return []  # a broken frame is "nobody seen", never an error that drops the link
+    boxes = detector.detect(bgr)
+    looks = reid.looks(bgr, [b[:4] for b in boxes])
+    return [{"box": [float(v) for v in b[:4]], "conf": float(b[4]), "look": list(look)} for b, look in zip(boxes, looks)]
+
+
+def real_people(detector_path=DETECTOR, reid_path=REID):
+    """find_people for the server, with both engines loaded once."""
+    from detector import Detector
+    from reid import ReId
+
+    detector, reid = Detector(detector_path), ReId(reid_path)
+    return lambda jpeg, width, height: people_in(jpeg, detector, reid)
 
 
 def fake_people(jpeg, width, height):
@@ -113,8 +135,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fake", action="store_true")
     parser.add_argument("--port", type=int, default=5601)
+    parser.add_argument("--detector", default=DETECTOR, help="person detector engine")
+    parser.add_argument("--reid", default=REID, help="look vector engine")
     args = parser.parse_args()
-    server = Server(fake_people if args.fake else find_people, port=args.port)
+    server = Server(fake_people if args.fake else real_people(args.detector, args.reid), port=args.port)
     server.start()
     print("listening on port", server.port, flush=True)
     try:
