@@ -4,6 +4,7 @@ plan() hands the newest request to a thread and returns at once with the newest 
 answer is for a request from a cycle or two ago (0.1 to 0.3 s): the robot moves under 0.04 m
 meanwhile. When no answer has come for MAX_AGE, alive() is False and the caller plans itself.
 """
+import contextlib
 import json
 import socket
 import threading
@@ -62,7 +63,8 @@ class RemotePlanner:
                 continue
             try:
                 conn.settimeout(READ_TIMEOUT)
-                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                with contextlib.suppress(OSError):  # not a TCP socket (a test's socketpair on Linux)
+                    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 self._talk(conn.makefile("rb"), conn)
             except (OSError, ValueError):
                 pass  # the server went away or timed out: connect again
