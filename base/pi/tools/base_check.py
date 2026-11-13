@@ -354,6 +354,8 @@ def main():
         sys.exit("REFUSED: --line %.2f is outside 0 .. max_speed %.2f (raise it with --max-speed)" % (rate, p["max_speed"]))
     if not line and not 0 < abs(rate) <= p["max_turn_rate"]:
         sys.exit("REFUSED: --turn %.2f is outside 0 .. max_turn_rate %.2f" % (rate, p["max_turn_rate"]))
+    if not wheels_module.under_safe_run():
+        sys.exit("REFUSED: " + wheels_module.NOT_SAFE_RUN)
 
     log = {"mode": name, "rate": rate, "target": target, "date": time.strftime("%Y-%m-%d %H:%M:%S"),
            "params": p, "odom": [], "scans": []}

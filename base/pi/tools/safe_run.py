@@ -8,6 +8,7 @@ packet), so a drive program that dies before its own S# leaves the base on its l
 This parent outlives the child and stops the base. It cannot help when the Pi loses power or
 the USB cable comes out: keep a hand near the motor cut-off button.
 """
+import os
 import signal
 import subprocess
 import sys
@@ -26,7 +27,8 @@ def open_wheels():
 
 def run(cmd, open_wheels=open_wheels):
     """The child's exit code, after S# went to the base."""
-    child = subprocess.Popen(cmd)  # started first, so the child keeps the normal Ctrl+C handling
+    # started first, so the child keeps the normal Ctrl+C handling; the variable lets it drive
+    child = subprocess.Popen(cmd, env=dict(os.environ, **{wheels.SAFE_RUN_ENV: "1"}))
     for sig in STOP_SIGNALS:
         signal.signal(sig, signal.SIG_IGN)  # Ctrl+C and a dropped ssh stop the child; we stay for S#
     code = child.wait()

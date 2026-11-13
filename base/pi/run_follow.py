@@ -288,6 +288,8 @@ def main(argv=None):
     why = refusal(args.drive, args.max_speed, p)
     if why:
         sys.exit("REFUSED: " + why)
+    if args.drive and not wheels_module.under_safe_run():
+        sys.exit("REFUSED: --drive: " + wheels_module.NOT_SAFE_RUN)
 
     for sig in STOP_SIGNALS[1:]:  # SIGINT already raises KeyboardInterrupt
         signal.signal(sig, _interrupt)

@@ -89,6 +89,8 @@ def main():
     args = parser.parse_args()
     if not args.yes_wheels_raised:
         sys.exit("REFUSED: raise every wheel off the floor, then pass --yes-wheels-raised")
+    if not wheels_module.under_safe_run():
+        sys.exit("REFUSED: " + wheels_module.NOT_SAFE_RUN)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit("STOPPED: SIGTERM"))  # so finally sends S#
 
     p = params.load()

@@ -1,5 +1,6 @@
 """Wheel packets for the base firmware, odometry parsing and a watchdog that stops the base."""
 import math
+import os
 import threading
 import time
 
@@ -8,6 +9,14 @@ BAUD = 115200
 TIMEOUT = 0.3  # seconds of silence before the watchdog sends S#
 PERIOD = 0.04
 STOP_REPEATS = 3  # S# writes per stop: one byte lost to a parity error must not leave the base driving
+SAFE_RUN_ENV = "HMC_SAFE_RUN"  # set by tools/safe_run.py for the program it starts
+NOT_SAFE_RUN = ("start it through tools/safe_run.py, which sends S# however it ends (the firmware has no"
+                " command timeout): python tools/safe_run.py .venv/bin/python <program> <arguments>")
+
+
+def under_safe_run():
+    """True when tools/safe_run.py started this program."""
+    return os.environ.get(SAFE_RUN_ENV) == "1"
 
 
 def _digits(value):
