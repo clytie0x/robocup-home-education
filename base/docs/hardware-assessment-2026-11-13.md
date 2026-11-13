@@ -527,3 +527,27 @@ No touch in any run (closest return 0.32 m from the base centre, about 0.12 m fr
   (12 before). Not yet driven with that change.
 - The track: run 5 held for 432 ambiguous cycles and lost the operator for up to 72 s; the
   identity rules (crowded, company) still fire next to chair legs, as the Task 6 review measured.
+
+## Arm on the robot: first bag pick and place, 2026-11-14 03:55 to 04:15
+
+The SO-100 arm (6 STS3215, CH343 USB on the Jetson, the arm team's `~/so100_ws`) now sits on the
+top deck. Owner's tape: arm platform 12 cm from the left edge, 17 to 18 from the right, 15 from
+front and back; its base 30 to 31 cm above the floor; the pan axis 21 cm behind the front edge.
+Located with the LiDAR (closed finger tips put in the scan plane at two points, the near-surface
+bias of about 2 cm removed): the pan axis sits at about (0.012, 0.0145) m in the base frame, not
+the (0, 0.0275) the tape implied (uncertain by about 1.5 cm). The LiDAR's scan plane is about
+0.24 to 0.25 m above the floor (the tips showed up 0.055 to 0.07 m below the arm base, not at 0.04).
+Reach at the bag neck's height (the arm team's IK, calibrated limits): 26 cm forward of the pan
+axis pointing straight down, 39 cm at 30 degrees down.
+
+The task (owner, unattended): pick the bag in front, put it next to the chair behind.
+- `tools/approach.py --to 0.38` turned 14 degrees and crept 0.173 m at 0.03 m/s to the bag neck.
+- Two blind grasps missed (jaw closed to 2.4 deg); the third, at the LiDAR plane with the open
+  jaws first checked straddling the neck in the scan, lifted the bag clear of the floor (front
+  camera frame), shoulder load 29 %, 35 C, no fault.
+- Carrying: turned left 135 + 16 degrees with the bag's own points masked (a one-off script;
+  the bag swinging out of the mask stopped it twice). Driving on stopped after 5 cm twice,
+  probably the Jetson's power cable beside the robot. The bag was put down there, about 0.4 m
+  from the chair, the gripper opened and the arm folded to rest (torque on).
+- The arm team had their stack running in sim mode on ROS domain 42 from 03:53; one trajectory of
+  mine went to their simulated arm before the real driver was moved to domain 44.
