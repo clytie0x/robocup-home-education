@@ -26,6 +26,11 @@ MAX_POINTS = 120
 # middle-second match). On the Pi, per new scan: 24.6 ms median, 44 ms at 95 %, 90 ms worst (234 scans).
 BASELINE = 0.5
 KEEP = 2.0  # s of recent scans kept to match against
+# m: only returns this near are matched. Farther returns stand more than SURFACE_GAP apart, have no
+# surface lines and read the motion short while still agreeing (square rooms, 0.5 s at 0.12 m/s:
+# 7 m wide 4 % short, 10 m 29 % short at agree 0.8). With nothing this near the match fails and the
+# odometry is kept, untrusted, so the velocity loop does not push on a short reading.
+MATCH_RANGE = 4.0
 
 
 @dataclass
@@ -43,8 +48,12 @@ def _wrap(a):
     return math.atan2(math.sin(a), math.cos(a))
 
 
+def _near(scan):
+    return [(deg, m) for deg, m in scan if m <= MATCH_RANGE]
+
+
 def _match(before, after, p, guess):
-    return scanmatch.match(before, after, p, guess, max_points=MAX_POINTS)
+    return scanmatch.match(_near(before), _near(after), p, guess, max_points=MAX_POINTS)
 
 
 def _relative(a, b):

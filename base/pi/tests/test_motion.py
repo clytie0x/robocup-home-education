@@ -93,6 +93,16 @@ class MotionTest(unittest.TestCase):
             motion.scanmatch.match = real
         self.assertEqual(seen, [(720, 720, motion.MAX_POINTS)])  # whole scans in: the surfaces need them
 
+    def test_far_walls_are_not_trusted(self):
+        from test_scanmatch import offset_scan
+        for half, trusted in ((2.5, True), (5.0, False)):  # 5 m and 10 m square rooms
+            est = motion.MotionEstimator(P)
+            est.update(0.0, (0.0, 0.0, 0.0), offset_scan((0, 0, 0), half, 0.9, 0.0))
+            state = est.update(0.5, (0.06, 0.0, 0.0), offset_scan((0.06, 0.0, 0.0), half, 0.9, 0.4))
+            self.assertEqual(state.trusted, trusted, half)
+            if trusted:
+                self.assertAlmostEqual(state.v, 0.12, delta=0.002)
+
     def test_motion_is_matched_against_the_scan_a_baseline_ago(self):
         before = []
 
