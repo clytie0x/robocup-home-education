@@ -2,6 +2,7 @@
 import json
 import math
 import signal
+import socket
 import tempfile
 import time
 import unittest
@@ -14,6 +15,7 @@ import numpy
 from hmc import hri, route
 from hmc.follower import Follower, Mode, Senses
 from hmc.perception import MotionTracker
+from hmc.world import Circle
 
 import params
 import run_follow
@@ -38,6 +40,7 @@ class FakeBase:
         self.pose = (0.0, 0.0, 0.0)
         self.command = (0.0, 0.0)
         self.sent = []
+        self.stops = 0  # S# sent (stop() also counts as a (0, 0) command)
 
     def send(self, v, w):
         self.command = (v, w)
@@ -47,6 +50,7 @@ class FakeBase:
         return self.pose
 
     def stop(self):
+        self.stops += 1
         self.send(0.0, 0.0)
 
     def advance(self, dt):
@@ -484,10 +488,11 @@ class Ways(Follower):
 
 
 class Shifted:
-    """Keyframes whose next correction moves the believed pose sideways by `dy` (Review Focus 2)."""
+    """Keyframes whose next correction moves the believed pose sideways by `dy` and turns it by
+    `turn` (Review Focus 2). dy None: no correction."""
 
-    def __init__(self, dy):
-        self.dy = dy
+    def __init__(self, dy, turn=0.0):
+        self.dy, self.turn = dy, turn
 
     def add(self, pose, scan):
         pass
@@ -496,8 +501,55 @@ class Shifted:
         if self.dy is None:
             return pose, {"used": False, "index": None, "share": 0.0, "shift": 0.0, "turn": 0.0, "why": "far"}
         dy, self.dy = self.dy, None
-        return (pose[0], pose[1] + dy, pose[2]), {"used": True, "index": 0, "share": 1.0, "shift": abs(dy),
-                                                  "turn": 0.0, "why": "used"}
+        return (pose[0], pose[1] + dy, pose[2] + self.turn), {"used": True, "index": 0, "share": 1.0,
+                                                              "shift": abs(dy), "turn": self.turn, "why": "used"}
+
+
+class Eyes:
+    """The Jetson: every person in the camera's view, by bearing, with their look. people(t) -> [(x, y, look)]
+    in the world frame, seen from the base's pose."""
+
+    def __init__(self, base, world, people):
+        self.base, self.world, self.people = base, world, people
+
+    def send(self, frame):
+        pass
+
+    def latest(self):
+        x, y, yaw = self.base.pose
+        seen = []
+        for px, py, look in self.people(self.world.t):
+            dx, dy = px - x, py - y
+            bx, by = math.cos(yaw) * dx + math.sin(yaw) * dy, -math.sin(yaw) * dx + math.cos(yaw) * dy
+            bearing = math.degrees(math.atan2(by - P["camera_y"], bx - P["camera_x"]))
+            if abs(bearing) <= P["camera_hfov_deg"] / 2:
+                seen.append(Seen(bearing, 0.9, look, [0, 0, 1, 1]))
+        return Answer(self.world.t, seen)
+
+    def alive(self, now, silence):
+        return True
+
+
+class Planner:
+    """Stands in for remote_plan.RemotePlanner: answers every request with a straight line, and
+    counts forget()."""
+
+    def __init__(self):
+        self.forgot, self.asked, self.stale = 0, 0, False
+        self.close_plan = True
+
+    def alive(self):
+        return True
+
+    def waiting(self):
+        return self.stale
+
+    def forget(self):
+        self.forgot += 1
+
+    def plan(self, start, goal, shapes, near_side=False, heading=None):
+        self.asked += 1
+        return None if self.stale else [tuple(start), tuple(goal)]
 
 
 # A 12 m L of corridors 2 m wide: 6 m along x, a left turn, 6 m along y. Pillars on the walls
@@ -557,13 +609,32 @@ class Return(Logged):
         self.assertEqual([self.cycle(state, t)["phase"] for t in (0.0, 0.1, 0.2)], ["follow"] * 3)
         self.assertIn(self.cycle(state, 0.3)["phase"], ("return", "done"))
 
-    def test_enter_is_a_line_on_the_console_not_the_end_of_input(self):
-        import io
-        pressed = run_follow.threading.Event()
-        run_follow.watch_enter(io.StringIO(""), pressed)  # stdin closed: never a return by itself
-        self.assertFalse(pressed.is_set())
-        run_follow.watch_enter(io.StringIO("\n"), pressed)
-        self.assertTrue(pressed.is_set())
+    def test_enter_is_a_line_on_the_console_read_without_waiting(self):
+        ours, theirs = socket.socketpair()  # select works on sockets everywhere, a pipe only on POSIX
+        console = ours.makefile("rb", buffering=0)
+        self.addCleanup(ours.close)
+        self.addCleanup(console.close)
+        self.assertFalse(run_follow.enter_pressed(console))  # nothing typed: back at once
+        theirs.sendall(b"\n\n")  # Enter pressed twice more while the run was starting
+        time.sleep(0.05)
+        run_follow.discard_typed(console)
+        self.assertFalse(run_follow.enter_pressed(console))  # so the run does not end at once
+        theirs.sendall(b"\n")
+        time.sleep(0.05)
+        self.assertTrue(run_follow.enter_pressed(console))
+        theirs.close()  # the end of input is not Enter
+        time.sleep(0.05)
+        self.assertFalse(run_follow.enter_pressed(console))
+        run_follow.discard_typed(console)  # and does not hang
+
+    def test_the_console_is_polled_in_the_cycle(self):
+        base = FakeBase()
+        state = self.state(base, brain=None)
+        presses = [False] * 20 + [True]
+        state.enter = lambda: presses.pop(0)
+        self.carried_out(state, base, 2.0)  # 21 cycles
+        self.assertEqual(self.records()[-1]["phase"], "return")
+        self.assertEqual(presses, [])
 
     def test_a_keyframe_is_stored_with_each_breadcrumb(self):
         base = FakeBase()
@@ -576,33 +647,105 @@ class Return(Logged):
                          [tuple(round(v, 6) for v in pt) for pt in points])
         self.assertTrue(all(scan for _, scan in state.keyframes.frames))
 
-    def test_a_pose_correction_clears_depth_memory_and_keeps_the_speed_limits(self):
-        # Review Focus 2: the believed pose jumps 0.3 m sideways while driving back
+    def returning(self, legs=lambda t: (), seconds=15.0):
+        """Carried 3 m out in a room, then driving back for `seconds` without corrections."""
         base = FakeBase()
-        state = self.state(base, brain=None)
+        world = Room(base, box(-1.5, -2.0, 4.5, 2.0), legs)
+        state = run_follow.State(P, base, world, Camera(), None, self.log, clock=lambda: self.now)
         now = self.carried_out(state, base, 3.0)
         state.go_back.set()
         state.keyframes = Shifted(None)
-        records = self.drive(state, base, now, 15.0)
+        records = self.drive(state, base, now, seconds, world)
+        return state, base, world, records
+
+    def test_a_pose_correction_clears_the_brains_memory_and_keeps_the_speed_limits(self):
+        # Review Focus 2: the believed pose jumps 0.3 m sideways while driving back
+        state, base, world, records = self.returning()
         self.assertGreater(records[-1]["v"], 0.05)  # turned round and driving back
         now = records[-1]["time"]
-        state.follower.obstacle_memory[("old",)] = (now, None)
-        state.senses.memory._depth[("old",)] = (2.0, 0.0, now)
+        state.follower.obstacle_memory[("old",)] = (now, Circle(50.0, 50.0, 0.05))  # the brain's memory: the believed frame
+        state.senses.memory._depth[("old",)] = (2.0, 0.0, now)  # the senses' memory: the odometry frame
         state.keyframes = Shifted(0.3)
         state.follower.navigator._planned_at = now  # planned last cycle: only the correction can make it plan again
-        records = records + self.drive(state, base, now, 0.1)
+        records = records + self.drive(state, base, now, 0.1, world)
         jump = len(records) - 1
         self.assertEqual(records[jump]["keyframe"]["why"], "used")
         self.assertAlmostEqual(records[jump]["believed"][1] - records[jump]["pose"][1], 0.3, places=6)
         self.assertNotIn(("old",), state.follower.obstacle_memory)
-        self.assertNotIn(("old",), state.senses.memory._depth)
+        # The senses' memory stays where the odometry put it; the brain gets it moved with the correction.
+        self.assertIn(("old",), state.senses.memory._depth)
+        self.assertTrue(any(abs(s.x - 2.0) < 1e-9 and abs(s.y - 0.3) < 1e-9
+                            for _, s in state.follower.obstacle_memory.values()))
         self.assertEqual(state.follower.navigator._planned_at, records[jump]["time"])  # replanned at once
-        records = records + self.drive(state, base, records[jump]["time"], 3.0)
+        records = records + self.drive(state, base, records[jump]["time"], 3.0, world)
         for before, after in zip(records[jump - 1:], records[jump:]):
             self.assertIsNone(after["stop"])
             self.assertLessEqual(abs(after["v"] - before["v"]), P["accel"] * run_follow.PERIOD + 1e-9)
             self.assertLessEqual(abs(after["w"] - before["w"]), P["turn_accel"] * run_follow.PERIOD + 1e-9)
             self.assertGreaterEqual(after["v"], 0.0)  # never backward
+
+    def test_a_turn_correction_clears_and_replans_like_a_shift(self):
+        # 0.1 rad moves a point 2 m away by 0.2 m; 0.02 rad by 0.04 m, under CORRECTED
+        for turn, clears in ((0.1, True), (0.02, False)):
+            state, base, world, records = self.returning(seconds=12.0)
+            now = records[-1]["time"]
+            state.follower.obstacle_memory[("old",)] = (now, Circle(50.0, 50.0, 0.05))
+            state.keyframes = Shifted(0.0, turn)
+            record = self.drive(state, base, now, 0.1, world)[-1]
+            self.assertEqual(record["keyframe"]["why"], "used")
+            self.assertAlmostEqual(record["believed"][2] - record["pose"][2], turn, places=9)
+            self.assertEqual(("old",) not in state.follower.obstacle_memory, clears, turn)
+
+    def test_furniture_stays_furniture_across_a_correction(self):
+        # A still pair of legs (a chair) is furniture. A 0.3 m jump and a 10 deg turn of the believed pose
+        # must not make it look as if it moved (senses.MOVED), nor the camera bearings shift.
+        state, base, world, records = self.returning(lambda t: person(2.6, 0.9), seconds=3.0)
+        state.keyframes = Shifted(0.3)
+        records += self.drive(state, base, records[-1]["time"], 1.0, world)
+        state.keyframes = Shifted(0.0, math.radians(10))
+        records += self.drive(state, base, records[-1]["time"], 2.0, world)
+        self.assertEqual([r["people"] for r in records if r["people"]], [])
+        self.assertEqual([r["keyframe"]["why"] for r in records].count("used"), 2)
+
+    def test_a_standing_person_does_not_seem_to_walk_after_a_correction(self):
+        # The people trackers keep their past in the believed frame: a jump must move it along, or the
+        # person seems to walk (hmc's MotionTracker.direction), and the queue could take them for its tail.
+        def walks_then_stands(t):
+            return person(2.0 + 0.3 * min(max(t - 3.0, 0.0), 2.0), 1.2)  # 0.6 m in 2 s once driving back: a person
+
+        state, base, world, records = self.returning(walks_then_stands, seconds=6.0)  # still 4 s, past the window
+        self.assertTrue(records[-1]["people"])
+        state.keyframes = Shifted(0.35)
+        for i in range(20):  # the 2 s the tracker's window would hold the jump
+            record = self.drive(state, base, records[-1]["time"], 0.1, world)[-1]
+            records.append(record)
+            self.assertEqual(record["keyframe"]["why"], "far" if i else "used")
+            self.assertTrue(record["people"])
+            trackers = [t for t in state.follower.people_trackers.values() if t.seen and record["time"] - t.last_time < 0.05]
+            self.assertTrue(trackers)
+            self.assertEqual([t.direction() for t in trackers], [None] * len(trackers), record["time"])
+            self.assertTrue(all(t.is_stationary() for t in trackers))
+
+    def test_a_new_phase_or_a_correction_drops_the_remote_answer(self):
+        # remote_plan answers a request from a cycle or two ago: after a jump or a new goal it is out of date
+        planner = Planner()
+        with mock.patch.object(run_follow, "REMOTE", planner):
+            base = FakeBase()
+            state = self.state(base, brain=None)
+            now = self.carried_out(state, base, 2.0)
+            self.assertEqual(planner.forgot, 0)
+            state.go_back.set()
+            state.keyframes = Shifted(None)
+            self.cycle(state, now + 0.1)
+            self.assertEqual(planner.forgot, 1)  # the goal is a breadcrumb now, not the operator
+            state.keyframes = Shifted(0.3)
+            self.cycle(state, now + 0.2)
+            self.assertEqual(planner.forgot, 2)
+            planner.stale = True  # no answer since: ask again every cycle, not after REPLAN_EVERY
+            asked = planner.asked
+            for i in (3, 4, 5):
+                self.cycle(state, now + 0.1 * i)
+            self.assertEqual(planner.asked, asked + 3)
 
     def test_return_with_fakes_ends_within_arrive_of_the_start(self):
         # A 12 m L route out, 2 % odometry error, the corrections on: back to where it started.
@@ -652,16 +795,32 @@ class Return(Logged):
 
     def test_enter_during_a_search_returns_from_where_it_stands(self):
         # Review Focus 3: the search's turn stops, the way back starts at the breadcrumb nearest the robot
+        link = SimpleNamespace(latest=lambda: Answer(self.now, []), alive=lambda now, silence: True,
+                               send=lambda frame: None)  # up, nobody in view: before the first lock it turns
         base = FakeBase()
-        state = self.state(base, brain=None)
+        state = run_follow.State(P, base, Scans(WALL_ONLY), Camera(), link, self.log, clock=lambda: self.now)
         now = self.carried_out(state, base, 2.0)
+        self.assertEqual(self.records()[-1]["search"], "turn")
         state.follower.mode = Mode.SEARCH
         base.pose = (1.0, 0.6, math.pi / 2)  # it drove off to look for the operator, past REACHED from (1.0, 0)
         state.go_back.set()
         record = self.cycle(state, now + 0.1)
         self.assertEqual(record["phase"], "return")
         self.assertIsNone(record["search"])
+        self.assertNotEqual(record["w"], run_follow.SEARCH_TURN)
         self.assertEqual(record["target"], [1.0, 0.0])
+
+    def test_an_ambiguous_scene_does_not_hold_the_way_back(self):
+        # "someone is right at the operator" is about whom to follow; on the way back nobody is followed
+        base = FakeBase()
+        state = self.state(base, brain=None)
+        now = self.carried_out(state, base, 2.0)
+        state.go_back.set()
+        self.cycle(state, now + 0.1)
+        state.senses = Crowded()
+        record = self.cycle(state, now + 0.2)
+        self.assertIsNone(record["stop"])
+        self.assertNotEqual((record["v"], record["w"]), (0.0, 0.0))  # turning round toward the breadcrumbs
 
     def test_done_stops_the_wheels_and_ends_the_run(self):
         # Review Focus 3 as well: Enter before the robot has moved, so it is at the start at once
@@ -675,7 +834,54 @@ class Return(Logged):
         record = self.records()[-1]
         self.assertEqual((record["phase"], record["v"], record["w"]), ("done", 0.0, 0.0))
         self.assertEqual(base.sent[-1], (0.0, 0.0))
+        self.assertEqual(base.stops, 1)  # S#
         self.assertEqual(self.speech(), [hri.RETURN_TEXT, hri.ARRIVED_TEXT])
+
+    def test_arriving_while_still_rolling_sends_a_stop_not_the_brains_braking(self):
+        base = FakeBase()
+        state = self.state(base, brain=None)
+        self.cycle(state, 0.0)  # the start: (0, 0), heading 0
+        base.pose = (-0.25, 0.0, 0.0)  # back within ARRIVE, facing the start heading
+        state.body.robot.speed = 0.1  # still rolling: the brain brakes from 0.1 (0.075 after this cycle)
+        state.go_back.set()
+        record = self.cycle(state, 0.1)
+        self.assertTrue(record["end"].startswith("done"))
+        self.assertEqual((record["v"], record["w"]), (0.0, 0.0))
+        self.assertEqual(base.sent[-2:], [(0.0, 0.0), (0.0, 0.0)])  # this cycle's command, then S#
+        self.assertEqual(base.stops, 1)
+
+    def test_joins_the_queue_of_the_crowd_on_the_way_back(self):
+        # Three people stand as a group ahead (the crowd, remembered by look); on the way back one of them
+        # walks toward the start past the robot: the robot walks behind them, then finishes on its own.
+        crowd = [(4.88, 0.69, (0.0, 1.0, 0.0)), (4.53, 1.29, (0.0, 0.0, 1.0)), (4.15, 1.99, (0.0, 0.7071, 0.7071))]
+        walk = {"from": None}
+
+        def people(t):
+            x, y, look = crowd[0]
+            if walk["from"] is not None:  # walks to (-3, 0.6) at 0.45 m/s, past the robot into its view
+                s = min(0.45 * (t - walk["from"]), math.dist((x, y), (-3.0, 0.6)))
+                a = math.atan2(0.6 - y, -3.0 - x)
+                x, y = x + s * math.cos(a), y + s * math.sin(a)
+            return [(x, y, look)] + crowd[1:]
+
+        base = FakeBase()
+        world = Room(base, box(-4.0, -2.5, 7.0, 3.0), lambda t: sum((person(x, y) for x, y, _ in people(t)), []))
+        state = run_follow.State(P, base, world, Camera(), Eyes(base, world, people), self.log, clock=lambda: self.now)
+        for _ in range(20):
+            state.follower.operator_look.add(LOOK)  # learned already: nobody in the crowd is enrolled
+        now = self.carried_out(state, base, 3.0)
+        base.pose = (3.0, 0.0, 0.7)  # facing the crowd
+        for i in range(1, 71):  # 7 s
+            world.t = now + 0.1 * i
+            self.cycle(state, world.t)
+        self.assertGreaterEqual(len(state.queue.crowd), 1)
+        walk["from"] = world.t
+        state.go_back.set()
+        back = self.drive(state, base, world.t, 90.0, world)
+        joined = [r for r in back if r["queue"] is not None]
+        self.assertTrue(joined)
+        self.assertTrue(back[-1]["end"].startswith("done"), back[-1].get("end"))
+        self.assertTrue(all(r["v"] >= 0.0 for r in back))
 
 
 if __name__ == "__main__":

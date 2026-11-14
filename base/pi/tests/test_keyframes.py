@@ -89,6 +89,17 @@ class Correct(unittest.TestCase):
             self.assertEqual(report["why"], why, report)
             self.assertEqual(pose, believed)
 
+    def test_a_keyframe_without_a_usable_scan_gives_way_to_the_next_nearest(self):
+        frames = Keyframes(P)
+        frames.add(KEY, [(0.0, 1.0)] * 5)  # too few points to match
+        second = off(KEY, 0.5, 0.0, 0.0)
+        frames.add(second, world_scan(second, ROOM))
+        truth = off(KEY, 0.1, 0.0, 0.0)  # nearer the first
+        pose, report = frames.correct(off(truth, 0.05, 0.0, 0.0), world_scan(truth, ROOM, start_deg=0.4))
+        self.assertTrue(report["used"], report)
+        self.assertEqual(report["index"], 1)
+        self.assertAlmostEqual(pose[0], truth[0], delta=0.02)
+
     def test_no_keyframes_and_no_match(self):
         pose, report = Keyframes(P).correct(KEY, world_scan(KEY, ROOM))
         self.assertEqual((pose, report["used"], report["why"]), (KEY, False, "far"))

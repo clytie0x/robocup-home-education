@@ -1,3 +1,4 @@
+import json
 import socket
 import threading
 import time
@@ -48,6 +49,27 @@ class RemotePlannerTest(unittest.TestCase):
         self.assertAlmostEqual(path[-1][0], 2.0, places=6)
         now[0] += remote_plan.MAX_AGE + 0.1  # no answer for longer than MAX_AGE: the caller plans itself
         self.assertFalse(remote.alive())
+
+    def test_after_forget_only_an_answer_to_a_newer_request_counts(self):
+        # A correction moved the believed pose (or the goal changed): the answer on its way is out of date.
+        ours, theirs = socket.socketpair()
+        server = theirs.makefile("rb")
+        remote = remote_plan.RemotePlanner("x", 0, 0.29, connect=lambda *a, **k: ours)
+        remote.start()
+        self.addCleanup(remote.stop)
+        self.assertFalse(remote.waiting())
+        remote.plan((0, 0), (2, 0), [])
+        old = json.loads(server.readline())  # on its way to the planner
+        remote.forget()
+        self.assertTrue(remote.waiting())
+        theirs.sendall((json.dumps({"id": old["id"], "path": [[0, 0], [2, 0]], "seconds": 0.1}) + "\n").encode())
+        self.assertTrue(wait_for(remote.alive))  # the server answered, but for the old frame
+        self.assertIsNone(remote.plan((0, 0.3), (2, 0.3), []))
+        self.assertTrue(remote.waiting())
+        new = json.loads(server.readline())
+        theirs.sendall((json.dumps({"id": new["id"], "path": [[0, 0.3], [2, 0.3]], "seconds": 0.1}) + "\n").encode())
+        self.assertTrue(wait_for(lambda: not remote.waiting()))
+        self.assertEqual(remote.plan((0, 0.3), (2, 0.3), []), [(0, 0.3), (2, 0.3)])
 
 
 if __name__ == "__main__":

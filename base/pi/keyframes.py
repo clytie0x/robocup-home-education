@@ -37,14 +37,19 @@ class Keyframes:
                 near.append((gap, i))
         if not near:
             return pose, report
-        report["index"] = i = min(near)[1]
-        key, reference = self.frames[i]
-        guess = motion._relative(key, pose)  # the believed pose in the keyframe's frame; yaw near pi when reversed
-        try:
-            # only near returns, as in M1: far walls have no surface lines and read the shift short
-            dx, dy, dyaw, share, slide = scanmatch.scan_match(motion._near(reference), motion._near(scan), guess, self.p)
-        except ValueError:
-            report["why"] = "no match"
+        for _, i in sorted(near):  # the nearest whose scan can be matched
+            key, reference = self.frames[i]
+            guess = motion._relative(key, pose)  # the believed pose in the keyframe's frame; yaw near pi when reversed
+            try:
+                # only near returns, as in M1: far walls have no surface lines and read the shift short
+                dx, dy, dyaw, share, slide = scanmatch.scan_match(motion._near(reference), motion._near(scan), guess,
+                                                                  self.p)
+            except ValueError:
+                continue
+            report["index"] = i
+            break
+        else:
+            report.update(index=min(near)[1], why="no match")
             return pose, report
         if slide > SLIDE_MAX:
             # shortcut: "along" is the keyframe's heading, fine while it was stored driving the corridor;

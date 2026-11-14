@@ -15,8 +15,10 @@ this file: log.jsonl (one JSON record per cycle) and every 10th scan with its ca
 """
 import argparse
 import contextlib
+import dataclasses
 import json
 import math
+import select
 import signal
 import socket
 import subprocess
@@ -34,6 +36,7 @@ from hmc.follower import Follower, Mode
 from hmc.queue import QueueFollower
 from hmc.route import Returner, Route
 from hmc.task import STAND_STILL, STANDING_FORGET
+from hmc.world import Circle
 
 import calib
 import camera
@@ -47,7 +50,6 @@ import motion as motion_module
 import params
 import remote_plan
 import safety
-import shapes
 import velocity
 import wheels as wheels_module
 from body import Body
@@ -83,7 +85,7 @@ def _plan_path_logged(start, goal, shapes, near_side=False, heading=None):
             REMOTE.plan(start, goal, shapes, near_side, heading)  # keep asking: it answers once it is up
         path = _plan_path(start, goal, shapes, near_side, heading)
         PLANNER["local"] += 1
-    if path is None:
+    if path is None and not (REMOTE is not None and REMOTE.waiting()):  # waiting: no answer yet, not no way
         NO_PATH.update(start=list(start), goal=list(goal), near_side=near_side, heading=heading,
                        shapes=[[type(s).__name__] + [round(v, 3) for v in vars(s).values()] for s in shapes])
     return path
@@ -108,8 +110,9 @@ CLOSED_GATE_SPEED = 0.15  # m/s; above this --drive needs the braking numbers me
 STILL = (0.0, 0.0, 0.0)  # the dry run's pose: zero motion
 LOG_ROOT = Path(__file__).resolve().parent / "logs"  # on the Pi: ~/hmc-base/logs
 FOLLOW, RETURN, DONE = "follow", "return", "done"  # the phases of a run
-# m; a larger pose correction leaves the remembered obstacles in the wrong place (Review Focus 2)
+# m; a larger pose correction leaves the brain's remembered obstacles in the wrong place (Review Focus 2)
 CORRECTED = 0.1
+TURN_REACH = 2.0  # m; a turn correction counts by how far it moves a point this far away
 
 
 class Log:
@@ -171,7 +174,8 @@ class State:
         self.follower = Follower(self.body.robot, self.speech, follow_distance=p["follow_gap"] + safety.FRONT,
                                  search_again_every=SEARCH_AGAIN_EVERY)
         self.phase = FOLLOW
-        self.go_back = threading.Event()  # Enter on the console (main's watch_enter thread)
+        self.go_back = threading.Event()  # set: start the way back (Enter, or a test)
+        self.enter = None  # () -> True when Enter was pressed on the console, polled every cycle (main), or None
         self.return_after = return_after  # s of following before RETURN by itself (--return-after), or None
         self.started = None  # time of the first cycle
         self.start = None  # (x, y, heading) of the first cycle: where the way back ends
@@ -310,8 +314,10 @@ def _return(state, seen, now, dt):
     shapes_now = follower.shapes(seen)
     if not state.joined and queue.tail(seen) is not None:
         state.joined, state.returner = True, None
+        _replan(state)  # the goal is the queue now
     if state.joined and not queue.step(seen, shapes_now, follower.navigator, dt):
         state.joined = False  # left the queue for good (queue.done): on along the breadcrumbs from here
+        _replan(state)
     if state.joined:
         return
     if state.returner is None:
@@ -321,19 +327,57 @@ def _return(state, seen, now, dt):
         state.phase = DONE
 
 
+def _inverse(t):
+    """The transform that undoes t; its yaw is not wrapped, so a turn count survives the round trip."""
+    x, y, _ = motion_module._relative(t, (0.0, 0.0, 0.0))
+    return (x, y, -t[2])
+
+
+def _moved(t, point):
+    """point moved by the transform t."""
+    x, y, _ = motion_module._compose(t, (point[0], point[1], 0.0))
+    return (x, y)
+
+
+def _to_believed(fix, seen):
+    """The senses work in the odometry frame, which never jumps; the brain gets their output moved
+    into the corrected frame. RealSenses' obstacles are all Circles (shapes.ObstacleMemory)."""
+    if fix == (0.0, 0.0, 0.0):
+        return seen
+    return dataclasses.replace(
+        seen, operator=None if seen.operator is None else _moved(fix, seen.operator),
+        people={pid: _moved(fix, pt) for pid, pt in seen.people.items()},
+        obstacles=[Circle(*_moved(fix, (c.x, c.y)), c.r) for c in seen.obstacles])
+
+
+def _replan(state):
+    """Plan anew at the next step, and never take a remote answer to a request made before now."""
+    state.follower.navigator._goal = None  # the Navigator plans on its next step when it has no goal
+    if REMOTE is not None:
+        REMOTE.forget()
+
+
 def _correct(state, pose, believed, scan):
     """RETURN: match the scan against the nearest keyframe. Returns (believed pose, keyframe report)."""
     corrected, report = state.keyframes.correct(believed, scan)
     if not report["used"]:
         return believed, report
-    x, y, _ = motion_module._relative(pose, (0.0, 0.0, 0.0))  # the odometry pose undone; its yaw unwrapped
-    state.fix = motion_module._compose(corrected, (x, y, -pose[2]))  # so believed keeps corrected's turn count
-    if report["shift"] > CORRECTED:
-        # Review Focus 2: what was remembered is now in the wrong place, and so is the path. The speed
+    old, state.fix = state.fix, motion_module._compose(corrected, _inverse(pose))
+    # What the brain keeps in the believed frame moves with it: the people trackers' past (else a standing
+    # person seems to walk) and the operator. private: hmc's MotionTracker has no call to move its samples.
+    jump = motion_module._compose(state.fix, _inverse(old))
+    follower = state.follower
+    for tracker in list(follower.people_trackers.values()) + [follower.tracker]:
+        for i, (t, point) in enumerate(tracker._samples):
+            tracker._samples[i] = (t, _moved(jump, point))
+    if follower.last_operator_pos is not None:
+        follower.last_operator_pos = _moved(jump, follower.last_operator_pos)
+    if report["shift"] > CORRECTED or 2 * TURN_REACH * math.sin(abs(report["turn"]) / 2) > CORRECTED:
+        # Review Focus 2: the brain's obstacle memory is now in the wrong place, and so is the path. (The
+        # senses' depth memory is in the odometry frame and comes out moved by the new fix.) The speed
         # stays: the brain ramps from it within the acceleration limits, so the wheels do not jerk.
-        state.senses.memory = shapes.ObstacleMemory(state.p)
-        state.follower.obstacle_memory.clear()
-        state.follower.navigator._goal = None  # the Navigator plans anew on its next step when it has no goal
+        follower.obstacle_memory.clear()
+        _replan(state)
     return corrected, report
 
 
@@ -375,10 +419,13 @@ def cycle(state, now):
         follower.route = Route(believed[:2])
         state.queue = QueueFollower(state.body.robot, believed[:2], follower.people_trackers)
         state.keyframes.add(believed, scan)
+    if state.phase == FOLLOW and state.enter is not None and state.enter():
+        state.go_back.set()
     if state.phase == FOLLOW and (state.go_back.is_set() or (
             state.return_after is not None and now - state.started >= state.return_after)):
         state.phase = RETURN
         state.speech.say(now, hri.RETURN_TEXT)
+        _replan(state)  # the goal is a breadcrumb now, not the operator
     report = None
     if state.phase == RETURN and scan:
         believed, report = _correct(state, pose, believed, scan)
@@ -406,8 +453,13 @@ def cycle(state, now):
             state.enrol_said = enrol
     t_depth = state.clock() - now
     v_was, w_was = state.sent
-    seen = senses.read(now, believed, v_was, w_was, dt, scan, depth_points, answer, link_alive, follower.score)
+    # The senses keep their state in the odometry frame (it never jumps): what moved and what is
+    # furniture, the yaw history for old camera answers. Only their output goes to the believed frame.
+    seen = _to_believed(state.fix, senses.read(now, pose, v_was, w_was, dt, scan, depth_points, answer, link_alive,
+                                               follower.score))
     t_senses = state.clock() - now
+    if REMOTE is not None and REMOTE.waiting():
+        follower.navigator._goal = None  # no answer to a request after forget yet: ask again this cycle
     follower.watch(seen)  # every cycle, before step: it keeps track of everyone
     if state.phase == FOLLOW:
         _remember_crowd(state, seen, now)
@@ -529,10 +581,29 @@ def run(state, seconds, clock=time.monotonic, sleep=time.sleep):
     return None
 
 
-def watch_enter(stream, pressed):
-    """Set `pressed` when a line (Enter) comes on stream. The end of input is not Enter."""
-    if stream.readline().endswith("\n"):
-        pressed.set()
+def open_console(stream):
+    """The raw byte stream under stream, if select can poll it (a POSIX console or pipe), else None.
+
+    Polled in the cycle, never read by a thread: a thread blocked in a read of stdin can abort the
+    interpreter at exit ("could not acquire lock for stdin")."""
+    try:
+        console = stream.buffer.raw
+        select.select([console], [], [], 0)
+    except (AttributeError, OSError, ValueError):
+        return None
+    return console
+
+
+def enter_pressed(console):
+    """True when a line (Enter) is waiting on the console; never waits. The end of input is not Enter."""
+    return bool(select.select([console], [], [], 0)[0]) and console.readline().endswith(b"\n")
+
+
+def discard_typed(console):
+    """Throw away what was typed so far, so an Enter pressed while the run started does not end it."""
+    while select.select([console], [], [], 0)[0]:
+        if not console.read(4096):
+            break  # the end of input
 
 
 def refusal(drive, max_speed, p):
@@ -629,7 +700,12 @@ def main(argv=None):
               " Press Enter again to send the robot back to the start."
               % ("DRIVE" if args.drive else "DRY RUN, the wheels stay off"))
         input()
-        threading.Thread(target=watch_enter, args=(sys.stdin, state.go_back), daemon=True).start()
+        console = open_console(sys.stdin)
+        if console is None:
+            print("Enter cannot be read on this console: only --return-after starts the way back.")
+        else:
+            discard_typed(console)
+            state.enter = lambda: enter_pressed(console)
         run(state, args.seconds)
     except KeyboardInterrupt as stop:
         with signals_ignored():

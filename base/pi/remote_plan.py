@@ -3,6 +3,8 @@
 plan() hands the newest request to a thread and returns at once with the newest answer. That
 answer is for a request from a cycle or two ago (0.1 to 0.3 s): the robot moves under 0.04 m
 meanwhile. When no answer has come for MAX_AGE, alive() is False and the caller plans itself.
+After forget() (the believed pose jumped, or the goal changed) only an answer to a request made
+after it counts; until one comes, plan() returns None and waiting() is True.
 """
 import contextlib
 import json
@@ -27,6 +29,8 @@ class RemotePlanner:
         self.path = None  # the newest answer's path (None: no way found)
         self.seconds = None  # how long the server took for it
         self.next_id = 1
+        self.path_id = 0  # the request id self.path answers
+        self.valid_from = 0  # answers to requests with a smaller id are out of date (forget)
         self.close_plan = True  # sent with every request (the dashboard's switch)
         self.done = threading.Event()
         self.thread = None
@@ -42,6 +46,16 @@ class RemotePlanner:
     def alive(self):
         with self.lock:
             return self.answered_at is not None and self.clock() - self.answered_at <= MAX_AGE
+
+    def forget(self):
+        """Drop the newest answer and any answer still on its way."""
+        with self.lock:
+            self.valid_from, self.path = self.next_id, None
+
+    def waiting(self):
+        """True after forget() until an answer to a newer request has come."""
+        with self.lock:
+            return self.path_id < self.valid_from
 
     def plan(self, start, goal, shapes, near_side=False, heading=None):
         """Ask for a plan and return the newest answer (a list of points, or None)."""
@@ -87,4 +101,6 @@ class RemotePlanner:
                 raise OSError("plan server closed")
             got = json.loads(line)
             with self.lock:
-                self.path, self.seconds, self.answered_at = got["path"], got["seconds"], self.clock()
+                self.seconds, self.answered_at = got["seconds"], self.clock()  # the server is alive either way
+                if got["id"] >= self.valid_from:
+                    self.path, self.path_id = got["path"], got["id"]
