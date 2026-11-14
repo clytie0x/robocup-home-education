@@ -657,3 +657,47 @@ bottles onto the box. None was finished.
   loose following noted before.
 - The fix is the new firmware's per-wheel speed loop (branch claude/base-firmware-e54d4f, PWM 1 kHz,
   not flashed). Flashing needs the owner's approval. The old image is backed up (see above).
+
+## New firmware flashed (branch claude/base-firmware-e54d4f), 2026-11-14 07:20 to 08:00
+
+On the owner's approval, with the owner at the robot and the wheels lifted.
+- Images. The old image is still backed up: ~/firmware-backup/old-1.bin, sha 5924421e...49ef9.
+  - 5eab7fd: full.bin f237e778...a041b3498, built here and matching the session's hash
+  - 0c020e4: full.bin 4684c6c3...ec111f4f, app.bin 1b710637...d8362cf2
+  Each was written over the ROM bootloader with BOOT0=1 (`stm32flash -w full.bin -v -S 0x08000000`),
+  read back and compared with cmp: identical.
+- Layout. stage1 (1080 bytes) sits at 0x08000000 and is written once with the jumper. The app is at
+  0x08001000 with a CRC seal. The firmware adds `U#` (into the ROM bootloader with the wheels still),
+  `V#`, `K#` runtime parameters with bounds (RAM only), `D#`/`E#` diagnostics, and a 3 s stage1
+  watchdog. F B S O R are unchanged.
+- The first `U#` path (5eab7fd) failed on the board: `Uok#`, then the chip answered nothing
+  (no ACK to 0x7F) until RESET. stage1 had used SysTick, set pins and disabled interrupts before
+  jumping, and the F1 ROM bootloader's autobaud needs SysTick. 0c020e4 jumps first thing after the
+  reset.
+- Proven on the board with 0c020e4:
+  - `update.py app.bin` (U#, write, verify, read back, Go) ends "OK: the base runs
+    Vversion:1,build:0c020e4#"
+  - app-hang.bin (hangs before the app watchdog): the stage1 watchdog reset it three times and
+    the chip was in the ROM bootloader 15 to 20 s later
+  - `update.py --rescue app.bin`: OK
+  - Go from the ROM bootloader starts stage1 and the app
+  - A normal RESET with BOOT0=0 starts the app
+- Not proven: the CRC-bad path and the serial-break escape. Both need a power cycle. The Blue Pill
+  is powered from the Pi's USB (owner), so a power cycle is unplugging the USB, which also drops
+  the CH340 the escape signals through.
+- Motors, wheels lifted:
+  - F005 forward: left +7924, right +7713 counts, PWM about 49 %
+  - F000|+030: left -6878, right +6635
+  - S# and the silence timeout bring PWM to 0. Lifted wheels coast a few hundred counts.
+- Turn while driving at 0.12 m/s, wheels lifted (5eab7fd, same motor code), as
+  (right - left) / (right + left) of the wheel rates:
+
+  | w asked | 0 | +0.05 | -0.05 | +0.10 | -0.10 | +0.20 | -0.20 |
+  |---|---|---|---|---|---|---|---|
+  | measured | +0.012 | +0.048 | -0.037 | +0.096 | -0.081 | +0.236 | -0.244 |
+  | expected | 0 | +0.054 | -0.054 | +0.108 | -0.108 | +0.217 | -0.217 |
+
+  Both turn directions now reach the wheels. Under the old firmware right turns while driving did nothing.
+- Pi side: params.json scales back to 1.0 (695d274, deployed; old copy in backups/20261114-074446).
+  The return-trip code (Tasks 1-5 with the review fixes, up to 12bcd82) is deployed; old copies are in
+  backups/20261114-075449. None of it has driven on the floor yet.
