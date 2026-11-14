@@ -786,3 +786,23 @@ the MP-710 and the serial adapter all came back, and the arm team's webcam_view.
 again. After it the Pi viewer relayed 50 webcam frames in 5 s from port 8082 over the LAN.
 Lesson: if the Jetson's USB-A ports go dead, only a power cycle helps; take care plugging cables
 near the Jetson while it runs.
+
+## Whole chain without wheels, 2026-11-14 22:58 to 23:03
+
+Jetson tests with ROS Jazzy sourced (domain 46, so nothing else heard them): 123 passed, the 4
+that skip on the laptop included. Then, wheels off (run_follow without --drive):
+
+- Jetson: `server.py` (TensorRT detector; it warns that the engine plan was built on another
+  device model), `base_bridge.py --pi-host 10.0.0.1` and `hmc_flow.py` (use_arm false), domain 42
+- Pi: `run_follow.py --seconds 400 --remote`, log 20261114-225845
+- Speech typed by hand on /speech/heard
+
+Result: ready -> "follow me" -> following (Pi FOLLOW; locked once the operator stood in view, 1.31 m)
+-> "stop, this is the car" -> at_car (Pi waiting, held "wait") -> "done" -> returning (go_back) ->
+at_start 0.12 s later (the robot had not moved) -> done; the Pi ended with "done: back at the
+start" and the bridge reported the dropped link as not needed. Found on the way:
+
+- hmc_flow does not start until something listens on /tts/say; a "follow me" heard before that
+  is passed on to the brain and lost. With tts_node up this does not happen.
+- At first a red bag hung 0.34 m in front of the camera, so enrol said "nobody in view".
+- A fixed object at (0.38, 0.22) m stayed in the LiDAR "people" list the whole run.
