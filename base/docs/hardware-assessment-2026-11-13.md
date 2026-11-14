@@ -771,7 +771,11 @@ frame in flight, paced at 30 a second, 60 s each) against `server.py --fake` on 
 
 The lab Wi-Fi was quiet at the time; a crowded venue would widen the gap.
 
-At 22:25:12, while the cable went in, the Jetson's kernel log shows the USB 2 side of its Realtek
-USB 3 hub (port 1-2) disconnecting, and with it the AX1080P USB camera (1-2.4, plugged at 22:15),
+At 22:25:12, while the cable went in, the Jetson's kernel log shows the USB 2 side of the
+Realtek hub (0bda:0489, port 1-2) disconnecting, and with it the AX1080P USB camera (1-2.4,
+plugged at 22:15; the arm team's webcam, read by their ~/so100_ws/webcam_view.py on port 8082),
 the MP-710 (1-2.1) and a CH343 "USB Single Serial" adapter (1-2.3). The hub's USB 3 side (2-1)
-stayed. They were still missing at 22:40.
+stayed. This board is an Orin Nano developer kit, whose USB-A ports all go through that onboard
+hub, so after 22:25 no USB 2 device registers on any USB-A port: replugging the camera and
+plugging it into another port gave no kernel event at all, and the owner toggling
+usb1-port2/disable (1 then 0, sudo, 22:46) changed nothing. Over-current counters are 0.

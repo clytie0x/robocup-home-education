@@ -3,7 +3,8 @@
   .venv/bin/python tools/camera_view.py [--port 8081] [--fps 30] [--no-lidar]
   then open http://<pi address>:8081/ on any device on the same network: the home page shows
   everything; /camera and /lidar show one each. The pages are plain files in tools/viewer/.
-  The Jetson's USB camera (jetson/usb_camera_view.py) is relayed over the LAN as /usb-stream.
+  The arm's USB webcam on the Jetson (the arm team's ~/so100_ws/webcam_view.py, port 8082) is
+  relayed over the LAN as /usb-stream, so this never opens that camera itself.
 
 Read-only: it never opens the wheel port. The camera and the LiDAR can each be open in one
 program at a time, so stop this before starting run_follow or any drive tool (and the other way
@@ -163,8 +164,8 @@ def main():
     ap.add_argument("--port", type=int, default=8081)
     ap.add_argument("--fps", type=float, default=30.0, help="frames a second to each viewer (the Xtion gives 30)")
     ap.add_argument("--no-lidar", action="store_true", help="camera only (the LiDAR is in use elsewhere)")
-    ap.add_argument("--usb-port", type=int, default=8083,
-                    help="port of jetson/usb_camera_view.py on jetson_host, relayed as /usb-stream")
+    ap.add_argument("--usb-port", type=int, default=8082,
+                    help="port of the arm team's webcam_view.py on jetson_host, relayed as /usb-stream")
     args = ap.parse_args()
     import params
     usb_url = "http://%s:%d/stream" % (params.load()["jetson_host"], args.usb_port)
