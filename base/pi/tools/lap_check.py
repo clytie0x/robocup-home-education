@@ -39,7 +39,7 @@ END_NEAR, AWAY, MIN_TRAVEL = 0.7, 2.5, 6.0
 STALL_S, STALL_M = 2.0, 0.03
 CELL, EXT = 0.05, 8.0
 HORIZON = 0.9  # s simulated ahead (move plus run-on after S#)
-ESCAPES = [(0.06, 0.0), (0.06, 0.25), (0.06, -0.25), (0.0, 0.35), (0.0, -0.35), (-0.05, 0.0), (-0.05, 0.25), (-0.05, -0.25)]
+ESCAPES = [(0.06, 0.0), (0.06, 0.25), (0.06, -0.25), (0.0, 0.35), (0.0, -0.35)]  # forward only: backing is tools/back_up.py
 
 
 def zones(P):
@@ -85,38 +85,25 @@ def arc(v, w, horizon=HORIZON, dt=0.1):
 def sweep_ok(P, v, w, p):
     """(safe, body gap at the end): the outline along the arc stays clear, and forward passes must_stop."""
     poses = arc(v, w)
-    if not footprint.sweep_clear(P, poses) or (v >= 0 and safety.must_stop(P, v, w, p)):
+    if not footprint.sweep_clear(P, poses) or safety.must_stop(P, v, w, p):
         return False, 0.0
     return True, closest(P, *poses[-1])
 
 
-def choose(P, v, w, p, allow_back=True):
+def choose(P, v, w, p):
     """The wanted motion if it is safe, else the safe escape that leaves the most room, else hold."""
     if sweep_ok(P, v, w, p)[0]:
         return v, w, None
     best = None
     for ev, ew in ESCAPES:
-        if ev < 0 and not allow_back:
-            continue  # backed 0.3 m already in this escape
         ok, gap = sweep_ok(P, ev, ew, p)
         if ok:
-            score = gap + (0.02 if ev > 0 else 0.0)  # prefer going on over backing off
+            score = gap + (0.02 if ev > 0 else 0.0)  # prefer going on over turning on the spot
             if best is None or score > best[0]:
                 best = (score, ev, ew)
     if best is None:
         return 0.0, 0.0, "hold: no safe move"
     return best[1], best[2], "escape v %+.2f w %+.2f (gap after %.2f m)" % (best[1], best[2], best[0])
-
-
-def send(w, v, wr, p):
-    """Like Wheels.send, but a short backward escape is allowed (B packet, raw like air_check)."""
-    if v >= 0:
-        return w.send(v, wr)
-    wr = max(-p["max_turn_rate"], min(p["max_turn_rate"], wr)) * p["angular_cmd_scale"]
-    pk = ("B%03d|%s%03d#" % (int(abs(v) * 100 + 1e-9), "+" if wr >= 0 else "-", int(abs(wr) * 100 + 1e-9))).encode()
-    with w.lock:
-        w.last, w.sent_at = pk, w.clock()
-        w.port.write(pk)
 
 
 def main():
@@ -143,7 +130,7 @@ def main():
         w = wheels.Wheels(p)
         x0, y0, th0 = w.read_odom(); start = (x0, y0); t0 = time.monotonic(); last_print = 0.0
         moving_since, moved_from, prev = None, None, (x0, y0)
-        backed, held = 0.0, 0.0
+        held = 0.0
         while time.monotonic() - t0 < args.seconds:
             now = time.monotonic() - t0
             scan = session.latest() or scan
@@ -156,15 +143,14 @@ def main():
             front, right, left = zones(allp)
             body = closest(allp)
             v, wr = control(front, right, left)
-            v, wr, note = choose(allp, v, wr, p, allow_back=backed < 0.3)
-            backed = backed + 0.005 if v < 0 else (0.0 if v > 0 else backed)
+            v, wr, note = choose(allp, v, wr, p)
             if note and note.startswith("hold"):
                 held += 0.1
                 if held > 5.0:
                     w.stop(); end = "stuck: no safe move for 5 s"; break
             else:
                 held = 0.0
-            send(w, v, wr, p)
+            w.send(v, wr)
             x, y, th = w.read_odom()
             step = math.dist((x, y), prev); travelled += step; prev = (x, y)
             far = math.dist((x, y), start)

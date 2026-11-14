@@ -55,6 +55,56 @@ class Packet(unittest.TestCase):
         self.assertEqual(wheels.packet(0.0, -0.005, P), b"S#")
 
 
+class ReversePacket(unittest.TestCase):
+    def test_reverse_packet_formats_like_forward_with_b(self):
+        self.assertEqual(wheels.reverse_packet(0.04, 0.0, P), b"B004|+000#")
+        self.assertEqual(wheels.reverse_packet(0.06, -0.30, P), b"B006|-030#")
+        p = dict(P, linear_cmd_scale=0.9, angular_cmd_scale=0.862)  # the same scaling as packet()
+        self.assertEqual(wheels.reverse_packet(0.06, 0.40, p), b"B005|+034#")
+
+    def test_reverse_packet_caps_the_turn_and_rounds_nothing_to_a_stop(self):
+        self.assertEqual(wheels.reverse_packet(0.05, 2.0, P), b"B005|+049#")  # max_turn_rate 0.49
+        self.assertEqual(wheels.reverse_packet(0.004, 0.0, P), b"S#")
+
+    def test_reverse_packet_refuses_above_the_cap_at_zero_and_non_finite(self):
+        self.assertEqual(wheels.REVERSE_MAX, 0.06)
+        for speed, w in ((0.061, 0.0), (0.12, 0.0), (0.0, 0.0), (-0.04, 0.0), (float("nan"), 0.0),
+                         (float("inf"), 0.0), (0.04, float("nan")), (0.04, float("-inf"))):
+            with self.assertRaises(ValueError):
+                wheels.reverse_packet(speed, w, P)
+
+    def test_packet_still_refuses_backward(self):
+        for v in (-0.04, -0.06, -1e-6):
+            with self.assertRaises(ValueError):
+                wheels.packet(v, 0.0, P)
+
+    def test_send_reverse_writes_b_and_the_watchdog_repeats_then_stops_it(self):
+        port, clock = FakePort(), Clock()
+        w = wheels.Wheels(P, port=port, clock=clock, start_thread=False)
+        self.assertEqual(w.send_reverse(0.04, 0.0), b"B004|+000#")
+        clock.now = 0.1
+        w.tick()
+        self.assertEqual(port.written[-1], b"B004|+000#")
+        clock.now = 0.35
+        w.tick()
+        self.assertEqual(port.written[-wheels.STOP_REPEATS:], [b"S#"] * wheels.STOP_REPEATS)
+        with self.assertRaises(ValueError):
+            w.send_reverse(0.07, 0.0)
+
+    def test_send_reverse_backs_straight_only(self):
+        port = FakePort()
+        w = wheels.Wheels(P, port=port, start_thread=False)
+        self.assertEqual(w.send_reverse(0.04, -wheels.REVERSE_TURN_MAX), b"B004|-005#")
+        for turn in (0.06, -0.06, 0.25, float("nan")):  # rear_clear checks a straight path only
+            with self.assertRaises(ValueError):
+                w.send_reverse(0.04, turn)
+        self.assertEqual(w.last, b"B004|-005#")
+
+    def test_not_safe_run_text_matches_the_new_firmware(self):
+        self.assertNotIn("no command timeout", wheels.NOT_SAFE_RUN)
+        self.assertIn("0.3 s", wheels.NOT_SAFE_RUN)
+
+
 class Odom(unittest.TestCase):
     def test_parse_odom_reads_the_firmware_units(self):
         self.assertEqual(wheels.parse_odom("Ox:+000.90,y:-000.10,th:+000.86#"), (0.90, -0.10, 0.86))

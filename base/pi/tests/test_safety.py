@@ -140,5 +140,51 @@ class SafetyTest(unittest.TestCase):
         self.assertEqual(safety.speed_cap(numpy.empty((0, 2)), dict(P, max_speed=0.5)), 0.5)
 
 
+
+def wall_behind(x):
+    return [(x, y) for y in numpy.arange(-0.30, 0.31, 0.02)]
+
+
+class RearClearTest(unittest.TestCase):
+    """Backing up straight: the back edge is at x = -0.20; GRID adds 7 mm to the margin."""
+
+    def test_a_wall_far_behind_is_clear_a_near_one_is_not(self):
+        self.assertTrue(safety.rear_clear(wall_behind(-0.20 - 0.20 - 0.10 - 0.06), 0.04, P, 0.20))
+        self.assertFalse(safety.rear_clear(wall_behind(-0.20 - 0.20 - 0.10 + 0.02), 0.04, P, 0.20))
+        self.assertFalse(safety.rear_clear(wall_behind(-0.25), 0.04, P, 0.0))  # 5 cm behind: not even a start
+
+    def test_the_run_on_after_s_is_included(self):
+        run_on = 0.04 * (safety.CYCLE + P["stop_delay"]) + 0.04 ** 2 / (2 * P["decel"])  # about 0.027 m
+        self.assertGreater(run_on, 0.02)
+        wall = wall_behind(-0.20 - 0.20 - 0.10 - 0.015)  # clear of the 0.20 m alone, not of 0.20 m + run-on
+        self.assertTrue(footprint.sweep_clear(wall, [(-0.20, 0.0, 0.0)], 0.10))
+        self.assertFalse(safety.rear_clear(wall, 0.04, P, 0.20))
+        self.assertTrue(safety.rear_clear(wall, 0.04, dict(P, decel=100.0, stop_delay=0.0), 0.19))  # run-on only the last cycle
+
+    def test_the_margin_is_a_parameter(self):
+        wall = wall_behind(-0.20 - 0.10 - 0.15)
+        self.assertTrue(safety.rear_clear(wall, 0.04, P, 0.10))
+        self.assertFalse(safety.rear_clear(wall, 0.04, P, 0.10, margin=0.20))
+
+    def test_points_beside_or_ahead_do_not_count(self):
+        beside = [(x, s * 0.25) for x in numpy.arange(-0.14, 0.15, 0.02) for s in (1, -1)]  # 5 cm off each side
+        ahead = [(0.25, 0.0), (0.5, 0.1)]
+        self.assertTrue(safety.rear_clear(beside + ahead, 0.04, P, 0.30))
+        self.assertFalse(safety.rear_clear(beside + ahead + [(-0.45, 0.0)], 0.04, P, 0.30))
+
+    def test_nothing_seen_is_clear_nan_is_not(self):
+        self.assertTrue(safety.rear_clear(numpy.empty((0, 2)), 0.04, P, 0.30))
+        self.assertFalse(safety.rear_clear([(float("nan"), 0.0)], 0.04, P, 0.30))
+        self.assertFalse(safety.rear_clear([(float("-inf"), 0.0)], 0.04, P, 0.30))
+
+    def test_bad_speed_or_distance_is_an_error(self):
+        for speed, distance in ((0.0, 0.1), (-0.04, 0.1), (float("nan"), 0.1), (0.04, -0.1), (0.04, float("inf"))):
+            with self.assertRaises(ValueError):
+                safety.rear_clear([], speed, P, distance)
+
+    def test_must_stop_still_refuses_backward(self):
+        with self.assertRaises(ValueError):
+            safety.must_stop([], -0.04, 0.0, P)
+
 if __name__ == "__main__":
     unittest.main()

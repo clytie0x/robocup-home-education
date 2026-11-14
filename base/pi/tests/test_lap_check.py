@@ -23,9 +23,9 @@ def wall_across(x, y0=-1.0, y1=1.0):
     return numpy.stack([numpy.full_like(ys, x), ys], axis=1)
 
 
-def run(points, allow_back=True):
+def run(points):
     v, w = lap_check.control(*lap_check.zones(points))
-    return (v, w), lap_check.choose(points, v, w, P, allow_back=allow_back)
+    return (v, w), lap_check.choose(points, v, w, P)
 
 
 class ControlAndChoose(unittest.TestCase):
@@ -52,13 +52,23 @@ class ControlAndChoose(unittest.TestCase):
         self.assertEqual(wanted, (0.0, lap_check.TURN))
         self.assertEqual(chosen, (0.0, 0.0, "hold: no safe move"))
 
-    def test_wall_3_cm_ahead_backs_off_once(self):
-        points = wall_across(0.23)
-        _, chosen = run(points)
-        self.assertEqual(chosen[:2], (-0.05, 0.0))
-        self.assertTrue(chosen[2].startswith("escape"))
-        _, chosen = run(points, allow_back=False)  # backed 0.3 m already
+    def test_wall_3_cm_ahead_holds_it_never_backs_off(self):
+        # backing up is tools/back_up.py's job alone (rear_clear, cable check); the lap holds
+        _, chosen = run(wall_across(0.23))
         self.assertEqual(chosen, (0.0, 0.0, "hold: no safe move"))
+
+    def test_no_path_can_produce_a_backward_command(self):
+        self.assertTrue(all(v >= 0 for v, _ in lap_check.ESCAPES))
+        scenes = [wall_across(x) for x in (0.21, 0.23, 0.3, 0.5)] + [wall_along(y) for y in (-0.22, -0.3, 0.22)]
+        scenes += [numpy.vstack([wall_across(0.23), wall_along(-0.23), wall_along(0.23)]), numpy.zeros((0, 2))]
+        for points in scenes:
+            for v, w in [lap_check.control(*lap_check.zones(points)), (0.0, 0.3), (0.1, 0.0)]:
+                self.assertGreaterEqual(lap_check.choose(points, v, w, P)[0], 0.0)
+        with self.assertRaises(ValueError):  # a negative wanted speed reaches must_stop, which refuses it
+            lap_check.sweep_ok(numpy.zeros((0, 2)), -0.05, 0.0, P)
+        source = (Path(lap_check.__file__)).read_text()
+        for raw in ("port.write", "send_reverse", "reverse_packet", '"B'):
+            self.assertNotIn(raw, source)  # every command goes through Wheels.send, whose packet() refuses v < 0
 
     def test_closest_body_gap(self):
         self.assertAlmostEqual(lap_check.closest(wall_along(-0.45)), 0.25)

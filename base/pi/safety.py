@@ -111,6 +111,26 @@ def must_stop(points_base, v, w, p, cycle=CYCLE):
     return bool(w != 0 and not footprint.sweep_clear(pts, run_on_poses(v, w, p, cycle)))
 
 
+def rear_poses(speed, p, distance, step=0.01):
+    """Poses backing `distance` m straight at `speed`, then the run-on after S# (run_on_poses, mirrored)."""
+    if not (math.isfinite(speed) and speed > 0 and math.isfinite(distance) and distance >= 0):
+        raise ValueError(f"backing {distance} m at {speed} m/s")
+    n = math.ceil(distance / step)
+    straight = [(-distance * k / n, 0.0, 0.0) for k in range(n + 1)] if n else [(0.0, 0.0, 0.0)]
+    return straight + [(-distance - x, 0.0, 0.0) for x, _, _ in run_on_poses(speed, 0.0, p)]
+
+
+def rear_clear(points_base, speed, p, distance, margin=0.10):
+    """True when backing `distance` m straight at `speed`, plus the run-on, keeps the real outline
+    `margin` from every point (footprint.sweep_clear: a point beside the body that the outline does
+    not come closer to does not count). Any NaN or infinite point means not clear."""
+    poses = rear_poses(speed, p, distance)
+    pts = numpy.asarray(points_base, dtype=float).reshape(-1, 2)
+    if not numpy.isfinite(pts).all():
+        return False
+    return footprint.sweep_clear(pts, poses, margin)
+
+
 def speed_cap(depth_points, p):
     """A blind depth camera (None) is never 'nothing there': slow down. An empty array is a real view."""
     return p["max_speed"] if depth_points is not None else min(p["max_speed"], BLIND_CAP)

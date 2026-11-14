@@ -14,8 +14,11 @@ STEP_MAX = 0.5  # m
 TURN_MAX = 1.0  # rad
 STOP_REPEATS = 3  # S# writes per stop: one byte lost to a parity error must not leave the base driving
 SAFE_RUN_ENV = "HMC_SAFE_RUN"  # set by tools/safe_run.py for the program it starts
-NOT_SAFE_RUN = ("start it through tools/safe_run.py, which sends S# however it ends (the firmware has no"
-                " command timeout): python tools/safe_run.py .venv/bin/python <program> <arguments>")
+REVERSE_MAX = 0.06  # m/s, the top backward speed; only tools/back_up.py sends it, after safety.rear_clear
+REVERSE_TURN_MAX = 0.05  # rad/s: send_reverse backs straight, the only path rear_clear checks
+NOT_SAFE_RUN = ("start it through tools/safe_run.py, which sends S# however it ends (the new firmware also stops by"
+                " itself 0.3 s after the last command; the old one did not): python tools/safe_run.py .venv/bin/python"
+                " <program> <arguments>")
 
 
 def under_safe_run():
@@ -41,6 +44,16 @@ def packet(v, w, p):
     if dv == dw == "000":  # rounds to nothing, so stop instead of F000|+000#
         return b"S#"
     return f"F{dv}|{'+' if w >= 0 else '-'}{dw}#".encode("ascii")
+
+
+def reverse_packet(speed, w, p):
+    """Backward at `speed` m/s (0 < speed <= REVERSE_MAX), turn and scaling as packet(): B<vvv>|<s><www>#."""
+    if not (math.isfinite(speed) and math.isfinite(w)):
+        raise ValueError(f"non-finite command {speed}, {w}")
+    if not 0 < speed <= REVERSE_MAX:
+        raise ValueError(f"backward speed {speed} outside (0, {REVERSE_MAX}]")
+    data = packet(speed, w, p)
+    return data if data == b"S#" else b"B" + data[1:]
 
 
 def parse_odom(line):
@@ -127,6 +140,16 @@ class Wheels:
 
     def send(self, v, w):
         data = packet(v, w, self.p)
+        with self.lock:
+            self.last, self.sent_at = data, self.clock()
+            self.port.write(data)
+        return data
+
+    def send_reverse(self, speed, w):
+        """The only backward command (reverse_packet); tools/back_up.py alone calls it."""
+        if not abs(w) <= REVERSE_TURN_MAX:  # NaN too
+            raise ValueError(f"backing turn {w} outside +-{REVERSE_TURN_MAX}")
+        data = reverse_packet(speed, w, self.p)
         with self.lock:
             self.last, self.sent_at = data, self.clock()
             self.port.write(data)
