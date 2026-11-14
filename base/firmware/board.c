@@ -355,5 +355,11 @@ void board_init(void)
     pwm_init();
     encoders_init();
     uart_init();
+#ifdef HANG_TEST
+    /* Test image only (build/app-hang.bin, FLASHING.md section 3): hang before the
+     * application's own watchdog starts, to prove stage1's 3 s watchdog and crash count. */
+    for (;;) {
+    }
+#endif
     watchdog_init();
 }

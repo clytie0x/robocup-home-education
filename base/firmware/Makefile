@@ -33,6 +33,7 @@ BUILD_ID := $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)$(s
 
 firmware: build/full.bin build/app-hang.bin
 	$(PYTHON) tools/image.py check build/app.bin
+	$(PYTHON) tools/image.py check build/app-hang.bin
 	sha256sum build/app.bin build/full.bin build/app-hang.bin
 
 build/stage1.elf: stage1.c boot.c boot.h stm32f103.h stage1.ld

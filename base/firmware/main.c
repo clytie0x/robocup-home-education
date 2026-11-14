@@ -10,12 +10,6 @@ int main(void)
 {
     static app a; /* static: kept off the small MCU stack */
     int ticks = 0;
-#ifdef HANG_TEST
-    /* Test image only (build/app-hang.bin, FLASHING.md section 3): hang before the
-     * application's watchdog starts, to prove stage1's 3 s watchdog and crash count. */
-    for (;;) {
-    }
-#endif
     board_init();
     app_init(&a);
     for (;;) {
