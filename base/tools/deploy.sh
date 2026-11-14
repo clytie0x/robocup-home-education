@@ -73,7 +73,9 @@ backup() { # <host> <folder>; the file list on stdin (paths relative to the fold
     printf '%s\n' \"\$files\" | tar -czf backups/deploy-$STAMP.tar.gz -T - && echo \"$host: backed up \$n files to $dir/backups/deploy-$STAMP.tar.gz\""
 }
 send() { # <host> <folder> <git tree path> <subfolder>
-  git archive --format=tar "$COMMIT:$3" | ssh "$1" "mkdir -p ~/$2/$4 && tar -C ~/$2/$4 -xf -"
+  # autocrlf off: git archive of a subtree does not see the root .gitattributes, and on Windows it would
+  # otherwise write CRLF (seen 2026-11-15: every file on the robot differed from git by its CRs)
+  git -c core.autocrlf=false -c core.eol=lf archive --format=tar "$COMMIT:$3" | ssh "$1" "mkdir -p ~/$2/$4 && tar -C ~/$2/$4 -xf -"
 }
 listing() { # <git tree path> <subfolder prefix>
   git ls-tree -r --name-only "$COMMIT:$1" | sed "s#^#$2#"
