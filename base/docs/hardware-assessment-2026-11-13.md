@@ -893,3 +893,27 @@ about 9 to 10 V of the converter's 12 V) and the motors' rated voltage (label no
   LiDAR showed two new 9 to 15 cm clusters 0.45 to 0.6 m ahead-left. No arm or base motion until clear.
 - LiDAR at the bag (one scan, 04:22, base frame): points x 0.247 to 0.311, y -0.165 to -0.073, plus
   x 0.375 to 0.422 at y -0.105 to -0.113.
+
+## Code on the robot matches git, 2026-11-15 06:20 to 06:50 (plan Milestone 0)
+
+- Before: 13 files on the Pi matched neither git nor the worktree, the Jetson ran the older `server.py` (no
+  pose keypoints, no bag objects), and `~/so100_ws` on the Jetson was not in git.
+- Arm code: everything under `~/so100_ws/src` plus the top-level scripts and settings was committed to
+  `arm-system` (da9c633). 60 source files compared byte for byte with the commit; the other 5 were
+  `.pytest_cache` files, left out on purpose. Captures (rig, rig2, gcal, gcal2, lag, surv, cal3), build,
+  install and log stay on the robot only. The folder itself is still not a git checkout.
+- `voice-system` (9 commits, b2907c8) merged into `sim/robustness-ladder` (94fa4da); it only touches `voice/`.
+- `base/tools/deploy.sh` now deploys a commit (git archive), backs up the files it overwrites into
+  `<folder>/backups/deploy-<time>.tar.gz`, writes `VERSION.json`, keeps `params.json` when it differs, and
+  `--rollback` restores the newest backup. First run: the backup step stopped on a host without
+  VERSION.json (fixed in ad7f68f); then every file arrived with CRLF, because git archive of a subtree on
+  Windows ignores the root `.gitattributes` and follows core.autocrlf (fixed in 0495ce8).
+- Deployed 0495ce8. md5 of every deployed file against the commit: Pi 132 files, 0 differ; Jetson 26 files,
+  0 differ; no `.py` on the Pi has a CR. Backups: `~/hmc-base/backups/deploy-20261115-062122.tar.gz` (110
+  files, the state before) and `deploy-20261115-064418.tar.gz`; Jetson the same names under `~/hmc-follow`.
+- After `--restart` (on ad7f68f, same robot code): console version ad7f68f, camera and LiDAR live; Jetson
+  agent restarted, detector, bridge and flow running. The ssh session to the Jetson was reset at the end
+  of that step, and lab Wi-Fi ssh to both hosts then timed out while Tailscale worked.
+- Detector check on the Jetson (bench image, 2 people, 320 x 240): without pose 2 people, no keypoints;
+  with pose 2 people, both with keypoints; every answer has `objects`.
+- Left on the Pi, not in git: `air_check.py`.
