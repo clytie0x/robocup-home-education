@@ -1,6 +1,6 @@
 """Follow one operator with the hmc brain on the real base.
 
-    run_follow.py --seconds N [--drive] [--max-speed V] [--no-jetson] [--return-after N]
+    run_follow.py --seconds N [--drive] [--max-speed V] [--no-jetson] [--return-after N] [--remote [PORT]]
 
 Without --drive the wheel port is never opened: the brain runs on the real sensors, the
 odometry stays at zero motion and nothing is sent to the wheels (a dry run).
@@ -8,6 +8,10 @@ odometry stays at zero motion and nothing is sent to the wheels (a dry run).
 Phases: FOLLOW until Enter on the console (or --return-after N seconds), then RETURN along the
 breadcrumbs of the way out (hmc.route), behind the queue while one walks ahead (hmc.queue), with
 the pose corrected against the scans stored at the breadcrumbs (keyframes.py). DONE ends the run.
+
+--remote: the Jetson's commands (command_server.py, port 5604) replace Enter. The run starts in
+IDLE (wheels stopped, senses running, enrol allowed); follow, wait, resume, return and stop come
+over TCP, a status line goes back at most 5 Hz, and 2 s without a line holds the robot still.
 
 One cycle per LiDAR revolution (10 Hz): read the sensors, let the brain decide, check the
 safety stop, send the wheel command, log the cycle. Logs go to logs/<start time>/ next to
@@ -40,6 +44,7 @@ from hmc.world import Circle
 
 import calib
 import camera
+import command_server
 import dashboard as dashboard_module
 import depth_obstacles
 import geometry
@@ -110,6 +115,9 @@ CLOSED_GATE_SPEED = 0.15  # m/s; above this --drive needs the braking numbers me
 STILL = (0.0, 0.0, 0.0)  # the dry run's pose: zero motion
 LOG_ROOT = Path(__file__).resolve().parent / "logs"  # on the Pi: ~/hmc-base/logs
 FOLLOW, RETURN, DONE = "follow", "return", "done"  # the phases of a run
+IDLE = "idle"  # --remote only: before the client's follow; the wheels stay stopped
+STATUS_EVERY = 0.2  # s; --remote status lines at most 5 Hz (and after each command)
+REMOTE_SILENCE = 2.0  # s without a line from the --remote client: hold still until one comes
 # m; a larger pose correction leaves the brain's remembered obstacles in the wrong place (Review Focus 2)
 CORRECTED = 0.1
 TURN_REACH = 2.0  # m; a turn correction counts by how far it moves a point this far away
@@ -160,7 +168,7 @@ class State:
     """
 
     def __init__(self, p, wheels, lidar, camera, link, log, max_speed=None, encode=_no_jpeg, clock=time.monotonic,
-                 velocity_loop=False, return_after=None):
+                 velocity_loop=False, return_after=None, remote=None):
         self.p = p
         self.wheels, self.lidar, self.camera, self.link, self.log = wheels, lidar, camera, link, log
         self.max_speed = p["max_speed"] if max_speed is None else max_speed
@@ -173,7 +181,13 @@ class State:
         self.speech = Speech(log)
         self.follower = Follower(self.body.robot, self.speech, follow_distance=p["follow_gap"] + safety.FRONT,
                                  search_again_every=SEARCH_AGAIN_EVERY)
-        self.phase = FOLLOW
+        self.remote = remote  # command_server.CommandServer (--remote), or None: Enter and --return-after only
+        self.phase = FOLLOW if remote is None else IDLE
+        self.waiting = False  # --remote "wait": hold still, the senses and the brain keep running
+        self.silent = False  # --remote: nothing heard from the client for REMOTE_SILENCE
+        self.ack = None  # the client's last command (a ping is not one)
+        self.status_at = -math.inf  # when the last status line went to the client
+        self.last_record = None  # the last cycle record, for a status sent with an end record
         self.go_back = threading.Event()  # set: start the way back (Enter, or a test)
         self.enter = None  # () -> True when Enter was pressed on the console, polled every cycle (main), or None
         self.return_after = return_after  # s of following before RETURN by itself (--return-after), or None
@@ -224,7 +238,59 @@ def _end(state, now, reason, detail):
     _stop_wheels(state)
     record = {"time": now, "stop": reason, "end": "%s: %s" % (reason, detail)}
     state.log.write(record)
+    _report(state, now, record)
     return record
+
+
+def _remote_commands(state, now):
+    """--remote: take the client's commands that arrived since the last cycle. Returns their names."""
+    remote = state.remote
+    commands = remote.poll(now)
+    for event in remote.events:
+        state.log.write({"time": now, "remote": event})
+    remote.events.clear()
+    for cmd in commands:
+        if cmd == "ping":
+            continue
+        state.ack = cmd
+        state.log.write({"time": now, "remote_cmd": cmd})
+        if cmd == "follow" and state.phase == IDLE:
+            state.phase, state.started = FOLLOW, now  # --return-after counts from here
+        if cmd == "return":
+            state.go_back.set()
+        if cmd in ("wait", "resume", "follow", "return"):
+            state.waiting = cmd == "wait"  # follow and return may move again, as resume
+    silent = remote.silent(now) > REMOTE_SILENCE
+    if silent != state.silent:
+        state.silent = silent
+        state.log.write({"time": now, "remote": "silent %.1f s: holding still" % remote.silent(now) if silent
+                         else "heard again: may move"})
+    return commands
+
+
+def _report(state, now, record, force=False):
+    """--remote: the status line to the client, at most every STATUS_EVERY unless forced or the end."""
+    if state.remote is None:
+        return
+    if "pose" in record:
+        state.last_record = record
+    if not (force or "end" in record or now - state.status_at >= STATUS_EVERY - 1e-6):
+        return
+    last = state.last_record or {}
+    operator, believed = last.get("operator"), last.get("believed")
+    state.remote.send({
+        "t": now,
+        "phase": DONE.upper() if "end" in record else state.phase.upper(),
+        "waiting": state.waiting,
+        "locked": bool(last.get("locked", False)),
+        "operator_m": None if operator is None or believed is None else round(math.dist(operator, believed[:2]), 3),
+        "breadcrumbs": last.get("breadcrumbs", 0),
+        "queue_tail": last.get("queue"),
+        "at_start": state.returner is not None and state.returner.done,
+        "stop": record.get("stop"),
+        "ack": state.ack,
+    })
+    state.status_at = now
 
 
 def predict(pose, v, w, seconds):
@@ -393,6 +459,10 @@ def cycle(state, now):
     if switches["end"]:
         return _end(state, now, "dashboard", "STOP pressed on the page")
     hmc_navigation.CLOSE_PLAN = switches["close_plan"]
+    commands = _remote_commands(state, now) if state.remote is not None else []
+    if "stop" in commands:
+        state.phase = DONE
+        return _end(state, now, "remote stop", "stop from the client")
 
     # 1. Sensors. Broken odometry means we no longer know where we are: stop (Review Focus 5).
     try:
@@ -421,7 +491,7 @@ def cycle(state, now):
         state.keyframes.add(believed, scan)
     if state.phase == FOLLOW and state.enter is not None and state.enter():
         state.go_back.set()
-    if state.phase == FOLLOW and (state.go_back.is_set() or (
+    if state.phase in (IDLE, FOLLOW) and (state.go_back.is_set() or (state.phase == FOLLOW and
             state.return_after is not None and now - state.started >= state.return_after)):
         state.phase = RETURN
         state.speech.say(now, hri.RETURN_TEXT)
@@ -493,6 +563,13 @@ def cycle(state, now):
         stop = "no scan"  # the LiDAR went quiet: blind, so do not move
     if stop is None and switches["paused"]:
         stop = "paused"  # from the page: hold still, the senses and the brain keep running
+    if stop is None and state.remote is not None:  # the same hold, from the client or its silence
+        if state.phase == IDLE:
+            stop = "idle"
+        elif state.waiting:
+            stop = "wait"
+        elif state.silent and state.phase != DONE:
+            stop = "silent"
     if stop is not None:
         v = w = 0.0
         if state.velocity is not None:
@@ -555,6 +632,8 @@ def cycle(state, now):
         "keyframe": report,  # the match against the nearest keyframe (RETURN), or None
         "queue": state.queue.last_tail[1] if state.joined and state.queue.last_tail else None,  # tail's id
     }
+    if state.remote is not None:
+        record["remote"] = {"waiting": state.waiting, "silent_s": round(state.remote.silent(now), 2), "last_cmd": state.ack}
     if state.phase == DONE:
         _stop_wheels(state)
         record["end"] = "done: back at the start"
@@ -565,6 +644,7 @@ def cycle(state, now):
     if NO_PATH and state.n % 20 == 0:  # at most one dump every 2 s
         state.log.write({"time": now, "no_path": dict(NO_PATH)})
         NO_PATH.clear()
+    _report(state, now, record, force=bool(commands))
     return record
 
 
@@ -658,6 +738,9 @@ def main(argv=None):
                         help="start the way back by itself after N s of following (a test aid; Enter does it too)")
     parser.add_argument("--dashboard", type=int, default=dashboard_module.PORT, metavar="PORT",
                         help="serve the status page on this port (0: no page)")
+    parser.add_argument("--remote", type=int, nargs="?", const=command_server.PORT, metavar="PORT",
+                        help="take follow, wait, resume, return and stop from a TCP client (the Jetson) on this port"
+                             " (default %d) instead of Enter; the run starts standing still" % command_server.PORT)
     args = parser.parse_args(argv)
     p = params.load()
     why = refusal(args.drive, args.max_speed, p)
@@ -670,7 +753,7 @@ def main(argv=None):
         signal.signal(sig, _interrupt)
     log = Log(LOG_ROOT / time.strftime("%Y%m%d-%H%M%S"))
     print("logging to", log.folder)
-    session = cam = link = wheels = server = page = None
+    session = cam = link = wheels = server = page = remote = None
     global REMOTE
     try:
         if args.planner == "pi":
@@ -687,8 +770,11 @@ def main(argv=None):
             link = link_module.JetsonLink(p["jetson_host"], p["jetson_port"], p["camera_hfov_deg"])
             link.start()
         wheels = open_wheels(args.drive, p)
+        if args.remote is not None:
+            remote = command_server.CommandServer(port=args.remote)
+            remote.start()
         state = State(p, wheels, session, cam, link, log, args.max_speed, encode=link_module._encode_jpeg,
-                      velocity_loop=args.velocity_loop, return_after=args.return_after)
+                      velocity_loop=args.velocity_loop, return_after=args.return_after, remote=remote)
         if REMOTE is not None:
             hmc_navigation.REPLAN_ON_NEW_SHAPES = True  # a plan is only a message now: ask every cycle
         if args.dashboard:
@@ -696,16 +782,20 @@ def main(argv=None):
                                                                  port=args.dashboard)
             page.start()
             print("dashboard: http://%s:%d/" % (socket.gethostname(), args.dashboard))
-        print("%s. Operator: stand alone within 2.5 m in front of the robot, then press Enter."
-              " Press Enter again to send the robot back to the start."
-              % ("DRIVE" if args.drive else "DRY RUN, the wheels stay off"))
-        input()
-        console = open_console(sys.stdin)
-        if console is None:
-            print("Enter cannot be read on this console: only --return-after starts the way back.")
+        if remote is not None:
+            print("%s. Remote: commands on port %d (follow, wait, resume, return, stop); standing still until follow."
+                  % ("DRIVE" if args.drive else "DRY RUN, the wheels stay off", remote.port))
         else:
-            discard_typed(console)
-            state.enter = lambda: enter_pressed(console)
+            print("%s. Operator: stand alone within 2.5 m in front of the robot, then press Enter."
+                  " Press Enter again to send the robot back to the start."
+                  % ("DRIVE" if args.drive else "DRY RUN, the wheels stay off"))
+            input()
+            console = open_console(sys.stdin)
+            if console is None:
+                print("Enter cannot be read on this console: only --return-after starts the way back.")
+            else:
+                discard_typed(console)
+                state.enter = lambda: enter_pressed(console)
         run(state, args.seconds)
     except KeyboardInterrupt as stop:
         with signals_ignored():
@@ -718,7 +808,7 @@ def main(argv=None):
         with signals_ignored():
             if wheels is not None:
                 wheels.close()  # S# again, before anything else is shut down
-            for device in (link, cam, REMOTE, page):
+            for device in (link, cam, REMOTE, page, remote):
                 if device is not None:
                     device.stop()
             if server is not None:
