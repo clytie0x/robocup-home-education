@@ -1,7 +1,6 @@
 """The control loop with fake devices. Nothing here opens a serial port or drives the base."""
 import json
 import math
-import select
 import signal
 import socket
 import tempfile
@@ -23,6 +22,7 @@ import params
 import run_follow
 import safety
 from link import Answer, Seen
+from test_command_server import Broken, Client
 from test_legs import person, scan_of
 from test_scanmatch import box, world_scan
 from test_wheels import FakePort
@@ -886,38 +886,8 @@ class Return(Logged):
         self.assertTrue(all(r["v"] >= 0.0 for r in back))
 
 
-class Client:
-    """The Jetson's end of --remote, on localhost: sends command lines, reads the Pi's lines."""
-
-    def __init__(self, port):
-        self.sock = socket.create_connection(("127.0.0.1", port), timeout=2.0)
-        self.buffer, self.closed = b"", False
-
-    def send(self, raw):
-        self.sock.sendall(raw)
-        time.sleep(0.05)  # arrived before the next cycle polls
-
-    def cmd(self, name):
-        self.send(json.dumps({"cmd": name}).encode("utf-8") + b"\n")
-
-    def read(self, wait=0.05):
-        """Every line the Pi has sent so far, as objects."""
-        while not self.closed and select.select([self.sock], [], [], wait)[0]:
-            try:
-                chunk = self.sock.recv(65536)
-            except ConnectionResetError:
-                chunk = b""
-            self.closed = not chunk
-            self.buffer += chunk
-        lines = self.buffer.split(b"\n")
-        self.buffer = lines.pop()
-        return [json.loads(line) for line in lines]
-
-    def close(self):
-        self.sock.close()
-
-
-STATUS_FIELDS = {"t", "phase", "waiting", "locked", "operator_m", "breadcrumbs", "queue_tail", "at_start", "stop", "ack"}
+STATUS_FIELDS = {"t", "phase", "waiting", "held", "locked", "operator_m", "breadcrumbs", "queue_tail", "at_start",
+                 "stop", "ack"}
 
 
 class Remote(Logged):
@@ -964,7 +934,7 @@ class Remote(Logged):
         self.assertEqual(base.sent[-1], (0.1, 0.0))
         status = jetson.read()[-1]
         self.assertEqual((status["phase"], status["ack"], status["waiting"]), ("FOLLOW", "follow", False))
-        self.assertEqual(record["remote"], {"waiting": False, "silent_s": 0.0, "last_cmd": "follow"})
+        self.assertEqual(record["remote"], {"waiting": False, "held": None, "silent_s": 0.0, "last_cmd": "follow"})
 
     def test_idle_senses_and_enrols_the_operator_without_moving(self):
         base = FakeBase()
@@ -1051,13 +1021,13 @@ class Remote(Logged):
                          ("DONE", "stop", False, "remote stop"))
         # and run() ends with it
         state = self.remote_state(FakeBase())
-        jetson.cmd("stop")
+        jetson.send(b'{"cmd": "follow"}\n{"cmd": "stop"}\n')  # in order: following, so stop is taken
         clock = SimpleNamespace(now=0.0)
         state.clock = lambda: clock.now
         end = run_follow.run(state, 5.0, clock=lambda: clock.now, sleep=lambda s: setattr(clock, "now", clock.now + s))
         self.assertTrue(end.startswith("remote stop"), end)
 
-    def test_two_seconds_of_silence_hold_still_and_a_ping_resumes(self):
+    def test_two_seconds_of_silence_hold_until_resume_and_a_ping_does_not_release(self):
         base = FakeBase()
         state = self.remote_state(base)
         jetson = self.client()
@@ -1072,8 +1042,15 @@ class Remote(Logged):
         self.assertTrue(any("silent" in str(r.get("remote")) for r in self.records() if "pose" not in r))
         jetson.cmd("ping")
         record = self.cycle(state, 2.2)
-        self.assertEqual((record["v"], record["stop"]), (0.1, None))
+        self.assertEqual((record["v"], record["stop"], record["remote"]["held"]), (0.0, "silent", "silent"))
         self.assertEqual(record["remote"]["last_cmd"], "follow")  # a ping is not acked as a command
+        self.assertEqual(jetson.read()[-1]["held"], "silent")
+        record = self.cycle(state, 2.3)  # heard again 0.1 s ago, but only a ping: still held
+        self.assertEqual((record["v"], record["stop"], record["remote"]["silent_s"]), (0.0, "silent", 0.1))
+        jetson.cmd("resume")
+        record = self.cycle(state, 2.4)
+        self.assertEqual((record["v"], record["stop"], record["remote"]["held"]), (0.1, None, None))
+        self.assertTrue(any("released" in str(r.get("remote")) for r in self.records()))
 
     def test_a_malformed_line_gets_an_error_and_changes_nothing(self):
         base = FakeBase()
@@ -1087,7 +1064,7 @@ class Remote(Logged):
         replies = jetson.read()
         self.assertEqual(len([r for r in replies if "error" in r]), 5)
         self.assertEqual((record["phase"], record["v"], record["stop"]), ("follow", 0.1, None))
-        self.assertEqual(record["remote"], {"waiting": False, "silent_s": 0.1, "last_cmd": "follow"})  # not heard
+        self.assertEqual(record["remote"], {"waiting": False, "held": None, "silent_s": 0.1, "last_cmd": "follow"})  # not heard
 
     def test_a_second_client_replaces_the_first(self):
         state = self.remote_state(FakeBase())
@@ -1113,9 +1090,203 @@ class Remote(Logged):
         self.assertEqual([round(s["t"], 1) for s in statuses], [0.0, 0.2, 0.4, 0.6, 0.8])
         for s in statuses:
             self.assertEqual(set(s), STATUS_FIELDS)
-            self.assertEqual((s["phase"], s["waiting"], s["locked"], s["operator_m"], s["queue_tail"], s["at_start"],
-                              s["stop"], s["ack"]), ("FOLLOW", False, False, None, None, False, None, "follow"))
+            self.assertEqual((s["phase"], s["waiting"], s["held"], s["locked"], s["operator_m"], s["queue_tail"],
+                              s["at_start"], s["stop"], s["ack"]),
+                             ("FOLLOW", False, None, False, None, None, False, None, "follow"))
             self.assertIsInstance(s["breadcrumbs"], int)
+
+    def test_operator_m_is_the_kept_operator_while_locked_but_not_seen(self):
+        class LockedBlind:
+            locked, ambiguous, learned = True, False, 20
+
+            def read(self, now, *rest):
+                return Senses(now, None, None, {}, [])
+
+        state = self.remote_state(FakeBase())
+        state.senses = LockedBlind()
+        state.follower.last_operator_pos = (1.2, 0.0)
+        jetson = self.client()
+        jetson.cmd("follow")
+        self.cycle(state, 0.0)
+        self.assertAlmostEqual(jetson.read()[-1]["operator_m"], 1.2)
+        state.senses.locked = False
+        jetson.cmd("ping")
+        self.cycle(state, 0.1)
+        self.assertIsNone(jetson.read()[-1]["operator_m"])
+
+    def quiet(self, state, start, until):
+        """Cycles every 0.1 s from `start` to `until` with nothing sent. Returns the last record."""
+        record = None
+        for i in range(int(round(start * 10)), int(round(until * 10)) + 1):
+            record = self.cycle(state, round(0.1 * i, 1))
+        return record
+
+    def test_a_disconnect_holds_still_after_two_seconds_until_a_command(self):
+        base = FakeBase()
+        state = self.remote_state(base)
+        jetson = self.client()
+        jetson.cmd("follow")
+        self.cycle(state, 0.0)
+        jetson.close()  # the Wi-Fi drops
+        record = self.quiet(state, 0.1, 2.0)
+        self.assertEqual((record["v"], record["stop"]), (0.1, None))
+        record = self.cycle(state, 2.1)
+        self.assertEqual((record["v"], record["w"], record["stop"]), (0.0, 0.0, "silent"))
+        self.assertIsNone(state.remote.client)  # "closed by the client", or a reset: it had unread status lines
+        self.assertEqual(len([r for r in self.records() if "remote" in r and "pose" not in r]), 3)  # connect, gone, silent
+        again = self.client()
+        again.cmd("ping")
+        record = self.cycle(state, 2.2)
+        self.assertEqual((record["stop"], record["remote"]["held"]), ("silent", "silent"))
+        self.assertEqual(again.read()[-1]["held"], "silent")
+        self.assertEqual(self.cycle(state, 2.3)["stop"], "silent")  # pings alone never release it
+        again.cmd("follow")  # the bridge sends its intended state again after a reconnect
+        record = self.cycle(state, 2.4)
+        self.assertEqual((record["v"], record["stop"], record["remote"]["held"]), (0.1, None, None))
+
+    def test_no_client_at_all_latches_the_silence_hold(self):
+        base = FakeBase()
+        state = self.remote_state(base)
+        record = self.quiet(state, 0.0, 2.1)
+        self.assertEqual((record["phase"], record["stop"], record["remote"]["held"]), ("idle", "idle", "silent"))
+        jetson = self.client()
+        jetson.cmd("follow")
+        record = self.cycle(state, 2.2)
+        self.assertEqual((record["phase"], record["v"], record["stop"]), ("follow", 0.1, None))
+
+    def test_only_malformed_lines_past_two_seconds_still_hold(self):
+        base = FakeBase()
+        state = self.remote_state(base)
+        jetson = self.client()
+        jetson.cmd("follow")
+        for i in range(22):
+            if i % 5 == 1:
+                jetson.send(b"hello\n")
+            record = self.cycle(state, round(0.1 * i, 1))
+        self.assertEqual((record["v"], record["stop"]), (0.0, "silent"))
+        self.assertGreater(len(jetson.errors()), 0)
+
+    def returning_state(self, jetson):
+        """Remote, the real brain, carried 2 m out while following, then return sent. Returns (state, base, now)."""
+        base = FakeBase()
+        state = self.remote_state(base, brain=None)
+        jetson.cmd("follow")
+        for i in range(21):
+            base.pose = (0.1 * i, 0.0, 0.0)
+            self.cycle(state, round(0.1 * i, 1))
+        jetson.cmd("return")
+        self.assertEqual(self.cycle(state, 2.1)["phase"], "return")
+        return state, base, 2.1
+
+    def test_follow_during_return_keeps_returning(self):
+        jetson = self.client()
+        state, base, now = self.returning_state(jetson)
+        target = state.returner.target
+        jetson.cmd("follow")
+        record = self.cycle(state, now + 0.1)
+        self.assertEqual((record["phase"], record["remote"]["last_cmd"]), ("return", "follow"))
+        self.assertEqual(state.returner.target, target)
+        self.assertEqual([r["say"] for r in self.records() if "say" in r], [hri.RETURN_TEXT])
+
+    def test_wait_during_return_holds_and_resume_drives_on(self):
+        jetson = self.client()
+        state, base, now = self.returning_state(jetson)
+        jetson.cmd("wait")
+        record = self.cycle(state, now + 0.1)
+        self.assertEqual((record["phase"], record["v"], record["w"], record["stop"]), ("return", 0.0, 0.0, "wait"))
+        self.assertEqual(jetson.read()[-1]["held"], "wait")
+        jetson.cmd("resume")
+        record = self.cycle(state, now + 0.2)
+        self.assertEqual((record["phase"], record["stop"]), ("return", None))
+        self.assertNotEqual((record["v"], record["w"]), (0.0, 0.0))  # turning round toward the breadcrumbs
+
+    def test_return_while_idle_is_refused(self):
+        state = self.remote_state(FakeBase())
+        jetson = self.client()
+        self.cycle(state, 0.0)
+        jetson.cmd("return")
+        record = self.cycle(state, 0.1)
+        self.assertEqual((record["phase"], record["remote"]["last_cmd"]), ("idle", None))
+        self.assertIn("not following yet", jetson.errors())
+        self.assertEqual([r for r in self.records() if "say" in r], [])
+        self.assertFalse(state.go_back.is_set())
+
+    def test_stop_while_idle_is_refused(self):
+        base = FakeBase()
+        state = self.remote_state(base)
+        jetson = self.client()
+        self.cycle(state, 0.0)
+        jetson.cmd("stop")
+        record = self.cycle(state, 0.1)
+        self.assertNotIn("end", record)
+        self.assertEqual(record["phase"], "idle")
+        self.assertEqual(base.stops, 0)
+        self.assertIn("idle: nothing to stop", jetson.errors())
+
+    def test_stop_while_waiting_ends_the_run(self):
+        base = FakeBase()
+        state = self.remote_state(base)
+        jetson = self.client()
+        jetson.cmd("follow")
+        self.cycle(state, 0.0)
+        jetson.cmd("wait")
+        self.cycle(state, 0.1)
+        jetson.cmd("stop")
+        record = self.cycle(state, 0.2)
+        self.assertEqual(record["stop"], "remote stop")
+        self.assertEqual(base.stops, 1)
+
+    def test_the_way_back_starts_where_follow_came_not_where_the_program_started(self):
+        base = FakeBase()
+        state = self.remote_state(base, brain=None)
+        jetson = self.client()
+        self.cycle(state, 0.0)
+        base.pose = (1.0, 0.5, 0.3)  # carried to the start line before follow
+        self.cycle(state, 0.1)
+        jetson.cmd("follow")
+        self.cycle(state, 0.2)
+        self.assertEqual(state.start, (1.0, 0.5, 0.3))
+        self.assertEqual(state.started, 0.2)
+        self.assertEqual(state.follower.route.points, [(1.0, 0.5)])
+        self.assertEqual([pose for pose, _ in state.keyframes.frames], [(1.0, 0.5, 0.3)])
+        jetson.cmd("return")  # straight back: it is at the start already, not 1.1 m from it
+        record = self.cycle(state, 0.3)
+        self.assertTrue(record["end"].startswith("done"), record)
+        self.assertEqual(jetson.read()[-1]["at_start"], True)
+
+    def test_the_remote_holds_send_zero_with_the_velocity_loop(self):
+        base = FakeBase()
+        state = run_follow.State(P, base, Scans(WALL_ONLY), Camera(), None, self.log, clock=lambda: self.now,
+                                 velocity_loop=True, remote=self.server)
+        state.follower = Pushy(state.body.robot)
+        state.estimates._avg["speed_gain"].value, state.estimates._avg["speed_gain"].samples = 0.8, 100
+        jetson = self.client()
+        self.assertEqual(self.cycle(state, 0.0)["stop"], "idle")
+        self.assertEqual(base.sent[-1], (0.0, 0.0))
+        jetson.cmd("follow")
+        self.cycle(state, 0.1)
+        base.advance(0.1)
+        self.assertGreater(base.sent[-1][0], 0.1)  # the loop corrects the slow base
+        jetson.cmd("wait")
+        self.assertEqual(self.cycle(state, 0.2)["stop"], "wait")
+        self.assertEqual(base.sent[-1], (0.0, 0.0))
+        jetson.cmd("resume")
+        self.cycle(state, 0.3)
+        record = self.quiet(state, 0.4, 2.4)  # resume heard at 0.3
+        self.assertEqual(record["stop"], "silent")
+        self.assertEqual(base.sent[-1], (0.0, 0.0))
+
+    def test_a_socket_error_does_not_escape_the_cycle(self):
+        base = FakeBase()
+        state = self.remote_state(base)
+        jetson = self.client()
+        jetson.cmd("follow")
+        self.cycle(state, 0.0)
+        state.remote.client.close()
+        state.remote.client = Broken()
+        record = self.cycle(state, 0.1)  # no exception
+        self.assertEqual((record["phase"], record["v"]), ("follow", 0.1))
+        self.assertTrue(any("broke" in str(r.get("remote")) for r in self.records()))
 
     def test_main_with_remote_starts_in_idle_without_enter(self):
         old = {s: signal.getsignal(s) for s in run_follow.STOP_SIGNALS}

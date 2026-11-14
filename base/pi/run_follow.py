@@ -11,7 +11,8 @@ the pose corrected against the scans stored at the breadcrumbs (keyframes.py). D
 
 --remote: the Jetson's commands (command_server.py, port 5604) replace Enter. The run starts in
 IDLE (wheels stopped, senses running, enrol allowed); follow, wait, resume, return and stop come
-over TCP, a status line goes back at most 5 Hz, and 2 s without a line holds the robot still.
+over TCP, a status line goes back at most 5 Hz, and 2 s without a command line holds the robot
+still until resume, follow or return. The way back starts where follow came.
 
 One cycle per LiDAR revolution (10 Hz): read the sensors, let the brain decide, check the
 safety stop, send the wheel command, log the cycle. Logs go to logs/<start time>/ next to
@@ -117,7 +118,8 @@ LOG_ROOT = Path(__file__).resolve().parent / "logs"  # on the Pi: ~/hmc-base/log
 FOLLOW, RETURN, DONE = "follow", "return", "done"  # the phases of a run
 IDLE = "idle"  # --remote only: before the client's follow; the wheels stay stopped
 STATUS_EVERY = 0.2  # s; --remote status lines at most 5 Hz (and after each command)
-REMOTE_SILENCE = 2.0  # s without a line from the --remote client: hold still until one comes
+REMOTE_SILENCE = 2.0  # s without a command line from the --remote client: hold still until resume, follow or return
+REFUSED_IDLE = {"return": "not following yet", "stop": "idle: nothing to stop"}  # --remote commands IDLE answers with an error
 # m; a larger pose correction leaves the brain's remembered obstacles in the wrong place (Review Focus 2)
 CORRECTED = 0.1
 TURN_REACH = 2.0  # m; a turn correction counts by how far it moves a point this far away
@@ -243,29 +245,47 @@ def _end(state, now, reason, detail):
 
 
 def _remote_commands(state, now):
-    """--remote: take the client's commands that arrived since the last cycle. Returns their names."""
+    """--remote: take the client's commands that arrived since the last cycle. Returns the names of
+    those taken (a refused one is answered with an error and changes nothing)."""
     remote = state.remote
+    quiet = remote.silent(now)  # how long the client had been silent before this cycle's lines
     commands = remote.poll(now)
     for event in remote.events:
         state.log.write({"time": now, "remote": event})
     remote.events.clear()
+    if quiet > REMOTE_SILENCE and not state.silent:
+        state.silent = True  # latched: only resume, follow or return releases it, not a ping
+        state.log.write({"time": now, "remote": "silent %.1f s: held until resume, follow or return" % quiet})
+    taken = []
     for cmd in commands:
+        refused = REFUSED_IDLE.get(cmd) if state.phase == IDLE else None
+        if refused is not None:
+            remote.send({"error": refused})
+            state.log.write({"time": now, "remote_refused": cmd, "why": refused})
+            continue
+        taken.append(cmd)
         if cmd == "ping":
             continue
         state.ack = cmd
         state.log.write({"time": now, "remote_cmd": cmd})
         if cmd == "follow" and state.phase == IDLE:
-            state.phase, state.started = FOLLOW, now  # --return-after counts from here
+            # The way back starts where follow came, not where the program started (the robot may
+            # have been carried to the start line): the first-cycle setup runs again this cycle.
+            state.phase, state.start = FOLLOW, None
+            state.keyframes = keyframes_module.Keyframes(state.p)
         if cmd == "return":
             state.go_back.set()
         if cmd in ("wait", "resume", "follow", "return"):
             state.waiting = cmd == "wait"  # follow and return may move again, as resume
-    silent = remote.silent(now) > REMOTE_SILENCE
-    if silent != state.silent:
-        state.silent = silent
-        state.log.write({"time": now, "remote": "silent %.1f s: holding still" % remote.silent(now) if silent
-                         else "heard again: may move"})
-    return commands
+        if cmd in ("resume", "follow", "return") and state.silent:
+            state.silent = False
+            state.log.write({"time": now, "remote": "silence hold released by %s" % cmd})
+    return taken
+
+
+def _held(state):
+    """--remote: why the client's side holds the robot still ("wait" or "silent"), or None."""
+    return "wait" if state.waiting else "silent" if state.silent else None
 
 
 def _report(state, now, record, force=False):
@@ -278,10 +298,13 @@ def _report(state, now, record, force=False):
         return
     last = state.last_record or {}
     operator, believed = last.get("operator"), last.get("believed")
+    if operator is None and last.get("locked"):
+        operator = last.get("operator_kept")  # not seen this cycle, but the senses still hold the track
     state.remote.send({
         "t": now,
         "phase": DONE.upper() if "end" in record else state.phase.upper(),
         "waiting": state.waiting,
+        "held": _held(state),
         "locked": bool(last.get("locked", False)),
         "operator_m": None if operator is None or believed is None else round(math.dist(operator, believed[:2]), 3),
         "breadcrumbs": last.get("breadcrumbs", 0),
@@ -484,14 +507,14 @@ def cycle(state, now):
     follower = state.follower
     # The brain's frame: the odometry, moved by the keyframe corrections of the way back.
     believed = motion_module._compose(state.fix, pose)
-    if state.start is None:  # the first cycle: the start of the way back is here
+    if state.start is None:  # the first cycle (--remote: also the cycle of follow): the start of the way back is here
         state.started, state.start = now, believed
         follower.route = Route(believed[:2])
         state.queue = QueueFollower(state.body.robot, believed[:2], follower.people_trackers)
         state.keyframes.add(believed, scan)
     if state.phase == FOLLOW and state.enter is not None and state.enter():
         state.go_back.set()
-    if state.phase in (IDLE, FOLLOW) and (state.go_back.is_set() or (state.phase == FOLLOW and
+    if state.phase == FOLLOW and (state.go_back.is_set() or (
             state.return_after is not None and now - state.started >= state.return_after)):
         state.phase = RETURN
         state.speech.say(now, hri.RETURN_TEXT)
@@ -566,10 +589,8 @@ def cycle(state, now):
     if stop is None and state.remote is not None:  # the same hold, from the client or its silence
         if state.phase == IDLE:
             stop = "idle"
-        elif state.waiting:
-            stop = "wait"
-        elif state.silent and state.phase != DONE:
-            stop = "silent"
+        elif state.phase != DONE:
+            stop = _held(state)
     if stop is not None:
         v = w = 0.0
         if state.velocity is not None:
@@ -633,7 +654,8 @@ def cycle(state, now):
         "queue": state.queue.last_tail[1] if state.joined and state.queue.last_tail else None,  # tail's id
     }
     if state.remote is not None:
-        record["remote"] = {"waiting": state.waiting, "silent_s": round(state.remote.silent(now), 2), "last_cmd": state.ack}
+        record["remote"] = {"waiting": state.waiting, "held": _held(state), "silent_s": round(state.remote.silent(now), 2),
+                            "last_cmd": state.ack}
     if state.phase == DONE:
         _stop_wheels(state)
         record["end"] = "done: back at the start"
@@ -811,6 +833,7 @@ def main(argv=None):
             for device in (link, cam, REMOTE, page, remote):
                 if device is not None:
                     device.stop()
+            REMOTE = None  # a later main() (a test) must not plan through the stopped one
             if server is not None:
                 server.terminate()
             if session is not None:
