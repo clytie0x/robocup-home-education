@@ -63,7 +63,7 @@ class ArmActionBridge(Node):
         self.declare_parameter('object_size', [0.03, 0.03, 0.05])   # [depth, width, height] m (gripper max ~6.5 cm)
         self.declare_parameter('grasp_mode', 'auto')     # auto | top | side
         self.declare_parameter('place_forward', 0.20)
-        self.declare_parameter('place_left', -0.10)
+        self.declare_parameter('place_left', 0.0)
         self.declare_parameter('object_pose_topic', '/object/pose')   # PoseStamped from the camera (any TF frame)
         self.declare_parameter('place_pose_topic', '/place/pose')
         self.declare_parameter('pose_max_age', 5.0)      # ignore a camera pose older than this (s)

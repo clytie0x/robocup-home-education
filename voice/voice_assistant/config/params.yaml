@@ -17,13 +17,14 @@ stt_node:
     barge_in: true            # say "stop" while the robot is talking -> it stops at once
     barge_ratio: 2.0          # your voice must be 2x louder than the robot's voice at the mic (lower = easier, more false triggers)
     echo_guard_s: 0.8         # mic stays muted this long after the robot stops talking (raise if it hears its own echo)
-    single_word_allow: ["stop", "halt", "freeze", "hello", "hi", "robot", "yes", "no", "thanks", "beatbox"]   # other 1-word transcripts are dropped as noise
+    single_word_allow: ["stop", "halt", "freeze", "stops", "stopped", "stopping", "stab", "stob", "stup", "stap", "top", "tops", "stuff", "wait", "enough", "stay", "finish", "finished", "pause", "end", "hello", "hi", "robot", "yes", "no", "thanks", "beatbox", "yeah", "yep", "yup", "sure", "okay", "ok", "nope", "nah"]   # other 1-word transcripts are dropped as noise
     wake_word: ""             # leave empty: the wake word is handled by dialog_node
     language: "en"
-    initial_prompt: "Hello. Hey robot. Robot voice commands: carry the bag, drop the bag, put the bag down, follow me, stop, move forward, go back, turn left, turn right, do a beatbox."
+    initial_prompt: "Hello. Hey robot. Robot voice commands: carry the bag, drop the bag, put the bag down, follow me, stop, stay here, pause, finish, move forward, go back, turn left, turn right, do a beatbox."
 
 flow_node:                     # task state machine (no wake word). Robot events come in on /robot/event
   ros__parameters:
+    ask_follow: true          # after picking up the bag: ask "Should I follow you?" (false = follow at once)
     ask_text: "How can I help you?"
     ready_text: "I am ready to follow you."
     reask_s: 10.0              # in LISTENING, ask again after this many seconds of silence
@@ -42,6 +43,8 @@ dialog_node:                   # NOT launched any more (wake-word version, kept 
     awake_timeout: 15.0        # seconds of silence (after the robot stops talking) before sleeping again
     greeting: "Hi! I'm {name}. How can I help you?"     # {name} = robot_name
     capabilities: "I can carry your bag, drop the bag, follow you, move forward or backward, turn left or right, do a beatbox, and stop."
+    fuzzy_commands: true      # sound-alike fallback: carry / drop / follow / stop / stay here
+    fuzzy_min: 0.75           # 0..1, higher = stricter
     farewell: "Okay. Just say hello if you need me."
     wake_chime: "~/robot_voice/sounds/wake_chime.wav"     # "ding" when it wakes (after the first intro). "" = speak instead
     sleep_chime: "~/robot_voice/sounds/sleep_chime.wav"   # played when it goes back to sleep. "" = silent
@@ -68,7 +71,7 @@ arm_action_bridge:              # used with: ros2 launch ... arm:=actions   (SO-
     object_size: [0.03, 0.03, 0.05]   # [depth, width, height] m; gripper opens ~6.5 cm max
     grasp_mode: "auto"           # auto | top | side
     place_forward: 0.20          # fixed drop point
-    place_left: -0.10
+    place_left: 0.0          # m left (neg = right). -0.10 was UNREACHABLE on the real arm while holding
     object_pose_topic: "/object/pose"  # a PoseStamped here (e.g. from the camera, any TF frame) overrides the fixed point
     place_pose_topic: "/place/pose"
     pose_max_age: 5.0            # seconds a received pose stays valid

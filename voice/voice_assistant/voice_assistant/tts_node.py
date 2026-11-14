@@ -13,12 +13,14 @@ import os
 import queue
 import re
 import threading
+import time
 import wave
 
 import numpy as np
 import sounddevice as sd
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Empty, String
 from piper import PiperVoice
 
@@ -50,6 +52,7 @@ class TtsNode(Node):
         self.declare_parameter('voice_model', '/opt/robot_voice/models/piper/en_US-lessac-medium.onnx')
         self.declare_parameter('speaker_device', '')   # '' = default output
         self.declare_parameter('volume', 1.0)
+        self.declare_parameter('lead_silence_s', 0.3)   # silence before each sound: speakers that sleep cut the start
 
         p = lambda n: self.get_parameter(n).value
         self.voice = PiperVoice.load(p('voice_model'))
@@ -57,11 +60,17 @@ class TtsNode(Node):
         dev = p('speaker_device')
         self.device = int(dev) if str(dev).isdigit() else (dev or None)
         self.volume = float(p('volume'))
+        self.lead = float(p('lead_silence_s'))
+        self.last_end = 0.0
 
         self.pub_speaking = self.create_publisher(Bool, '/tts/speaking', 10)
         self.create_subscription(String, '/tts/say', self._on_say, 10)
         self.create_subscription(String, '/tts/play', self._on_play, 10)   # path to a .wav clip
         self.create_subscription(Empty, '/tts/interrupt', self._on_interrupt, 10)
+        # "I can talk now" for flow_node: latched (transient local), so a late subscriber still gets it
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
+        self.pub_ready = self.create_publisher(Bool, '/tts/ready', latched)
+        self.pub_ready.publish(Bool(data=True))
         self.q: queue.Queue = queue.Queue()
         self.interrupted = threading.Event()
         threading.Thread(target=self._worker, daemon=True).start()
@@ -121,6 +130,8 @@ class TtsNode(Node):
         """Play int16 audio ([frames] or [frames, ch]), adapting rate / channels to the speaker."""
         if audio.ndim == 1:
             audio = audio[:, None]
+        if self.lead > 0 and time.time() - self.last_end > 1.0:    # speaker idle -> may be asleep: pad the start
+            audio = np.concatenate([np.zeros((int(self.lead * rate), audio.shape[1]), dtype=audio.dtype), audio])
         ch = audio.shape[1]
         try:
             sd.check_output_settings(device=self.device, channels=ch, samplerate=rate, dtype='int16')
@@ -140,7 +151,10 @@ class TtsNode(Node):
                 audio = np.repeat(audio[:, :1], c, axis=1)
             audio, rate = resample(audio, rate, r), r
             self.get_logger().info(f'speaker needs {r} Hz / {c} ch -> converting', once=True)
-        sd.play(audio, rate, device=self.device, blocking=True)
+        try:
+            sd.play(audio, rate, device=self.device, blocking=True)
+        finally:
+            self.last_end = time.time()
 
     def _worker(self):
         while rclpy.ok():
