@@ -99,7 +99,9 @@ static void clock_init(void)
     }
     RCC_CR |= RCC_CR_HSEON;
     for (uint32_t wait = 0; !(RCC_CR & RCC_CR_HSERDY); wait++) {
-        if (wait > 1000000u) {
+        /* About 10 cycles a turn at 8 MHz: 0.25 s, far above a crystal's few ms and well
+         * inside stage1's 3 s watchdog (2 s at the fastest LSI). */
+        if (wait > 200000u) {
             /* No crystal: the loop cannot keep time. Wait in the ROM bootloader (it runs on
              * the internal clock), motors off, where the Pi can still reach the chip. */
             restart_into_rom_bootloader();
@@ -295,6 +297,10 @@ static void watchdog_init(void)
     IWDG_KR = 0x5555u; /* unlock PR and RLR */
     IWDG_PR = 1u;      /* LSI (about 40 kHz) / 8 */
     IWDG_RLR = 500u;   /* 500 / 5 kHz = 100 ms (67 to 133 ms over the LSI's spread) */
+    /* stage1 already runs it at 3 s: wait (about 0.1 ms) until the new values are in, so
+     * the reload below already uses 100 ms. */
+    for (uint32_t wait = 0; (IWDG_SR & 3u) && wait < 100000u; wait++) {
+    }
     IWDG_KR = 0xAAAAu;
     IWDG_KR = 0xCCCCu; /* start; it cannot be stopped until the next reset */
 }

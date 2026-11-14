@@ -3,6 +3,7 @@
 #   make firmware  STM32F103C8 build (needs arm-none-eabi-gcc and python):
 #                    build/full.bin  stage1 + application, for the one flash with the BOOT0 jumper
 #                    build/app.bin   application only, for every later update (tools/update.py)
+#                    build/app-hang.bin  test image that hangs at start (FLASHING.md section 3)
 #   make clean
 
 CC = gcc
@@ -30,9 +31,9 @@ PYTHON = python
 # reports it, and tools/update.py checks it after an update.
 BUILD_ID := $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet HEAD -- . 2>/dev/null || echo -dirty)
 
-firmware: build/full.bin
+firmware: build/full.bin build/app-hang.bin
 	$(PYTHON) tools/image.py check build/app.bin
-	sha256sum build/app.bin build/full.bin
+	sha256sum build/app.bin build/full.bin build/app-hang.bin
 
 build/stage1.elf: stage1.c boot.c boot.h stm32f103.h stage1.ld
 	mkdir -p build
@@ -48,10 +49,19 @@ build/app.elf: FORCE
 	    -o $@ $(APP_SOURCES) main.c board.c startup.c -lm
 	$(ARM)size $@
 
+build/app-hang.elf: FORCE
+	mkdir -p build
+	$(ARM)gcc $(ARM_FLAGS) -DHANG_TEST -DBUILD_ID='"$(BUILD_ID)-hang"' -T stm32f103c8.ld -nostartfiles \
+	    --specs=nano.specs --specs=nosys.specs -Wl,--gc-sections \
+	    -o $@ $(APP_SOURCES) main.c board.c startup.c -lm
+
 build/%.raw: build/%.elf
 	$(ARM)objcopy -O binary $< $@
 
 build/app.bin: build/app.raw tools/image.py
+	$(PYTHON) tools/image.py seal $< $@
+
+build/app-hang.bin: build/app-hang.raw tools/image.py
 	$(PYTHON) tools/image.py seal $< $@
 
 build/full.bin: build/stage1.raw build/app.bin tools/image.py

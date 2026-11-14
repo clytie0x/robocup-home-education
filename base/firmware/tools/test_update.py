@@ -175,6 +175,42 @@ class Update(unittest.TestCase):
         self.assertIn(b"Uforce#", chip.written)
         self.assertNotIn(b"U#", chip.written)
 
+    def test_break_escape_sends_only_the_pattern(self):
+        chip = FakeChip(self.sealed, running="")
+        slow = []
+
+        class SlowLink:
+            def write(self, data):
+                slow.append(data)
+
+            def close(self):
+                slow.append("closed")
+
+        asked = []
+        update.update(self.path, "/dev/null", run=chip.run, connect=chip.connect, sleep=lambda s: None,
+                      escape=True, open_slow=lambda port: SlowLink(), wait_for_owner=asked.append)
+        self.assertEqual(len(asked), 1)
+        self.assertIn("Power the base OFF", asked[0])
+        self.assertTrue(slow and slow[-1] == "closed")
+        self.assertTrue(all(set(b) == {0} for b in slow[:-1]))  # zero bytes only
+        self.assertEqual(chip.written[:-1], [])  # nothing at 115200 before stm32flash
+        self.assertEqual(self.actions(chip), ["fuser", "-w", "-r", "-g"])
+
+    def test_break_pattern_keeps_the_line_fed(self):
+        written, now = [], [0.0]
+
+        class Link:
+            def write(self, data):
+                written.append((now[0], len(data)))
+
+        def sleep(s):
+            now[0] += s
+
+        update.break_pattern(Link(), lambda: now[0] >= 1.9, sleep=sleep, clock=lambda: now[0])
+        self.assertEqual(written[0], (0.0, 3))  # three bytes ahead
+        self.assertEqual(sum(n for _, n in written), 3 + 10)  # then one per 0.2 s
+        self.assertTrue(all(abs(t - 0.2 * i) < 1e-9 for i, (t, _) in enumerate(written[1:])))
+
     def test_rescue_skips_the_serial_handshake(self):
         chip = FakeChip(self.sealed, running="")
         self.go(chip, rescue=True)

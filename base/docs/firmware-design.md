@@ -163,10 +163,12 @@ and the Pi cannot reset the chip (DTR and RTS on the CH340 do not reach RESET, m
 2026-11-14). So the first image makes every later update software-only:
 
 - **stage1** (0x08000000, 4 KiB) is written once and never again. On every start it runs
-  the application, or the ST ROM bootloader when `U#` asked for it (a mark in backup
-  register 1), when the application faulted or hung three times in a row before running
-  2 s, or when the application's header or CRC-32 is wrong (an update that stopped half
-  way).
+  the application, or the ST ROM bootloader when the Pi sends a slow break pattern on the
+  cable during a power cycle (needs nothing from the application), when `U#` asked for
+  it (a mark in backup register 1), when the application faulted or hung three times in
+  a row before running 2 s (stage1 starts a 3 s watchdog before the jump, so an early
+  hang counts too), or when the application's header or CRC-32 is wrong (an update that
+  stopped half way).
 - **The application** (0x08001000) is the firmware proper. `U#` (only with the motors
   idle and the wheels still) restarts it into the ROM bootloader; the Pi writes the new
   application with `stm32flash` at 0x08001000 and starts it with the Go command.

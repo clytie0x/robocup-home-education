@@ -32,7 +32,7 @@ with the jumper, update without it, roll back: [`FLASHING.md`](FLASHING.md).
 | `main.c` | Board loop: wait for the 5 ms tick, poll, tick, kick the watchdog |
 | `tests/` | Plain-C tests; `board_stub.c` stands in for the board, `test_app.c` runs the whole firmware against a model motor |
 | `tools/bringup.py` | Bring-up test on the Pi after flashing (wheels lifted); `test_bringup.py` checks it on the laptop |
-| `tools/update.py` | Update from the Pi without the jumper: `U#`, stm32flash write, verify, read back, Go, `V#` |
+| `tools/update.py` | Update from the Pi without the jumper: `U#` (or `--rescue`, `--break`), stm32flash write, verify, read back, Go, `V#` |
 | `tools/image.py` | Seal `app.bin` (length, CRC-32), join it with stage1 into `full.bin`, check an image; `test_update.py` checks both |
 
 ## Build and test
@@ -65,10 +65,15 @@ the same commit gives the same hashes.
 | 0x08001000 | application: vector table, header at +0x100 (magic, length), code, CRC-32 right after the image | by every update (`app.bin`, `tools/update.py`) |
 
 On every start stage1 runs the application, or the ST ROM bootloader (which waits for
-stm32flash on the robot's cable) when `U#` left a mark in backup register 1, when the
+stm32flash on the robot's cable) when the Pi sends the break pattern during a reset
+(`update.py --break`, boot.h), when `U#` left a mark in backup register 1, when the
 application restarted from a fault or the watchdog three times in a row before running
-2 s, or when the application's header or CRC-32 is wrong. stage1 drives the L298N pins
-low first, uses no RAM variables and no interrupts, and does not change the clock.
+2 s, or when the application's header or CRC-32 is wrong. Before it jumps into the
+application it starts the watchdog at 3 s (the application sets its own 100 ms), so an
+application that hangs early is still restarted and counted. stage1 drives the L298N
+pins low first, uses no RAM variables and no interrupts, and does not change the clock.
+On a normal line the break watch costs 50 ms per start (up to 280 ms with RX held low,
+for example an unpowered CH340).
 
 ## Pin map, read from the old firmware
 
@@ -128,14 +133,14 @@ at most 9 digits, no exponent.
 
 | Name | Unit | Default | Bounds |
 |---|---|---|---|
-| `kff` | PWM % per m/s | 770 | 0 to 3000 |
-| `kp` | PWM % per m/s of error | 300 | 0 to 3000 |
-| `ki` | PWM % per m of integrated error | 1500 | 0 to 20000 |
+| `kff` | PWM % per m/s | 770 | 0 to 2000 |
+| `kp` | PWM % per m/s of error | 300 | 0 to 1500 |
+| `ki` | PWM % per m of integrated error | 1500 | 0 to 6000 |
 | `mpc_left`, `mpc_right` | micrometres per encoder count, each wheel | 12.36 | 5 to 30 |
 | `track` | m | 0.296 | 0.20 to 0.40 |
-| `accel` | m/s² | 0.25 | 0.05 to 2.0 |
-| `brake` | m/s² (also `S#` and the timeout) | 0.5 | 0.10 to 3.0 |
-| `vmax` | m/s, top speed of each wheel | 0.12 | 0 to 0.60 |
+| `accel` | m/s² | 0.25 | 0.05 to 1.0 |
+| `brake` | m/s² (also `S#` and the timeout) | 0.5 | 0.25 to 1.5 |
+| `vmax` | m/s, top speed of each wheel | 0.12 | 0 to 0.20 (measured top about 0.13) |
 | `brake_at_zero` | 1 brake, 0 coast at zero PWM | 1 | 0 or 1 |
 
 Not settable on purpose: the 0.3 s command timeout, the encoder-fault rule and the
@@ -215,10 +220,14 @@ Checked in the code, and how each is handled:
 |---|---|
 | An update stops half way (power, cable, Pi) | stage1 and its page are never erased by `update.py` (`-S 0x08001000:<length>`; stm32flash mass-erases only for a range from page 0 to the end, read in its source). stage1 finds the CRC-32 wrong and starts the ROM bootloader: `update.py --rescue` |
 | A new application crashes or hangs at start | fault handler and watchdog restart the chip; the third restart in a row before 2 s of running goes to the ROM bootloader |
+| An application hangs before its own watchdog starts (clock waits, early init) | stage1 starts the watchdog at 3 s (2 to 4 s over the LSI's spread) before every jump into the application; the crystal wait is cut to about 0.25 s so it fits |
+| An application that runs and kicks the watchdog but does not answer `V#`/`U#` | break escape in stage1: the Pi's 50-baud pattern on RX during a power cycle starts the ROM bootloader without the application (`update.py --break`). An idle, unpowered, powering-up or busy line does not match (host tests) |
+| Bytes reach a waiting bootloader before 0x7F | `--rescue` and `--break` send nothing before stm32flash; stage1 waits for 300 ms of quiet line after the pattern; FLASHING.md says power cycle and send nothing |
+| Go into stage1 while the application is broken | stage1 sets the mark and restarts the chip instead of jumping into the ROM from the state Go left |
 | No crystal (HSE does not start) | the application restarts into the ROM bootloader (it runs on the internal clock) instead of hanging |
 | The ROM bootloader's Go leaves the PLL, vector table or USART set up | the application sets its vector table, unmasks interrupts, switches to the internal clock before starting the PLL, and writes every USART register it uses |
 | The bootloader runs with VTOR pointing at stage1 | stage1 points VTOR at system memory before the jump, as with BOOT0 at 1 |
-| The watchdog fires inside the ROM bootloader | `U#` restarts with a system reset, which stops the watchdog; the application starts it only after stage1 |
+| The watchdog fires inside the ROM bootloader | stage1 starts the watchdog only on the way into the application. Every way into the ROM passes a reset first: `U#`, a missing crystal and a Go into a broken application restart the chip with SYSRESETREQ; the crash count, the break escape and a bad CRC are decided by stage1 right after a reset. Checked in the code and in stage1's disassembly (the watchdog start sits after the ROM branch). That a reset stops the watchdog is from RM0008 (only the hardware-watchdog option byte would keep it on; the two 128 KiB backup reads in the bootloader on 2026-11-14 would have been cut off then) |
 | An encoder that counts by itself blocks `U#` | `Uforce#` skips only the wheel-speed check |
 | A bad run-time value | every value is bounded, nothing is stored in flash, a reset brings back the defaults |
 | UART stuck after noise or overrun | the receive interrupt reads DR on every error (clears ORE/FE/NE/PE); a start letter always begins a new message, so `U#` parses after any garbage |
@@ -226,11 +235,12 @@ Checked in the code, and how each is handled:
 | Rolling back to `old-1.bin` | needs the jumper and removes stage1 (the old firmware has no `U#`) |
 
 Not checked, because only the board can show it: that backup register 1 keeps the mark
-across the system reset (VBAT is tied to 3.3 V on a Blue Pill), that the software jump
-into the F1 ROM bootloader answers stm32flash, and that Go starts stage1. FLASHING.md
-section 3 proves all three before the deck closes. A hang that starts only after 2 s of
-running resets the crash count each time; the Pi then has those first 2 s of every start
-to send `U#`.
+across the system reset (the backup domain runs from VDD while VDD is on, RM0008 5.1.2;
+whether VBAT is wired on this board is not known and does not matter for a reset), that
+the software jump into the F1 ROM bootloader answers stm32flash, that Go starts stage1,
+that stage1's watchdog and CRC check land in the bootloader, that the CH340 sends the
+50-baud pattern cleanly, and how the Blue Pill is powered. FLASHING.md section 3 proves
+all of them before the deck closes.
 
 ## What is still to be checked at the robot
 

@@ -12,17 +12,19 @@ typedef struct {
 } param_info;
 
 /* The bounds keep every value where the loop still makes sense: a typo cannot make the
- * base run away or divide by zero. Wide enough for any honest calibration. */
+ * base run away or divide by zero. Speeds and gains are held near what this base can do
+ * (top speed measured about 0.13 m/s; 100 % PWM at 0.07 m/s would need kff 1430);
+ * calibration values get room for a wrong derivation. */
 static const param_info TABLE[] = {
-    {"kff", offsetof(params, kff), 0.0f, 3000.0f},
-    {"kp", offsetof(params, kp), 0.0f, 3000.0f},
-    {"ki", offsetof(params, ki), 0.0f, 20000.0f},
+    {"kff", offsetof(params, kff), 0.0f, 2000.0f},
+    {"kp", offsetof(params, kp), 0.0f, 1500.0f},
+    {"ki", offsetof(params, ki), 0.0f, 6000.0f},
     {"mpc_left", offsetof(params, um_per_count[0]), 5.0f, 30.0f},
     {"mpc_right", offsetof(params, um_per_count[1]), 5.0f, 30.0f},
     {"track", offsetof(params, track), 0.20f, 0.40f},
-    {"accel", offsetof(params, accel), 0.05f, 2.0f},
-    {"brake", offsetof(params, brake), 0.10f, 3.0f},
-    {"vmax", offsetof(params, vmax), 0.0f, 0.60f},
+    {"accel", offsetof(params, accel), 0.05f, 1.0f},
+    {"brake", offsetof(params, brake), 0.25f, 1.5f}, /* 0.12 m/s stops in 3 cm or less */
+    {"vmax", offsetof(params, vmax), 0.0f, 0.20f},
     {"brake_at_zero", offsetof(params, brake_at_zero), 0.0f, 1.0f},
 };
 

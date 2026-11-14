@@ -26,13 +26,24 @@ stage1 is gone, and the next change needs the jumper again. `update.py` always w
 1. On the laptop, on a committed tree (otherwise the build id ends in `-dirty`):
    `make test` and `make firmware` in `base/firmware`. Note the two SHA-256 lines and the
    `Vversion:...` line that `make firmware` prints.
-2. Copy `build/full.bin`, `build/app.bin`, `tools/update.py`, `tools/image.py` and
-   `tools/bringup.py` to the Pi, into `~/firmware-new/`. On the Pi,
-   `sha256sum ~/firmware-new/*.bin` must print the same hashes.
+2. Copy `build/full.bin`, `build/app.bin`, `build/app-hang.bin` (test image for
+   section 3), `tools/update.py`, `tools/image.py` and `tools/bringup.py` to the Pi, into
+   `~/firmware-new/`. On the Pi, `sha256sum ~/firmware-new/*.bin` must print the same
+   hashes.
 3. The backup is still there and whole: `sha256sum ~/firmware-backup/old-1.bin` must print
    `5924421ea558a965d5519a98514ddeb8c92a08ea88528dca0b71876d4b849ef9`.
 4. Nothing holds the port: stop ROS and every drive program. `fuser /dev/rct_ahr_robot`
    must print nothing.
+5. Find out what "power the base off and on" means for the Blue Pill (not known yet). The
+   CH340E module has a +5V pin, so the Blue Pill may be fed from the Pi's USB rather than
+   the base's 12 V. With the old firmware still running and the Pi on, switch the base's
+   main power off and send `O#` (any serial terminal, 115200 8E1), or watch the Blue
+   Pill's LEDs. If it still answers, the Blue Pill runs from the Pi's USB: then every
+   "power cycle" below means unplugging the robot's USB cable from the Pi and plugging it
+   back (or, with sudo, `uhubctl`; on a Pi 4 it switches all four USB ports together, so
+   the LiDAR and cameras lose power too: list with `sudo uhubctl` first; not tried here).
+   Otherwise the base's main switch is the power cycle. The RESET button is not enough
+   for sections 3.4 and 3.6 if they ask for a power cycle: use the real one.
 
 ## 1. The one flash with the BOOT0 jumper (deck open)
 
@@ -73,21 +84,37 @@ All must pass. A wheel or an encoder the wrong way means the pin map or a sign i
 `config.h` is wrong: fix, rebuild, and update with section 4 (no jumper needed for that,
 once section 3 has passed).
 
-## 3. Prove the jumper-free path before the deck closes (required)
+## 3. Prove every way back before the deck closes (required)
 
-The ROM bootloader jump, the backup register and the Go command can only be proven on the
-board. Do it now, while the jumper can still be reached:
+The ROM bootloader jump, the backup register, Go, stage1's watchdog, its CRC check and
+the break escape can only be proven on the board. Do it now, while the jumper can still
+be reached. Wheels lifted, ROS stopped, nothing else on the port.
 
-1. `python ~/firmware-new/update.py ~/firmware-new/app.bin` (rewrites the same application
-   through `U#`, the ROM bootloader and Go). It must end with
-   `OK: the base runs Vversion:1,build:<hash>#`, the hash from section 0.
-2. Power the base off and on (not RESET), then run the `replies` step again, or
-   `python ~/firmware-new/update.py ~/firmware-new/app.bin` once more: stage1 must start
-   the application after a power-up.
+1. **U# and Go:** `python ~/firmware-new/update.py ~/firmware-new/app.bin`
+   It must end with `OK: the base runs Vversion:1,build:<hash>#`, the hash from section 0.
+2. **Power-up:** power cycle (section 0 step 5), then the same command again: OK again.
+3. **An application that hangs at start (stage1's 3 s watchdog and the crash count):**
+   `python ~/firmware-new/update.py ~/firmware-new/app-hang.bin`
+   This one must end with `FAILED: after the update V# gives ''`: the test image hangs
+   before its own watchdog starts. Send nothing for 15 s (three restarts of 2 to 4 s
+   each), then `stm32flash -b 115200 /dev/rct_ahr_robot` must show device ID 0x0410:
+   stage1 went to the ROM bootloader by itself.
+4. **A broken application (stage1's CRC check):** still in the bootloader, erase only the
+   application's first page: first check that `stm32flash -h` on the Pi lists
+   `-o  Erase only` and `-S address[:length]`, then
+   `stm32flash -b 115200 -o -S 0x08001000:1024 /dev/rct_ahr_robot`
+   (page 4 only; stm32flash computes the pages from the address and length and erases
+   just those). Power cycle, send nothing, wait 2 s, then
+   `stm32flash -b 115200 /dev/rct_ahr_robot` must show 0x0410 again.
+5. **Rescue:** `python ~/firmware-new/update.py --rescue ~/firmware-new/app.bin` must end OK.
+6. **Break escape (an application that does not listen):** with the good application
+   running, `python ~/firmware-new/update.py --break ~/firmware-new/app.bin`; power cycle
+   when it asks, wait 3 s, press Enter. It must end OK.
+7. **Bring-up again** (section 2).
 
-If step 1 fails, the script says what state the chip is in. If the chip cannot be brought
-back with `update.py --rescue` or a power cycle, use the jumper: section 1 again, or the
-rollback in section 5. Close the deck only after both steps pass.
+If a step fails, the script says what state the chip is in. If the chip cannot be brought
+back with `update.py --rescue`, `--break` or a power cycle, use the jumper: section 1
+again, or the rollback in section 5. Close the deck only after all seven steps pass.
 
 ## 4. Every later update (no jumper)
 
@@ -108,6 +135,13 @@ What `update.py` does, and the same by hand if it is ever not available:
 | start it (Go, through stage1) | `stm32flash -b 115200 -g 0x08000000 /dev/rct_ahr_robot` |
 | check the version | `V#` must give the `Vversion:...` line `make firmware` printed |
 
+**A waiting ROM bootloader must get nothing before stm32flash's handshake**: it takes
+the first byte as its baud-rate probe (0x7F), and anything else (`S#` from wheels.py,
+which sends it when it opens the port, or a `V#`) can upset it until the next power
+cycle. So whenever the chip may be in the bootloader: stop every program on the port,
+power cycle the base, send nothing, then `update.py --rescue` (it sends nothing before
+stm32flash) or `update.py --break`.
+
 When something fails, `update.py` prints the chip's state:
 
 - Before `U#` was accepted: nothing was written, the old application still runs.
@@ -121,17 +155,26 @@ When something fails, `update.py` prints the chip's state:
   bootloader again if the application is broken (stage1 checks its CRC-32), or starts it
   if it is whole.
 - Go failed after a good write: power the base off and on.
+- The application runs but does not answer `V#` or `U#` (a broken UART, a parser bug):
+  `update.py --break app.bin`. It sends zero bytes at 50 baud (the line low 180 ms, high
+  20 ms, over and over) while the owner power-cycles the base; stage1 recognises the
+  pattern on RX after the reset, waits for the line to go quiet and starts the ROM
+  bootloader. This needs nothing from the application.
 
 stage1 also sends the chip to the ROM bootloader by itself after three watchdog or fault
-restarts in a row (each before the loop ran 2 s): a new application that crashes at once
-can be replaced with `update.py --rescue`.
+restarts in a row (each before the loop ran 2 s), and it starts a 3 s watchdog before
+every jump into the application, so even an application that hangs before its own
+watchdog is restarted and counted: a new application that hangs or crashes at once can
+be replaced with `update.py --rescue`.
 
 **Go from the ROM bootloader:** stm32flash's `-g <address>` sends the bootloader's Go
 command with that address (stm32flash source, `stm32_go`); per AN3155 the bootloader then
 resets the peripherals it used, loads the stack pointer from the address and jumps to the
 reset vector at address + 4. `-g 0x08000000` therefore runs stage1, which checks and
-starts the application. This is the usual way to leave the bootloader on an F103 with
-stm32flash, but it is proven on this board only by section 3. The application does not
+starts the application (or, if the application is broken, restarts the chip cleanly
+into the bootloader rather than jumping there from the state Go left). This is the usual
+way to leave the bootloader on an F103 with stm32flash, but it is proven on this board
+only by section 3. The application does not
 rely on the bootloader leaving the chip clean: it sets its own vector table, unmasks
 interrupts, and switches the clock to the internal oscillator before it starts the PLL.
 

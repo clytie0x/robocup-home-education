@@ -41,7 +41,9 @@ static void refuse_and_keep(void)
     CHECK(params_set(&p, "track", 0.41f) == PARAM_OUT_OF_RANGE);
     CHECK(params_set(&p, "kp", -1.0f) == PARAM_OUT_OF_RANGE);
     CHECK(params_set(&p, "brake", 0.0f) == PARAM_OUT_OF_RANGE); /* never a base that cannot stop */
-    CHECK(params_set(&p, "vmax", 0.61f) == PARAM_OUT_OF_RANGE);
+    CHECK(params_set(&p, "vmax", 0.21f) == PARAM_OUT_OF_RANGE); /* well above the measured 0.13 */
+    CHECK(params_set(&p, "brake", 0.2f) == PARAM_OUT_OF_RANGE);
+    CHECK(params_set(&p, "kp", 1501.0f) == PARAM_OUT_OF_RANGE);
     CHECK(params_set(&p, "brake_at_zero", 0.5f) == PARAM_OUT_OF_RANGE);
     CHECK(params_set(&p, "timeout", 1.0f) == PARAM_UNKNOWN); /* safety stays compile-time */
     CHECK(params_set(&p, "", 1.0f) == PARAM_UNKNOWN);

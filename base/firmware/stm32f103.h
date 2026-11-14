@@ -93,11 +93,13 @@ typedef struct {
 #define IWDG_KR REG(0x40003000u)
 #define IWDG_PR REG(0x40003004u)
 #define IWDG_RLR REG(0x40003008u)
+#define IWDG_SR REG(0x4000300Cu) /* PVU, RVU: an update of PR or RLR is under way */
 
 /* Cortex-M3 core: SysTick and NVIC (PM0056 4.5 and 4.3) */
 #define SYST_CSR REG(0xE000E010u)
 #define SYST_RVR REG(0xE000E014u)
 #define SYST_CVR REG(0xE000E018u)
+#define SYST_CSR_COUNTFLAG (1u << 16) /* set at each wrap, cleared by reading CSR */
 #define NVIC_ISER1 REG(0xE000E104u)
 /* System control block, PM0056 4.4 */
 #define SCB_VTOR REG(0xE000ED08u)

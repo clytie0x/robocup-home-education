@@ -20,6 +20,48 @@ int boot_decide(unsigned reset_flags, unsigned magic, unsigned *crashes, int app
     return BOOT_APP;
 }
 
+void break_init(break_detector *d, int rx_level)
+{
+    d->level = rx_level;
+    d->ms = 1;
+    d->first = 1;
+    d->full_phases = 0;
+    d->seen = 0;
+    d->idle_ms = 0;
+    d->waited_ms = 0;
+}
+
+int break_feed(break_detector *d, int rx_level)
+{
+    if (d->seen) {
+        d->waited_ms++;
+        d->idle_ms = rx_level ? d->idle_ms + 1u : 0u;
+        if (d->idle_ms >= BREAK_IDLE_MS) {
+            return BREAK_ROM;
+        }
+        return d->waited_ms >= BREAK_IDLE_TIMEOUT_MS ? BREAK_NONE : BREAK_WAIT;
+    }
+    if (rx_level == d->level) {
+        d->ms++;
+        return d->ms > (rx_level ? BREAK_HIGH_MAX_MS : BREAK_LOW_MAX_MS) ? BREAK_NONE : BREAK_WAIT;
+    }
+    /* A phase ended. The first one started before stage1 looked, so only its upper
+     * limit (checked above) applies. */
+    if (d->first) {
+        d->first = 0;
+    } else {
+        if (d->ms < (d->level ? BREAK_HIGH_MIN_MS : BREAK_LOW_MIN_MS)) {
+            return BREAK_NONE;
+        }
+        if (++d->full_phases >= BREAK_FULL_PHASES) {
+            d->seen = 1;
+        }
+    }
+    d->level = rx_level;
+    d->ms = 1;
+    return BREAK_WAIT;
+}
+
 uint32_t boot_crc32(const uint8_t *data, uint32_t length)
 {
     /* Four bits at a time from a 16-entry table: fast enough on the 8 MHz reset clock
