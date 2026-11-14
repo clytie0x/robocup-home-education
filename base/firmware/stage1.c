@@ -123,8 +123,39 @@ static void jump(uint32_t base)
     hang();
 }
 
+/* The only way into the ROM bootloader: the very first thing after a reset, with the chip
+ * as the reset left it. Only the backup domain is opened to read and clear the mark, and
+ * closed again; no GPIO, SysTick, interrupt mask or clock is touched before the jump.
+ * The bootloader uses SysTick to measure the 0x7F for its baud rate (AN2606), and a
+ * jump made after stage1 had used SysTick and the pins left it deaf (board, 2026-11-14).
+ * Every other decision for the ROM sets the mark and restarts, so it ends up here. */
+static void rom_bootloader_if_marked(void)
+{
+    uint32_t apb1 = RCC_APB1ENR;
+    RCC_APB1ENR = apb1 | RCC_APB1ENR_PWREN | RCC_APB1ENR_BKPEN;
+    if ((BKP_DR1 & 0xFFFFu) != BOOT_MAGIC) {
+        RCC_APB1ENR = apb1;
+        return;
+    }
+    PWR_CR |= PWR_CR_DBP;
+    BKP_DR1 = 0; /* used once: the next reset starts the application again */
+    PWR_CR &= ~PWR_CR_DBP;
+    RCC_APB1ENR = apb1;
+    RCC_CSR |= RCC_CSR_RMVF; /* so a Go from the bootloader reads as "no reset" */
+    SCB_VTOR = ROM_BOOTLOADER; /* as if BOOT0 were 1: address 0 would show system memory */
+    jump(ROM_BOOTLOADER);
+}
+
+static void restart_into_rom_bootloader(void)
+{
+    PWR_CR |= PWR_CR_DBP;
+    BKP_DR1 = BOOT_MAGIC;
+    system_reset();
+}
+
 void stage1_start(void)
 {
+    rom_bootloader_if_marked();
     __asm volatile("cpsid i" ::: "memory");
     motors_off();
     RCC_APB1ENR |= RCC_APB1ENR_PWREN | RCC_APB1ENR_BKPEN;
@@ -144,24 +175,15 @@ void stage1_start(void)
 
     PWR_CR |= PWR_CR_DBP;
     BKP_DR2 = crashes;
-    if (where == BOOT_ROM && flags == 0) {
-        /* Go into a broken application: do not enter the ROM from the state the
-         * bootloader left (its PLL may run). Restart cleanly, with the mark set. */
-        BKP_DR1 = BOOT_MAGIC;
-        system_reset();
+    if (where == BOOT_ROM) {
+        /* Not from here: stage1 has used SysTick and the pins by now. Mark and restart;
+         * rom_bootloader_if_marked() jumps first thing after the reset. The watchdog is
+         * not running (a reset stops it; stage1 starts it only below). */
+        restart_into_rom_bootloader();
     }
-    BKP_DR1 = 0; /* the mark is used once: the next reset starts the application again */
     PWR_CR &= ~PWR_CR_DBP;
     RCC_APB1ENR &= ~(RCC_APB1ENR_PWREN | RCC_APB1ENR_BKPEN);
 
-    if (where == BOOT_ROM) {
-        /* Here only after a reset, so the watchdog is not running (a reset stops it and
-         * stage1 starts it only below). As if BOOT0 were 1: address 0 would show system
-         * memory, so point the vector table there, interrupts unmasked as after reset. */
-        SCB_VTOR = ROM_BOOTLOADER;
-        __asm volatile("cpsie i" ::: "memory");
-        jump(ROM_BOOTLOADER);
-    }
     start_watchdog();
     SCB_VTOR = APP_BASE;
     jump(APP_BASE); /* the application unmasks interrupts after setting up */
