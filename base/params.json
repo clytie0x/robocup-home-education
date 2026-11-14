@@ -1,8 +1,8 @@
 {
   "linear_cmd_scale": 1.0,
-  "angular_cmd_scale": 0.862,
-  "odom_distance_scale": 0.882,
-  "odom_yaw_scale": 0.862,
+  "angular_cmd_scale": 1.0,
+  "odom_distance_scale": 1.0,
+  "odom_yaw_scale": 1.0,
   "max_speed": 0.12,
   "max_turn_rate": 0.49,
   "accel": 0.25,

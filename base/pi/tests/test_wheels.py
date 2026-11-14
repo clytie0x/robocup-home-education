@@ -35,7 +35,7 @@ class Clock:
 
 class Packet(unittest.TestCase):
     def test_packet_scales_and_formats(self):
-        p = dict(P, linear_cmd_scale=0.9, max_speed=0.6)
+        p = dict(P, linear_cmd_scale=0.9, angular_cmd_scale=0.862, max_speed=0.6)  # the old firmware's turn scale
         self.assertEqual(wheels.packet(0.30, 0.0, p), b"F027|+000#")
         self.assertEqual(wheels.packet(0.0, -0.40, p), b"F000|-034#")  # 0.40 * 0.862
         self.assertEqual(wheels.packet(0.0, 0.0, p), b"S#")
