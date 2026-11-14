@@ -12,6 +12,12 @@ Then:
   ros2 service call /camera_test/pick       std_srvs/srv/Trigger   pick the object nearest to the arm
   ros2 service call /camera_test/pick_place std_srvs/srv/Trigger   ... and put it at place_spot
 RViz shows the point cloud (in the arm base frame once calibrated) and orange boxes for the objects.
+
+Bag test (target:=bag, arm on the robot: mount:=robot, table_z = the floor): the camera finds bags of any
+shape on the floor and the top part to hold (a handle, or the rim wall facing the arm; green marker).
+  ros2 service call /camera_test/objects   std_srvs/srv/Trigger   bags and their grasp parts
+  ros2 service call /camera_test/pick_bag  std_srvs/srv/Trigger   hold the nearest bag and carry it at the side
+  ros2 service call /camera_test/place_bag std_srvs/srv/Trigger   put it down where it was picked
 """
 import json
 import math
@@ -34,7 +40,7 @@ from tf2_ros import StaticTransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
 
 from .arm_client import PAN_AXIS, ArmClient, user_xy
-from .tabletop import CameraPose, calibrate_2pt, find_objects, fit_plane, fuse
+from .tabletop import CameraPose, calibrate_2pt, find_objects, fit_plane, fuse, grasp_top
 
 CALIB_MAX_HEIGHT = 0.25     # the calibration object (e.g. a can or bottle) is narrow: tells it apart from the platform
 CALIB_MAX_SIZE = 0.09
@@ -58,6 +64,9 @@ class CameraTest(Node):
         # it is and how it is turned. All zero = measure the size from the camera (round objects).
         self.declare_parameter('object_size', [0.0, 0.0, 0.0])
         self.declare_parameter('stride', 3)                  # use every n-th pixel row/column
+        self.declare_parameter('target', 'object')           # 'object' (on a table) or 'bag' (on the floor)
+        self.declare_parameter('deck', [0.0, 0.0, 0.0, 0.0])  # robot body footprint: front, back, left, right
+        self.declare_parameter('bag_max_height', 0.55)       # tallest bag incl. handles (m)
         p = lambda n: self.get_parameter(n).value
         self.table_z = float(p('table_z'))
         self.calib_file = os.path.expanduser(p('calib_file'))
@@ -85,9 +94,11 @@ class CameraTest(Node):
         cloud_cb = MutuallyExclusiveCallbackGroup()
         cb = ReentrantCallbackGroup()
         self.create_subscription(PointCloud2, p('cloud_topic'), self.on_cloud, 1, callback_group=cloud_cb)
+        self.bag_spot = None             # where the held bag was picked (place_bag puts it back there)
         for name, fn in (('calib_a', lambda q, r: self.on_calib('a', r)), ('calib_b', lambda q, r: self.on_calib('b', r)),
                          ('objects', self.on_objects), ('pick', lambda q, r: self.on_pick(r, False)),
-                         ('pick_place', lambda q, r: self.on_pick(r, True))):
+                         ('pick_place', lambda q, r: self.on_pick(r, True)),
+                         ('pick_bag', self.on_pick_bag), ('place_bag', self.on_place_bag)):
             self.create_service(Trigger, f'/camera_test/{name}', fn, callback_group=cb)
         self.arm = ArmClient(self)
         self.last_info = 0.0
@@ -170,6 +181,8 @@ class CameraTest(Node):
         r = np.hypot(base[:, 0] - PAN_AXIS[0], base[:, 1] - PAN_AXIS[1])
         keep = (r > float(self.get_parameter('ignore_radius').value)) & (r < float(self.get_parameter('max_radius').value) + 0.1)
         base = self.level_table(base, keep)
+        if self.get_parameter('target').value == 'bag':
+            return self.detect_bags(base, keep)
         known = self.known_size()
         z_max = known[2] + 0.04 if known else 0.30   # known object: ignore what hangs above it (the arm itself)
         objs = find_objects(base, self.table_z, keep, z_max=z_max, camera=self.pose.t, known_size=known)
@@ -180,6 +193,25 @@ class CameraTest(Node):
             objs = [o for o in objs if abs(o['seen'][1] - known[2]) < 0.02 and o['seen'][0] < long_ + 0.03
                     and o['seen'][0] > 0.5 * min(known[:2])]
         return [o for o in objs if math.hypot(o['x'] - PAN_AXIS[0], o['y'] - PAN_AXIS[1]) < rmax]
+
+    def detect_bags(self, base, keep):
+        """Bags on the floor (any shape): one cluster each, with the top part to hold."""
+        f, b, l_, r = (float(v) for v in self.get_parameter('deck').value)
+        if f or b or l_ or r:          # not the robot's own body
+            fwd, left = PAN_AXIS[1] - base[:, 1], base[:, 0] - PAN_AXIS[0]
+            keep = keep & ~((fwd < f + 0.02) & (fwd > -b - 0.02) & (left < l_ + 0.02) & (left > -r - 0.02))
+        objs = find_objects(base, self.table_z, keep, z_min=0.02, z_max=float(self.get_parameter('bag_max_height').value),
+                            min_points=60, with_points=True)
+        rmax = float(self.get_parameter('max_radius').value)
+        out = []
+        for o in objs:
+            g = grasp_top(o.pop('pts'), self.table_z, PAN_AXIS)
+            if g is None or o['size'][2] < 0.08:
+                continue
+            o['grasp'] = g
+            if math.hypot(o['x'] - PAN_AXIS[0], o['y'] - PAN_AXIS[1]) < rmax:
+                out.append(o)
+        return out
 
     def publish_markers(self, objs):
         arr = MarkerArray()
@@ -200,6 +232,15 @@ class CameraTest(Node):
             t.color.r = t.color.g = t.color.b = t.color.a = 1.0
             t.text = self.describe(o)
             arr.markers += [m, t]
+            g = o.get('grasp')
+            if g:                       # the part the jaws hold (green)
+                gm = Marker(ns='grasp', id=i, type=Marker.CUBE)
+                gm.header.frame_id = 'base'
+                gm.pose.position.x, gm.pose.position.y, gm.pose.position.z = g['x'], g['y'], g['z'] - 0.015
+                gm.pose.orientation.z, gm.pose.orientation.w = math.sin(g['yaw'] / 2), math.cos(g['yaw'] / 2)
+                gm.scale.x, gm.scale.y, gm.scale.z = max(g['length'], 0.01), g['thickness'], 0.03
+                gm.color.g, gm.color.r, gm.color.a = 0.9, 0.1, 0.9
+                arr.markers.append(gm)
         self.marker_pub.publish(arr)
 
     @staticmethod
@@ -208,7 +249,13 @@ class CameraTest(Node):
         l_ = o['x'] - PAN_AXIS[0]
         d, w, h = (v * 100 for v in o['size'])
         turn = math.degrees(math.remainder(o['yaw'] + math.pi / 2, math.pi))   # 0 = long side points at the arm
-        return f'หน้า {f * 100:.0f} ซ้าย {l_ * 100:.0f} หมุน {turn:.0f}° | {d:.1f}x{w:.1f}x{h:.1f} ซม.'
+        text = f'หน้า {f * 100:.0f} ซ้าย {l_ * 100:.0f} หมุน {turn:.0f}° | {d:.1f}x{w:.1f}x{h:.1f} ซม.'
+        g = o.get('grasp')
+        if g:
+            gf, gl = PAN_AXIS[1] - g['y'], g['x'] - PAN_AXIS[0]
+            text += (f' | จับ{"ด้านใกล้แขน" if g["part"] == "side" else "ส่วนบน"} หน้า {gf * 100:.0f} ซ้าย {gl * 100:.0f} '
+                     f'สูง {g["height"] * 100:.0f} หนา {g["thickness"] * 100:.1f} ซม.')
+        return text
 
     # ---------------------------------------------------------------------------------- services
     def on_calib(self, which, res):
@@ -324,7 +371,13 @@ class CameraTest(Node):
 
     def current(self):
         with self.lock:
-            objs = fuse(self.history)
+            hist = self.history
+        objs = fuse(hist)
+        for o in objs:                  # fuse() keeps the box only: the grasp part from the newest frame
+            seen = [g for frame in reversed(hist) for g in frame
+                    if 'grasp' in g and math.hypot(g['x'] - o['x'], g['y'] - o['y']) < 0.03]
+            if seen:
+                o['grasp'] = seen[0]['grasp']
         return sorted(objs, key=lambda o: math.hypot(o['x'] - PAN_AXIS[0], o['y'] - PAN_AXIS[1]))
 
     def on_objects(self, _req, res):
@@ -334,6 +387,35 @@ class CameraTest(Node):
         objs = self.current()
         res.success = True
         res.message = f'เห็น {len(objs)} ชิ้น (เรียงจากใกล้แขน)' + ''.join(f'\n  {self.describe(o)}' for o in objs)
+        return res
+
+    def on_pick_bag(self, _req, res):
+        if not self.pose:
+            res.success, res.message = False, 'ยังไม่ได้ calibrate กล้อง'
+            return res
+        bags = [o for o in self.current() if 'grasp' in o]
+        if not bags:
+            res.success, res.message = False, 'ไม่เห็นถุงในระยะแขน (ตั้ง target:=bag แล้วหรือยัง)'
+            return res
+        o = bags[0]
+        g = o['grasp']
+        self.get_logger().info(f'หยิบถุง: {self.describe(o)}')
+        out = self.arm.pick_bag((g['x'], g['y']), top_z=g['z'], yaw=g['yaw'], thickness=g['thickness'],
+                                length=min(max(g['length'], 0.02), 0.2))
+        if out[0]:
+            self.bag_spot = (o['x'], o['y'])
+        res.success = bool(out[0])
+        res.message = f'{self.describe(o)} -> {out[1]}: {out[2]}'
+        return res
+
+    def on_place_bag(self, _req, res):
+        if self.bag_spot is None:
+            res.success, res.message = False, 'ยังไม่ได้หยิบถุงด้วย /camera_test/pick_bag'
+            return res
+        out = self.arm.place(self.bag_spot)
+        if out[0]:
+            self.bag_spot = None
+        res.success, res.message = bool(out[0]), f'{out[1]}: {out[2]}'
         return res
 
     def on_pick(self, res, place):

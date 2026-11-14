@@ -116,7 +116,7 @@ LOW_VIEW = math.radians(35)   # camera looks at the object flatter than this: it
 
 
 def find_objects(pts, table_z=0.0, keep=None, z_min=0.008, z_max=0.30, cell=0.01, min_points=30, pad=0.003,
-                 camera=None, known_size=None):
+                 camera=None, known_size=None, with_points=False):
     """Objects standing on the table. pts: N x 3 in a frame whose table top is z = table_z.
     keep: optional boolean mask of points allowed (e.g. not the arm). Returns a list of dicts
     {x, y, yaw, size: (depth, width, height), points} - depth is along yaw, the box stands on the table.
@@ -124,7 +124,8 @@ def find_objects(pts, table_z=0.0, keep=None, z_min=0.008, z_max=0.30, cell=0.01
     so its depth away from the camera is taken as at least its width (round/square objects) and the
     centre is pushed back by the hidden part.
     known_size: (a, b, height) of the object when it is known (a box): only the seen side's position and
-    turn come from the camera, the hidden part is filled in with the real size (needs camera)."""
+    turn come from the camera, the hidden part is filled in with the real size (needs camera).
+    with_points: also return each object's points ('pts', M x 3) e.g. for grasp_top."""
     z = pts[:, 2] - table_z
     m = (z > z_min) & (z < z_max)
     if keep is not None:
@@ -163,8 +164,60 @@ def find_objects(pts, table_z=0.0, keep=None, z_min=0.008, z_max=0.30, cell=0.01
                 continue
         elif camera is not None:
             obj = complete_far_side(obj, xy, camera, table_z, pad)
+        if with_points:
+            obj['pts'] = q
         found.append(obj)
     return found
+
+
+def grasp_top(pts, table_z, arm_xy, slice_h=0.03, max_thick=0.045, rim_band=0.025, min_points=8):
+    """Where to hold an object of any shape (a bag) from above: its top slice_h m.
+    A thin top (one handle standing up, or the one rim wall the camera sees) is held as it is ('top'); a wide
+    top (both handles, an open rim seen from above) is held at its side nearest the arm ('side'). Returns None if too few points,
+    else {x, y, z (top, same frame), yaw (the part's long direction), length, thickness, height, part}."""
+    z = pts[:, 2] - table_z
+    top = float(np.percentile(z, 99))
+    t = pts[z > top - slice_h]
+    if len(t) < min_points:
+        return None
+    mid = pts[(z > 0.3 * top) & (z < 0.8 * top)]
+    if len(mid) >= 3 * min_points:      # drop what sticks out past the bag's body (a handle fallen outwards)
+        mc = mid[:, :2].mean(axis=0)
+        ax = np.linalg.eigh(np.cov((mid[:, :2] - mc).T))[1]
+        lo, hi = np.percentile((mid[:, :2] - mc) @ ax, [2, 98], axis=0)
+        tp = (t[:, :2] - mc) @ ax
+        inside = np.all((tp > lo - 0.015) & (tp < hi + 0.015), axis=1)
+        if inside.sum() >= min_points:
+            t = t[inside]
+    xy = t[:, :2]
+    c = xy.mean(axis=0)
+    u = np.linalg.eigh(np.cov((xy - c).T))[1][:, 1]          # long direction of the top
+    v = np.array([-u[1], u[0]])
+    b = (xy - c) @ v
+    b0, b1 = np.percentile(b, [5, 95])
+    part = 'top'
+    if b1 - b0 > max_thick:                                   # wide: take the side facing the arm
+        d = np.asarray(arm_xy, float) - c
+        d /= np.linalg.norm(d)
+        all_xy = xy
+        for _ in range(3):          # band across d, then across the found side's own normal (a turned bag)
+            s = all_xy @ d
+            near = s > np.percentile(s, 98) - rim_band
+            if near.sum() < min_points:
+                break
+            xy = all_xy[near]
+            c = xy.mean(axis=0)
+            u = np.linalg.eigh(np.cov((xy - c).T))[1][:, 1]
+            v = np.array([-u[1], u[0]])
+            d = v if v @ d > 0 else -v
+            b = (xy - c) @ v
+            b0, b1 = np.percentile(b, [5, 95])
+            part = 'side'
+    a = (xy - c) @ u
+    a0, a1 = np.percentile(a, [5, 95])
+    centre = c + u * (a0 + a1) / 2 + v * (b0 + b1) / 2
+    return {'x': float(centre[0]), 'y': float(centre[1]), 'z': float(table_z + top), 'yaw': math.atan2(u[1], u[0]),
+            'length': float(a1 - a0), 'thickness': float(max(b1 - b0, 0.005)), 'height': top, 'part': part}
 
 
 def fit_known_box(obj, xy, u, camera, size):

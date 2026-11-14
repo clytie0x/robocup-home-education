@@ -1,0 +1,17 @@
+# Pick a bag standing on the floor by its top (a handle or the rim) and hold it out at the side for carrying.
+# Put it down again with /arm/place (target_pose = where the bag should stand; the bag is lowered to the floor).
+# grasp_pose: the part to hold. x, y = its middle; z = the height of its TOP (used, unlike /arm/pick).
+#   Orientation = yaw of the part's long direction (the jaws close across it). All-zero quaternion = unknown:
+#   the part is taken to run across the arm's view (jaws close along the line from the arm to it).
+#   Any TF frame; "" or "base" = arm base frame.
+geometry_msgs/PoseStamped grasp_pose
+float32 thickness           # across the jaws, m (0 = 0.02); at most 0.065
+float32 length              # along the part, m (0 = 0.05)
+---
+bool success
+string error_code           # SUCCESS UNREACHABLE TOO_WIDE MISSED COLLISION BUSY HOLDING HOT STOPPED FAILED
+string message              # English, can be spoken
+---
+string step                 # e.g. "approach"
+uint8 step_index
+uint8 step_count

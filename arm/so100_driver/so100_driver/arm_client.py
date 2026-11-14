@@ -6,6 +6,8 @@
     ok, code, msg = arm.place(-0.10, -0.245)
     ok, code, msg = arm.pick_place((0.0, -0.245), (-0.10, -0.245), size=(0.03, 0.03, 0.05))
     arm.home(); arm.rest(); arm.stop(); arm.torque(False); print(arm.state)
+    ok, code, msg = arm.pick_bag(0.0, -0.32, top_z=-0.04)    # bag top part: x, y, height of its top (base z)
+    ok, code, msg = arm.place(0.0, -0.32)                    # a held bag is put down on the floor there
 
 Positions can also be a geometry_msgs/PoseStamped in any TF frame (e.g. from the camera):
     arm.pick(pose_stamped, size=(...))
@@ -14,6 +16,7 @@ Positions can also be a geometry_msgs/PoseStamped in any TF frame (e.g. from the
 Every call blocks until the arm finishes (run your node with a MultiThreadedExecutor or spin in a thread)
 and returns (success, error_code, message). Pass `wait=False` to get the goal future instead.
 Command-line test:  ros2 run so100_driver arm_cli pick 0.20 0.0 --size 0.03 0.03 0.05   (forward, left)
+                    ros2 run so100_driver arm_cli pick_bag 0.28 0.0 0.27   (forward, left, top above the floor)
 """
 import math
 import sys
@@ -25,10 +28,11 @@ from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from std_srvs.srv import SetBool, Trigger
 
-from so100_interfaces.action import Home, Pick, PickPlace, Place, Rest
+from so100_interfaces.action import Home, Pick, PickBag, PickPlace, Place, Rest
 from so100_interfaces.msg import ArmState
 
 PAN_AXIS = (0.0, -0.0452)      # arm pan axis in the base frame (URDF); "forward" = base -y
+FLOOR_Z = -0.31                # floor below the arm base with the arm on the robot (launch floor_z)
 
 
 def user_xy(forward, left):
@@ -56,7 +60,7 @@ class ArmClient:
         cb = ReentrantCallbackGroup()
         self._actions = {name: ActionClient(node, kind, f'/arm/{name}', callback_group=cb)
                          for name, kind in (('pick', Pick), ('place', Place), ('pick_place', PickPlace),
-                                            ('home', Home), ('rest', Rest))}
+                                            ('home', Home), ('rest', Rest), ('pick_bag', PickBag))}
         self._stop = node.create_client(Trigger, '/arm/stop', callback_group=cb)
         self._torque = node.create_client(SetBool, '/arm/torque', callback_group=cb)
         self.state = None
@@ -105,6 +109,16 @@ class ArmClient:
                            target_pose=make_pose(target, target_yaw), grasp_mode=grasp_mode)
         return self._run('pick_place', g, **kw)
 
+    def pick_bag(self, where, top_z=None, yaw=None, thickness=0.0, length=0.0, **kw):
+        """Hold a bag by its top part (handle or rim) and carry it at the side. where = (x, y) base frame
+        or a PoseStamped whose z is the top height; top_z = height of the top in the base frame.
+        yaw = direction the part runs along (None: across the arm's view). Put it down with place()."""
+        ps = make_pose(where, yaw)
+        if top_z is not None:
+            ps.pose.position.z = float(top_z)
+        g = PickBag.Goal(grasp_pose=ps, thickness=float(thickness), length=float(length))
+        return self._run('pick_bag', g, **kw)
+
     def home(self, **kw):
         return self._run('home', Home.Goal(), **kw)
 
@@ -132,6 +146,11 @@ def main():
       pick FWD LEFT --size D W H [--mode top|side]
       place FWD LEFT
       pick_place FWD LEFT FWD2 LEFT2 --size D W H
+      pick_bag FWD LEFT TOP [--floor Z] [--along DEG] [--thick M]
+          TOP = height of the bag's top above the floor (floor default -0.31)
+          --along: direction the gripped part runs, deg from straight ahead towards the left
+                   (0 = a ridge running away from the robot, 90 = across the robot's front; default 90)
+          --thick: how wide the jaws must take it (m, default 0.02; 0.04 = open wide for a rough position)
       home | rest | stop | lock | release | state
     """
     import rclpy
@@ -147,6 +166,20 @@ def main():
         k = args.index('--size')
         size = tuple(float(v) for v in args[k + 1:k + 4])
         del args[k:k + 4]
+    floor = FLOOR_Z
+    if '--floor' in args:
+        k = args.index('--floor')
+        floor = float(args[k + 1])
+        del args[k:k + 2]
+    along, thick = None, 0.0
+    if '--along' in args:
+        k = args.index('--along')
+        along = math.radians(float(args[k + 1])) - math.pi / 2      # base frame: forward = -y, left = +x
+        del args[k:k + 2]
+    if '--thick' in args:
+        k = args.index('--thick')
+        thick = float(args[k + 1])
+        del args[k:k + 2]
     if '--mode' in args:
         k = args.index('--mode')
         mode = args[k + 1]
@@ -164,6 +197,8 @@ def main():
         out = arm.place(user_xy(*nums[:2]))
     elif cmd == 'pick_place':
         out = arm.pick_place(user_xy(*nums[:2]), user_xy(*nums[2:4]), size, grasp_mode=mode)
+    elif cmd == 'pick_bag':
+        out = arm.pick_bag(user_xy(*nums[:2]), top_z=floor + nums[2], yaw=along, thickness=thick)
     elif cmd == 'home':
         out = arm.home()
     elif cmd == 'rest':

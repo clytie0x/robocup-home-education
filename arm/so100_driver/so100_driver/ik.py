@@ -153,6 +153,12 @@ class Kinematics:
                 low = min(low, float((v @ w[link][:3, :3].T + w[link][:3, 3])[:, 2].min()))
         return low
 
+    def link_points(self, q, links):
+        """Mesh points (base frame) of the given links, N x 3."""
+        w = self.frames(q)
+        pts = [self.meshes[n] @ w[n][:3, :3].T + w[n][:3, 3] for n in links if n in self.meshes]
+        return np.vstack(pts) if pts else np.zeros((0, 3))
+
     def gripper_point(self, q, local):
         """World position of a point given in the gripper link frame."""
         return (self.frames(q)['gripper'] @ np.array([*local, 1.0]))[:3]
@@ -303,6 +309,13 @@ class Box:
         return abs(self.size[0] * float(ax @ d)) + abs(self.size[1] * float(ay @ d))
 
 
+def deck_box(kin, front, back, left, right, top_z, floor_z):
+    """The robot body under the arm (arm mounted on the top deck) as an axis-aligned box in the base frame:
+    front/back/left/right = deck edges measured from the pan axis (m), top_z = deck top, floor_z = floor."""
+    corners = np.array([kin.from_user(f, l) for f in (-back, front) for l in (-right, left)])
+    return (np.array([*corners.min(axis=0), floor_z]), np.array([*corners.max(axis=0), top_z]))
+
+
 class PlanError(Exception):
     def __init__(self, msg, stage=0, code=None):
         super().__init__(msg)
@@ -321,9 +334,14 @@ class GraspPlanner:
     ARM_LINKS = ('shoulder', 'upper_arm', 'lower_arm', 'wrist')
     HAND_LINKS = ('gripper', 'jaw')
 
-    def __init__(self, kin, table_z):
+    DECK_CLEAR = 0.012   # arm and hand stay this far from the robot body (deck_box)
+    BAG_OVER_DECK = 0.20  # things stand on the deck (computer, power strip): a bag stays off the deck below this
+    CARRY_STEP = 0.01    # grasp point step on the joint-space paths to / from the carry pose (m)
+
+    def __init__(self, kin, table_z, obstacles=()):
         self.k = kin
         self.table_z = table_z
+        self.obstacles = [(np.asarray(lo, float), np.asarray(hi, float)) for lo, hi in obstacles]
 
     # pitch candidates: straight down first, then tilting up towards a horizontal side grasp
     PITCHES = [math.radians(a) for a in range(-90, 1, 5)]
@@ -457,6 +475,13 @@ class GraspPlanner:
                 raise PlanError(f'{what}: ข้อแขน/ข้อมือจะชนโต๊ะ', stage)
             if self.k.lowest(qj, self.HAND_LINKS) < self.table_z + self.TABLE_CLEAR - 0.002:
                 raise PlanError(f'{what}: ก้ามจะชนโต๊ะ', stage)
+            if self.obstacles and self.hits_body(qj):
+                raise PlanError(f'{what}: แขนจะชนตัวหุ่น', stage)
+
+    def hits_body(self, q):
+        pts = self.k.link_points(q, self.ARM_LINKS + self.HAND_LINKS)
+        c = self.DECK_CLEAR
+        return any(bool(np.any(np.all((pts > lo - c) & (pts < hi + c), axis=1))) for lo, hi in self.obstacles)
 
     def _line(self, a, b, pitch, close_dir, gap, branch, roll, x_off=None):
         """Straight line of the object centre from a to b -> list of joint dicts (a excluded)."""
@@ -488,6 +513,9 @@ class GraspPlanner:
             'pitch': pitch, 'branch': branch, 'extent': extent, 'gap': gap, 'close_dir': close_dir,
             'jaw_open': min(jaw_for_gap(gap), JAW_G_MAX), 'grasp_centre': centre, 'grasp': grasp,
             'back': back, 'object': (obj.x, obj.y, obj.yaw, obj.size), 'steps': steps,
+            # fully closed jaws = nothing caught. A thin part (paper bag wall, handle) closes the jaws almost
+            # fully too, so it cannot be told from a miss: no check (None)
+            'miss_below': 0.05 if extent >= 0.02 else None,
             'mode': self.describe(pitch),
         }
 
@@ -531,6 +559,145 @@ class GraspPlanner:
             return (np.array([c * close_dir[0] - s * close_dir[1], s * close_dir[0] + c * close_dir[1], 0.0]),
                     target_yaw)
         return np.array([-math.sin(p_head), math.cos(p_head), 0.0]), obj.yaw + (p_head - self.k.heading(grasp))
+
+    # --------------------------------------------------------------------- bag: carry pose and paths
+    # A bag held by its top hangs straight down `hang` m below the grasp point (it stood on the floor =
+    # table_z, so hang = grasp height above it). It is modelled as a vertical cylinder of radius bag_r.
+    def held_point(self, q, held):
+        return self.k.gripper_point(q, (object_offset(held['gap']), GRASP_Y, 0))
+
+    def bag_clear(self, q, hang, bag_r, held):
+        """Bag hanging from the jaws in pose q stays above the floor and off the robot body. Straight above
+        the spot it stood on it is clear anyway (the robot drove up to it there)."""
+        g = self.held_point(q, held)
+        bottom = g[2] - hang
+        if bottom < self.table_z + 0.003:
+            return False
+        if np.linalg.norm(g[:2] - held['grasp_centre'][:2]) < 0.02:
+            return True
+        for lo, hi in self.obstacles:
+            if bottom > hi[2] + self.BAG_OVER_DECK or g[2] < lo[2]:
+                continue
+            near = np.clip(g[:2], lo[:2], hi[:2])     # closest point of the body's footprint
+            if np.linalg.norm(g[:2] - near) < bag_r:
+                return False
+        return True
+
+    def joint_path(self, qa, qb, held):
+        """Straight line in joint space from qa to qb (qa excluded), about CARRY_STEP of grasp point a step."""
+        d = np.linalg.norm(self.held_point(qb, held) - self.held_point(qa, held))
+        turn = max(abs(qb[j] - qa[j]) for j in ARM)
+        n = max(2, int(math.ceil(max(d / self.CARRY_STEP, turn / 0.05))))
+        return [{j: qa[j] + (qb[j] - qa[j]) * i / n for j in ARM} for i in range(1, n + 1)]
+
+    def check_path(self, qs, held, hang, bag_r, what, stage=5):
+        self.check_table(qs, held['gap'], what, stage)
+        for q in qs:
+            if not self.bag_clear(q, hang, bag_r, held):
+                raise PlanError(f'{what}: ถุงจะชนตัวหุ่นหรือลากพื้น', stage)
+
+    def bag_pose(self, held, fwd, left, z, prefer_pitch):
+        """Joint poses holding the grasp point at user (fwd, left), height z, jaw roll kept; any pitch."""
+        k = self.k
+        x, y = k.from_user(fwd, left)
+        pitches = sorted((math.radians(a) for a in range(-90, 46, 5)), key=lambda p: abs(p - prefer_pitch))
+        for pitch in pitches:
+            for branch in (held['branch'], -held['branch']):
+                for q in k.solve(np.array([x, y, z]), pitch, branch=branch):
+                    q['wrist_roll'] = held['grasp']['wrist_roll']
+                    q.pop('_branch', None)
+                    # solve() puts the tool-axis point there; the held point sits off-axis by the jaw offset
+                    if np.linalg.norm(self.held_point(q, held) - np.array([x, y, z])) < 0.03:
+                        yield q
+
+    def _route(self, start, route, held, hang, bag_r, what):
+        path, prev = [], start
+        for qn in route:
+            seg = self.joint_path(prev, qn, held)
+            self.check_path(seg, held, hang, bag_r, what)
+            path += seg
+            prev = qn
+        return path
+
+    def _ra(self, q, held):
+        """(radius, user angle) of the held point around the pan axis."""
+        f, l_ = self.k.to_user(self.held_point(q, held))
+        return math.hypot(f, l_), math.atan2(l_, f)
+
+    def _at(self, held, r, a, z, pitch):
+        x, y = self.k.from_user(r * math.cos(a), r * math.sin(a))
+        for branch in (held['branch'], -held['branch']):
+            for q in self.k.solve(np.array([x, y, z]), pitch, branch=branch):
+                q['wrist_roll'] = held['grasp']['wrist_roll']
+                q.pop('_branch', None)
+                if np.linalg.norm(self.held_point(q, held) - np.array([x, y, z])) < 0.03:
+                    return q
+        return None
+
+    def bag_move(self, start, end, held, hang, bag_r, what):
+        """Joint path start -> end with the bag hanging: straight if that is clear, else up at the start
+        direction, round (pan only, same radius and height) and down to the end. The round part is tried at
+        the higher end's height and high enough to pass over what stands on the deck."""
+        (r0, a0), (r1, a1) = self._ra(start, held), self._ra(end, held)
+        z0, z1 = self.held_point(start, held)[2], self.held_point(end, held)[2]
+        top = max([hi[2] for _, hi in self.obstacles] + [self.table_z])
+        heights = sorted({round(max(z0, z1), 4), round(max(z0, z1, top + self.BAG_OVER_DECK + hang + 0.01), 4)})
+        routes = [[end]]
+        pitches = sorted((math.radians(d) for d in range(-90, 46, 5)), key=lambda x: abs(x - held['pitch']))
+        for zr in heights:
+            for r in sorted({round(r0, 3), round(r1, 3)}):
+                for pitch in pitches:
+                    u, v = self._at(held, r, a0, zr, pitch), self._at(held, r, a1, zr, pitch)
+                    if u is not None and v is not None:
+                        routes.append([u, v, end])
+                        break
+        err = None
+        for route in routes:
+            try:
+                return self._route(start, route, held, hang, bag_r, what)
+            except PlanError as exc:
+                err = exc
+        raise err
+
+    def plan_carry(self, held, hang, side, bottom_min, bag_r=0.08, start=None):
+        """Carry pose for a bag picked with `held`: grasp point raised so the bag bottom is bottom_min above
+        the floor, out to the side at user angle `side` (rad, 0 = front, +pi/2 = left), as close in as the
+        bag allows. Returns {'q', 'path'}: joint-space moves from the lifted pose (or `start`)."""
+        start = start or held['steps']['lift'][-1]
+        z = self.table_z + bottom_min + hang
+        err = None
+        for dz in (0.0, 0.02, 0.04):
+            for r in np.arange(0.24, 0.38, 0.02):
+                q = next(iter(self.bag_pose(held, r * math.cos(side), r * math.sin(side), z + dz, held['pitch'])),
+                         None)
+                if q is None:
+                    continue
+                try:
+                    self.check_path([q], held, hang, bag_r, 'ท่าถือถุง')
+                    return {'q': q, 'path': self.bag_move(start, q, held, hang, bag_r, 'ทางไปท่าถือถุง')}
+                except PlanError as exc:
+                    err = exc
+        raise err or PlanError('หาท่าถือถุงไม่ได้ (ยกไม่สูงพอ)', 5)
+
+    def plan_bag_put(self, obj, held, target):
+        """Put-down plan for a held bag: the pick's tool pitch first, then others (the bag hangs from its
+        handle or rim, so the hand may tilt differently from the pick)."""
+        try:
+            return self.plan_place(obj, held, target)
+        except PlanError as exc:
+            err = exc
+        for deg in sorted(range(-90, -39, 5), key=lambda d: abs(math.radians(d) - held['pitch'])):
+            for branch in (held['branch'], -held['branch']):
+                alt = dict(held, pitch=math.radians(deg), branch=branch)
+                try:
+                    return self.plan_place(obj, alt, target)
+                except PlanError as exc:
+                    err = exc
+        raise err
+
+    def plan_bag_place(self, held, place, hang, bag_r=0.08):
+        """Joint path from the carry pose to the place plan's 'above_place' pose."""
+        return self.bag_move(held['carry']['q'], place['steps']['above_place'], held, hang, bag_r, 'ทางไปจุดวางถุง')
 
     # ------------------------------------------------------------- "where can it go" map for RViz
     def pick_options(self, obj, current=None):

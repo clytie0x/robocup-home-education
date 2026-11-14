@@ -3,6 +3,7 @@
   ros2 launch so100_moveit_config arm.launch.py                    # real arm + MoveIt + RViz
   ros2 launch so100_moveit_config arm.launch.py hardware:=sim      # no arm, simulated follower
   ros2 launch so100_moveit_config arm.launch.py mode:=sliders      # real arm follows joint sliders
+  ros2 launch so100_moveit_config arm.launch.py mount:=robot       # arm on the robot: floor + robot body
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
@@ -43,6 +44,13 @@ def setup(context):
     mode = LaunchConfiguration('mode').perform(context)
     rviz = LaunchConfiguration('rviz').perform(context) == 'true'
     share = get_package_share_directory('so100_moveit_config')
+    table_z = float(context.launch_configurations['table_z'])
+    mount = {}
+    if LaunchConfiguration('mount').perform(context) == 'robot':
+        # on the robot the "table" is the floor; the robot body under the arm is an obstacle
+        table_z = float(LaunchConfiguration('floor_z').perform(context))
+        mount = {'deck': [float(v) for v in LaunchConfiguration('deck').perform(context).split(',')],
+                 'deck_z': float(LaunchConfiguration('deck_z').perform(context))}
     mc = (MoveItConfigsBuilder('so_arm100', package_name='so100_moveit_config')
           .robot_description(file_path='urdf/so100.urdf')
           .robot_description_semantic(file_path='config/so100.srdf')
@@ -79,17 +87,17 @@ def setup(context):
                           parameters=[mc.to_dict(), {'publish_robot_description_semantic': True}]))
         # Table top just under the base so MoveIt never plans through it (MoveIt mode only).
         nodes.append(Node(package='so100_driver', executable='scene_setup', output='screen',
-                          parameters=[{'table_z': float(LaunchConfiguration('table_z').perform(context))}]))
+                          parameters=[{'table_z': table_z}]))
         # IK pick-and-place test: draggable object/target boxes in RViz + buttons in the control panel.
         nodes.append(Node(package='so100_driver', executable='pick_place', output='screen',
                           parameters=[mc.robot_description,
-                                      {'table_z': float(LaunchConfiguration('table_z').perform(context)),
+                                      {'table_z': table_z, **mount,
                                        'sim': hw == 'sim',
                                        'calibration': os.path.expanduser(
                                            LaunchConfiguration('calibration').perform(context)) if hw == 'real' else ''}]))
         rviz_cfg = f'{share}/config/moveit.rviz'
         if LaunchConfiguration('camera').perform(context) == 'true':
-            nodes += camera_nodes(float(LaunchConfiguration('table_z').perform(context)))
+            nodes += camera_nodes(table_z, mount)
     if rviz:
         nodes.append(Node(package='so100_driver', executable='control_panel'))
         nodes.append(Node(package='rviz2', executable='rviz2', arguments=['-d', rviz_cfg],
@@ -98,7 +106,7 @@ def setup(context):
     return nodes
 
 
-def camera_nodes(table_z):
+def camera_nodes(table_z, mount=None):
     """ASUS Xtion (openni2) -> /camera/depth_registered/points, plus the camera test node.
     The camera's own TF tree is not used: camera_test publishes base -> camera frame after calibration."""
     container = ComposableNodeContainer(
@@ -117,7 +125,7 @@ def camera_nodes(table_z):
                                        ('points', 'depth_registered/points')]),
         ])
     test = Node(package='so100_driver', executable='camera_test', output='screen',
-                parameters=[{'table_z': table_z}])
+                parameters=[{'table_z': table_z, **({'deck': mount['deck'], 'target': 'bag'} if mount else {})}])
     return [container, test]
 
 
@@ -131,5 +139,13 @@ def generate_launch_description():
         DeclareLaunchArgument('calibration', default_value='~/so100_ws/calibration.json'),
         DeclareLaunchArgument('table_z', default_value='-0.075',
                               description='table top below the arm base (m): base sits on a ~7 cm platform, measured 2026-11-07'),
+        DeclareLaunchArgument('mount', default_value='table', choices=['table', 'robot'],
+                              description='robot = arm on the robot top deck: picks from the floor (floor_z), '
+                                          'robot body (deck) kept clear, /arm/pick_bag'),
+        DeclareLaunchArgument('floor_z', default_value='-0.31',
+                              description='floor below the arm base (m): deck 24.2 cm + platform 6.8 cm, 2026-11-14'),
+        DeclareLaunchArgument('deck', default_value='0.18,0.22,0.18,0.22',
+                              description='deck edges from the pan axis, m: front,back,left,right (back is a guess)'),
+        DeclareLaunchArgument('deck_z', default_value='-0.068', description='deck top below the arm base (m)'),
         OpaqueFunction(function=setup),
     ])
