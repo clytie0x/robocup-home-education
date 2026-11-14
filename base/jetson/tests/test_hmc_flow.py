@@ -99,6 +99,69 @@ class StartTests(FlowCase):
         self.assertEqual(len(says(out)), 1)
 
 
+class EarlyInputTests(unittest.TestCase):
+    """Input before start() (no tts_node listening yet): start the flow, then handle it. Nothing is lost."""
+
+    def test_follow_me_heard_before_start_starts_and_follows(self):
+        f = HmcFlow()
+        out = f.on_heard("follow me", 1.0)
+        self.assertEqual(f.state, FOLLOWING)
+        self.assertEqual([v for k, v in out if k == "state"], [READY, FOLLOWING])
+        self.assertLess(out.index(("state", READY)), out.index(("cmd", {"action": "follow_me", "params": {}})))
+        self.assertEqual(actions(out), ["follow_me"])
+        self.assertEqual(forwarded(out), [])
+
+    def test_other_speech_before_start_starts_and_goes_to_the_brain(self):
+        f = HmcFlow()
+        out = f.on_heard("hello robot", 1.0)
+        self.assertEqual(f.state, READY)
+        self.assertEqual(out[0], ("state", READY))
+        self.assertEqual(forwarded(out), ["hello robot"])
+
+    def test_intent_before_start_starts_and_follows(self):
+        f = HmcFlow()
+        out = f.on_intent({"action": "follow_me", "params": {}}, 1.0)
+        self.assertEqual(f.state, FOLLOWING)
+        self.assertEqual(out[0], ("state", READY))
+        self.assertEqual(actions(out), ["follow_me"])
+
+    def test_event_before_start_is_noted_but_does_not_start(self):
+        """base_bridge sends base_link_ok on connect, usually before tts_node: don't speak to nobody."""
+        f = HmcFlow()
+        out = f.on_event("base_link_ok", 1.0)
+        self.assertIsNone(f.state)
+        self.assertEqual([k for k, _ in out], ["log"])
+        self.assertTrue(f.link_ok)
+        out = f.on_event("base_link_lost", 1.5)
+        self.assertIsNone(f.state)
+        self.assertEqual([k for k, _ in out], ["log"])
+        self.assertFalse(f.link_ok)
+
+    def test_start_only_once(self):
+        f = HmcFlow()
+        f.on_heard("hello robot", 1.0)
+        out = f.on_heard("follow me", 2.0)
+        self.assertNotIn(("state", READY), out)
+        self.assertEqual(f.state, FOLLOWING)
+
+    def test_tick_before_start_does_nothing(self):
+        f = HmcFlow()
+        self.assertEqual(f.on_tick(100.0), [])
+        self.assertIsNone(f.state)
+
+
+class ShouldStartTests(unittest.TestCase):
+    def test_starts_when_tts_listens(self):
+        self.assertTrue(hmc_flow.should_start(1, 0.0))
+
+    def test_waits_for_tts_up_to_start_wait(self):
+        self.assertFalse(hmc_flow.should_start(0, hmc_flow.START_WAIT - 0.1))
+        self.assertTrue(hmc_flow.should_start(0, hmc_flow.START_WAIT))
+
+    def test_start_wait_is_about_3_s(self):
+        self.assertTrue(1.0 <= hmc_flow.START_WAIT <= 5.0)
+
+
 class ReadyTests(FlowCase):
     def test_follow_me_words_start_following(self):
         f = self.make()

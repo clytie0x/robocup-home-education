@@ -10,6 +10,11 @@ The flow matches the task's own words in /speech/heard first ("follow me", "stop
 "go back", "done", ...). Only sentences it does not handle in the current state go on to the brain
 on /speech/text, so one sentence never triggers twice. Intents from the brain are used as well.
 
+Start: the flow enters ready once tts_node subscribes to /tts/say (so the first line is heard), or after
+START_WAIT s without it (warning logged; lines are still published), or at the first /speech/heard or
+/robot/intent, which is then handled in ready. So the base obeys even with no voice. A /robot/event
+before that (base_bridge sends base_link_ok on connect) is only noted (link, person) and logged.
+
 States (spec "HmcFlow states"; slice 1 = the operator hands the bag over):
   ready      entry: say how to start. "follow me" -> following
   following  sent follow_me (Pi follow). lost_person (or no lock) for 5 s: say "Please come back." once.
@@ -43,6 +48,9 @@ import time
 READY, FOLLOWING, AT_CAR, HANDOVER, RETURNING, DROPPING, DONE, ERROR = (
     "ready", "following", "at_car", "handover", "returning", "dropping_bag", "done", "error")
 NEEDS_BASE = (FOLLOWING, AT_CAR, HANDOVER, RETURNING)  # a lost Pi link here is an error; not after at_start
+# s to wait for tts_node on /tts/say before starting anyway: it may start late, crash or be absent,
+# and the base must still be commandable
+START_WAIT = 3.0
 
 # Other names teammates' nodes may send for the same event (copied from voice's flow_node).
 EVENT_ALIASES = {"drop_success": "drop_done", "grab_done": "grab_success", "pick_success": "grab_success",
@@ -72,6 +80,11 @@ def classify(text):
         if rx.search(low):
             return kind
     return None
+
+
+def should_start(listeners, waited_s, wait_s=START_WAIT):
+    """The node starts the flow once someone listens on /tts/say, or after wait_s without a listener."""
+    return listeners > 0 or waited_s >= wait_s
 
 
 class HmcFlow:
@@ -148,17 +161,24 @@ class HmcFlow:
     def start(self, now):
         return self._goto(READY, now)
 
+    def _start_first(self, now):
+        """Input before start(): enter ready now so it is handled, not lost. Its outputs come first."""
+        return self.start(now) if self.state is None else []
+
     def on_heard(self, text, now):
         """Raw speech. Handled here if it is a task word for this state, else forwarded to the brain."""
+        first = self._start_first(now)
         self.last_prompt = max(self.last_prompt, now)  # someone is talking: don't nag
         kind = classify(text)
         out = self._handle(kind, now) if kind else None
-        return out if out is not None else [("text", text)]
+        return first + (out if out is not None else [("text", text)])
 
     def on_intent(self, intent, now):
+        first = self._start_first(now)
         kind = INTENT_KINDS.get(intent.get("action", "none"))
         out = self._handle(kind, now) if kind else None
-        return out if out is not None else [("log", "(intent %s ignored in state %s)" % (intent.get("action"), self.state))]
+        return first + (out if out is not None
+                        else [("log", "(intent %s ignored in state %s)" % (intent.get("action"), self.state))])
 
     def _handle(self, kind, now):
         """Outputs for a task word, or None when the word means nothing in this state."""
@@ -207,6 +227,12 @@ class HmcFlow:
         return None
 
     def on_event(self, ev, now):
+        if self.state is None:  # base_bridge connects before tts_node: note it (link_ok, ...), don't start
+            self._event(ev, now)
+            return [("log", "(event '%s' before start: noted)" % ev.strip())]
+        return self._event(ev, now)
+
+    def _event(self, ev, now):
         # "name" or "name|ERROR_CODE|English message" (from arm_action_bridge / SO-100 API)
         parts = ev.strip().split("|", 2)
         name = EVENT_ALIASES.get(parts[0].strip().lower(), parts[0].strip().lower())
@@ -299,7 +325,7 @@ def make_node():
             self.create_subscription(String, "/robot/intent", self.on_intent, 10)
             self.create_subscription(String, "/robot/event", self.on_event, 10)
             self.create_timer(0.2, self.on_tick)
-            self.started = False
+            self.t0 = time.time()
 
         def emit(self, outputs):
             for kind, val in outputs:
@@ -335,10 +361,13 @@ def make_node():
 
         def on_tick(self):
             now = time.time()
-            if not self.started:  # wait until tts_node listens, so the first line is heard
-                if self.pub_say.get_subscription_count() == 0:
+            if self.logic.state is None:  # wait for tts_node (first line heard), at most START_WAIT s
+                listeners = self.pub_say.get_subscription_count()
+                if not should_start(listeners, now - self.t0):
                     return
-                self.started = True
+                if listeners == 0:
+                    self.get_logger().warn("no tts_node on /tts/say after %.0f s: starting without voice"
+                                           % START_WAIT)
                 self.emit(self.logic.start(now))
                 return
             self.emit(self.logic.on_tick(now))
