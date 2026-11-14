@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ffffff">
+  <title>HMC Robot Console</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11l8-6 8 6v9H4z" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-run" viewBox="0 0 24 24"><path d="M7 5l12 7-12 7z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 19h16M7 16v-5M12 16V7M17 16v-8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 6v12M15 6v12" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M9 4l-5 5 5 5M4 9h11a5 5 0 010 10h-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-person" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 20c0-3.9 3.1-6 7-6s7 2.1 7 6" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  </defs></svg>
+
+  <!-- desktop: top bar and status strip -->
+  <header id="top" class="desk-only">
+    <div class="brand"><b>H</b>HMC Robot Console</div>
+    <nav id="desk-tabs" aria-label="ส่วนต่างๆ">
+      <a href="#overview" data-tab="overview">ภาพรวม</a>
+      <a href="#task" data-tab="task">งาน</a>
+      <a href="#jetson" data-tab="jetson">Jetson</a>
+      <a href="#checks" data-tab="checks">ตรวจระบบ</a>
+      <a href="#data" data-tab="data">ข้อมูล</a>
+      <a href="#logs" data-tab="logs">Log</a>
+      <a href="#help" data-tab="help">วิธีใช้</a>
+    </nav>
+    <div class="right">
+      <button type="button" class="tag" id="pin-tag">PIN</button>
+      <button type="button" class="dstop" id="btn-stop-desk" disabled>STOP</button>
+    </div>
+  </header>
+  <div id="statusline" class="desk-only">
+    <span><span class="k">สถานะ</span><b id="sl-state">-</b></span>
+    <span><span class="k">เวลา</span><span class="v num" id="sl-time">-</span></span>
+    <span><span class="k">ระยะคน</span><span class="v num" id="sl-op">-</span></span>
+    <span><span class="k">ความเร็ว</span><span class="v num" id="sl-speed">-</span></span>
+    <span><span class="k">ใกล้สุด</span><span class="v num" id="sl-near">-</span></span>
+    <span><span class="k">แบต</span><span class="v num" id="sl-bank">-</span></span>
+    <span class="tag" id="sl-lock" hidden><i class="sq"></i><span>ล็อคคน</span></span>
+  </div>
+
+  <!-- phone: header bar of the open tab -->
+  <header id="bar" class="phone-only">
+    <div class="bar-text"><h1 id="bar-title">HMC Robot</h1><div class="s num" id="bar-sub">-</div></div>
+    <div class="r" id="bar-tag"></div>
+  </header>
+
+  <div id="offline" class="fault" hidden>
+    <div class="h"><svg width="16" height="16"><use href="#i-warn"/></svg>คอนโซลไม่ตอบ</div>
+    <div class="act">ดูว่า Pi เปิดอยู่ และมือถือต่อ Wi-Fi ของหุ่นอยู่</div>
+  </div>
+
+  <main>
+    <!-- Overview -->
+    <section class="tab" id="tab-overview">
+      <div class="ov-grid">
+        <div class="ov-main">
+          <div class="panel phone-only" id="ov-state">
+            <div class="state"><div class="lbl">สถานะ</div><div class="v" id="state-word">-</div></div>
+            <div class="grid3">
+              <div><span>แบต (ประมาณ)</span><b class="num" id="n-bank">-</b></div>
+              <div><span>Pi</span><b class="num" id="n-pi">-</b></div>
+              <div><span>Jetson</span><b class="num" id="n-jetson">-</b></div>
+            </div>
+          </div>
+          <div class="btnrow phone-only" id="ov-buttons">
+            <button type="button" class="btn pri" id="btn-go-task"><svg width="16" height="16"><use href="#i-run"/></svg><span>เริ่มงาน</span></button>
+            <button type="button" class="btn" data-check="wheel">ทดสอบล้อ</button>
+          </div>
+          <div id="faults"></div>
+          <div class="panel desk-only dpanel">
+            <div class="ph">กล้อง Xtion<span class="num" id="cam-note-desk">-</span></div>
+            <div class="slot" data-slot="cam"></div>
+            <div class="slot" data-slot="cmds"></div>
+          </div>
+        </div>
+        <div class="panel desk-only dpanel ov-lidar">
+          <div class="ph">LiDAR มุมบน<span class="num">วงละ 1 m</span></div>
+          <div class="slot fill" data-slot="lidar"></div>
+        </div>
+        <div class="ov-side">
+          <div class="panel rows dpanel" id="sys-panel">
+            <div class="ph">ระบบ<span class="tag small" id="sys-count">-</span></div>
+            <div id="sys-rows"></div>
+          </div>
+          <div class="panel dpanel desk-only">
+            <div class="ph">Jetson<span class="num" id="jet-note">-</span></div>
+            <div id="jet-rows" class="rows"></div>
+          </div>
+          <div class="panel dpanel desk-only">
+            <div class="ph">Pi<span class="num">ทุก 1 s</span></div>
+            <div id="pi-rows" class="rows"></div>
+          </div>
+          <div class="panel dpanel" id="bank-panel">
+            <div class="ph">แบต<span class="num">ประมาณ</span></div>
+            <div class="bank">
+              <div class="bank-name">power bank (Pi)</div>
+              <div class="bank-top"><b class="num" id="bank-pct">-</b><span class="num" id="bank-range"></span></div>
+              <div class="bank-kv">
+                <div><span>ตั้งแต่ชาร์จเต็ม</span><b class="num" id="bank-hours">-</b></div>
+                <div><span>ขับไปแล้ว</span><b class="num" id="bank-drive">-</b></div>
+              </div>
+              <div class="fault" id="bank-warn" hidden>
+                <div class="h"><svg width="16" height="16"><use href="#i-warn"/></svg><span id="bank-warn-head">แบตใกล้หมด</span></div>
+                <div class="act">ต่ำกว่า 30% แล้ว ชาร์จ power bank ก่อน ถ้าแบตหมด Pi จะดับ</div>
+              </div>
+              <p class="note" id="bank-note"></p>
+              <div class="bank-actions">
+                <button type="button" class="btn" id="btn-bank-full">ชาร์จเต็มแล้ว</button>
+                <form class="reading" id="bank-form">
+                  <input type="number" id="bank-input" min="0" max="100" step="1" inputmode="numeric" placeholder="%" aria-label="เปอร์เซ็นต์ที่จอแบต">
+                  <button type="submit" class="btn">กรอกค่าจากจอ</button>
+                </form>
+              </div>
+              <div class="bank-motor">
+                <div class="bank-name">แบต 21V (มอเตอร์)</div>
+                <p class="bank-use num" id="motor-use">-</p>
+                <p class="note" id="motor-note"></p>
+                <div class="bank-actions">
+                  <button type="button" class="btn" id="btn-motor-full">ชาร์จเต็มแล้ว</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Live (phone) -->
+    <section class="tab" id="tab-live" hidden>
+      <div class="fault" id="live-paused" hidden>
+        <div class="h">หยุดภาพสดชั่วคราว</div>
+        <div class="act" id="live-paused-why"></div>
+      </div>
+      <div class="panel" id="live-cam-panel">
+        <div class="slot" data-slot="cam"></div>
+      </div>
+      <div class="panel" id="live-lidar-panel">
+        <div class="ph">LiDAR<span class="num" id="scan-info">รอข้อมูล</span></div>
+        <div class="slot" data-slot="lidar"></div>
+      </div>
+      <div class="panel rows" id="live-run" hidden>
+        <div class="ph">สถานะงาน<span class="num" id="live-run-note"></span></div>
+        <div id="live-run-kv"></div>
+      </div>
+      <div class="panel">
+        <div class="ph">เว็บแคมของแขน<span id="badge-webcam">-</span></div>
+        <div class="slot" data-slot="webcam"></div>
+      </div>
+    </section>
+
+    <!-- Task -->
+    <section class="tab" id="tab-task" hidden>
+      <div id="task-start" class="panel form">
+        <div class="ph">เริ่มงาน<span>เดินตามคน แล้วกลับจุดเริ่ม</span></div>
+        <label class="field-label">โหมด</label>
+        <div class="seg" id="seg-mode">
+          <button type="button" data-value="dry" class="on">ทดลอง<small>ล้อไม่หมุน</small></button>
+          <button type="button" data-value="drive">ขับจริง<small>หุ่นเคลื่อนที่</small></button>
+        </div>
+        <label class="field-label">คนที่ตาม</label>
+        <div class="seg" id="seg-person">
+          <button type="button" data-value="real" class="on">คนจริง<small>กล้องและ Jetson</small></button>
+          <button type="button" data-value="virtual">คนเสมือน<small>จาก PC ต้องมี PIN</small></button>
+        </div>
+        <div class="virtual-host" id="virtual-fields" hidden>
+          <label class="field-label" for="virtual-host">ที่อยู่ PC ที่ส่งคนเสมือน</label>
+          <input type="text" id="virtual-host" inputmode="decimal" autocomplete="off" spellcheck="false"
+                 placeholder="ว่างไว้ ใช้เครื่องที่กดเริ่ม">
+          <p class="note">PC เปิด base/pc/virtual_operator/app.py ส่งตำแหน่งคนมาที่ UDP 5610 ของ Pi กล้องจริงจะไม่ใช้หาคน</p>
+        </div>
+        <label class="field-label">ความเร็วสูงสุด</label>
+        <div class="seg" id="seg-speed"></div>
+        <label class="field-label">ระยะเวลา</label>
+        <div class="seg" id="seg-minutes">
+          <button type="button" data-value="2">2<small>นาที</small></button>
+          <button type="button" data-value="5" class="on">5<small>นาที</small></button>
+          <button type="button" data-value="10">10<small>นาที</small></button>
+          <button type="button" data-value="20">20<small>นาที</small></button>
+        </div>
+        <button type="button" class="btn pri big" id="btn-start-task">เริ่มงาน</button>
+        <p class="note" id="task-start-note">เปิดโปรแกรมบน Jetson ก่อน (แท็บ Jetson) ไม่อย่างนั้นหุ่นจะตามใครไม่ได้</p>
+      </div>
+      <div id="task-running" class="task-grid" hidden>
+        <div class="panel">
+          <div class="slot" data-slot="cam"></div>
+          <div class="kv3" id="task-kv3"></div>
+        </div>
+        <div class="panel">
+          <div class="ph">LiDAR<span class="num" id="scan-info-task">4 m</span></div>
+          <div class="slot" data-slot="lidar"></div>
+        </div>
+        <div class="slot span" data-slot="cmds"></div>
+        <div class="panel rows span">
+          <div class="ph"><span id="task-label">งาน</span><span class="num" id="task-phase">-</span></div>
+          <div id="task-kv"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="ph">ข้อความจากงาน<span id="task-output-what">30 บรรทัดล่าสุด</span></div>
+        <pre class="log" id="task-output">ยังไม่มีงานวิ่งตั้งแต่เปิดคอนโซล</pre>
+      </div>
+    </section>
+
+    <!-- Data -->
+    <section class="tab" id="tab-data" hidden>
+      <div class="range" id="range">
+        <button type="button" data-range="hour">1 ชม.</button>
+        <button type="button" data-range="today" class="on">วันนี้</button>
+        <button type="button" data-range="week">7 วัน</button>
+        <button type="button" data-range="run">รอบวิ่ง</button>
+      </div>
+      <div class="fault" id="data-missing" hidden>
+        <div class="h"><svg width="16" height="16"><use href="#i-warn"/></svg>ไม่มีข้อมูล telemetry</div>
+        <div class="act" id="data-missing-text">ไม่พบ telemetry.py บน Pi ข้อมูลส่วนนี้จึงว่าง</div>
+      </div>
+      <p class="note" id="data-window"></p>
+      <div class="charts">
+        <div class="panel ch" id="ch-bank"></div>
+        <div class="panel ch" id="ch-temp"></div>
+        <div class="panel ch" id="ch-power"></div>
+        <div class="panel ch" id="ch-link"></div>
+        <div class="panel ch" id="ch-speed"></div>
+      </div>
+      <div class="data-foot">
+        <div class="panel rows">
+          <div class="ph">รอบวิ่ง<span class="num" id="runs-note">แตะแถวเพื่อดูความเร็ว</span></div>
+          <div class="table-wrap"><table class="tbl" id="runs-table"></table></div>
+        </div>
+        <div class="panel rows">
+          <div class="ph">สรุป<a id="csv-link" href="#" download>ดาวน์โหลด CSV</a></div>
+          <div class="row two">รอบวิ่งทั้งหมด<span class="val num" id="sum-runs">-</span></div>
+          <div class="row two">ระยะทางรวม<span class="val num" id="sum-dist">-</span></div>
+          <div class="row two">ไฟล์ข้อมูล<span class="val num" id="sum-db">-</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- More (phone) -->
+    <section class="tab" id="tab-more" hidden>
+      <div class="panel rows">
+        <a class="row link" href="#jetson"><span>Jetson</span><span class="val text">โปรแกรมบน Jetson</span></a>
+        <a class="row link" href="#checks"><span>ตรวจระบบ</span><span class="val text">ล้อ กล้อง ลิงก์</span></a>
+        <a class="row link" href="#logs"><span>Log</span><span class="val text">งานที่วิ่งล่าสุด</span></a>
+        <a class="row link" href="#help"><span>วิธีใช้</span><span class="val text">ลำดับปกติ และวิธีแก้</span></a>
+      </div>
+    </section>
+
+    <!-- Jetson -->
+    <section class="tab" id="tab-jetson" hidden>
+      <p class="note" id="jetson-summary">-</p>
+      <div class="btnrow even">
+        <button type="button" class="btn pri" id="btn-start-all">เปิดทั้งหมด</button>
+        <button type="button" class="btn" id="btn-stop-all">ปิดทั้งหมด</button>
+      </div>
+      <p class="note" id="jetson-sequence"></p>
+      <div class="fault" id="jetson-outside" hidden>
+        <div class="h">มีโปรแกรมที่ไม่ได้เปิดจากหน้านี้</div>
+        <div class="act" id="jetson-outside-text"></div>
+      </div>
+      <div class="cols" id="programs"></div>
+      <div class="panel desk-only">
+        <div class="ph">เว็บแคมของแขน<span id="badge-webcam-desk">-</span></div>
+        <div class="slot" data-slot="webcam"></div>
+      </div>
+    </section>
+
+    <!-- Checks -->
+    <section class="tab" id="tab-checks" hidden>
+      <div class="cols">
+        <div class="panel">
+          <div class="ph">ทดสอบล้อ<span id="badge-wheel">-</span></div>
+          <p>เดินหน้าราว 4 ซม. ที่ 0.05 m/s แล้วอ่านบอร์ดมอเตอร์ บอกว่ามอเตอร์มีไฟเข้าและ encoder ทั้งสองข้างนับหรือไม่</p>
+          <p class="note" id="wheel-last">ยังไม่เคยทดสอบล้อ</p>
+          <button type="button" class="btn pri big" data-check="wheel">ทดสอบล้อ</button>
+        </div>
+        <div class="panel">
+          <div class="ph">ตรวจมุมกล้อง<span>หุ่นอยู่นิ่ง</span></div>
+          <p>ต้องมีพื้นโล่ง 1.5 ม. หน้าหุ่น วัดความสูงและมุมก้มของกล้องจากภาพความลึก 30 ภาพ</p>
+          <button type="button" class="btn big" data-check="floor">ตรวจกล้อง</button>
+        </div>
+        <div class="panel">
+          <div class="ph">ทดสอบลิงก์<span>Pi ไป Jetson</span></div>
+          <p>เวลาเชื่อมต่อ TCP ไป Jetson ทางสาย LAN (10.0.0.2) และทาง Wi-Fi (192.168.31.137)</p>
+          <div id="linktest-out"></div>
+          <button type="button" class="btn big" id="btn-linktest">ทดสอบลิงก์</button>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="ph">ผลการตรวจ<span id="check-output-what">30 บรรทัดล่าสุด</span></div>
+        <pre class="log" id="check-output">ยังไม่มีการตรวจตั้งแต่เปิดคอนโซล</pre>
+      </div>
+    </section>
+
+    <!-- Logs -->
+    <section class="tab" id="tab-logs" hidden>
+      <p class="note">งานที่วิ่งล่าสุด (logs/ บน Pi)</p>
+      <div class="panel rows" id="runs"><p class="note">กำลังโหลด</p></div>
+    </section>
+
+    <!-- Help -->
+    <section class="tab" id="tab-help" hidden>
+      <div class="cols help">
+        <div class="panel">
+          <div class="ph">เปิดหน้านี้</div>
+          <p>ต่อมือถือหรือโน้ตบุ๊กเข้า Wi-Fi เดียวกับหุ่น แล้วเปิด <b class="num">http://192.168.31.21:8081</b></p>
+          <p>ถ้าใช้สาย LAN เปิด <b class="num">http://10.0.0.1:8081</b></p>
+          <p>ถ้าหน้าไม่ขึ้น ให้ดูว่า Pi เปิดอยู่ และ console.py ทำงานอยู่ (ดู base/docs/robot-console.md)</p>
+        </div>
+        <div class="panel">
+          <div class="ph">ลำดับปกติ</div>
+          <ol class="steps">
+            <li>ชาร์จพาวเวอร์แบงก์ (จ่ายไฟ Pi) และแบต 21V (จ่ายไฟมอเตอร์) ให้เต็มก่อน แล้วกด <b>ชาร์จเต็มแล้ว</b> ของแต่ละก้อนที่ภาพรวม</li>
+            <li>เปิด <b>ภาพรวม</b> ดูว่าทุกแถวเป็นจุดดำ ไม่มีกล่องเส้นแดง</li>
+            <li><b>ตรวจระบบ</b> กด <b>ทดสอบล้อ</b> (หุ่นเดินหน้า 4 ซม.) ต้องได้ผ่าน</li>
+            <li><b>Jetson</b> กด <b>เปิดทั้งหมด</b> รอจนทั้งสามตัวขึ้นว่าทำงาน</li>
+            <li><b>งาน</b> เลือกขับจริง ความเร็ว และเวลา แล้วกด <b>เริ่มงาน</b></li>
+            <li>ยืนหน้าหุ่นห่างไม่เกิน 2.5 ม. พูด "follow me" หรือกด <b>Follow</b></li>
+            <li>ถึงที่หมาย กด <b>Back</b> (หรือพูด "go back") หุ่นจะกลับจุดเริ่ม</li>
+            <li>เสร็จหรือมีอะไรผิด กด <b>STOP</b> สีแดงได้ทุกหน้า</li>
+          </ol>
+          <p class="note">STOP หยุดงานและส่ง S# ให้ล้อ แต่ไม่ใช่ปุ่มฉุกเฉิน ถ้า Wi-Fi หลุดหน้านี้ทำอะไรไม่ได้ ให้ใช้สวิตช์ตัดไฟมอเตอร์ที่ตัวหุ่น</p>
+        </div>
+        <div class="panel">
+          <div class="ph">สัญลักษณ์และวิธีแก้</div>
+          <dl class="faults">
+            <dt><i class="sq"></i>จุดดำ</dt><dd>ปกติ</dd>
+            <dt><i class="sq ring"></i>วงกลมดำ</dt><dd>ใช้ได้แต่ควรดู เช่น ยังไม่ได้ทดสอบล้อ หรือใช้ได้แต่ Wi-Fi</dd>
+            <dt><i class="sq bad"></i>จุดแดง</dt><dd>เสีย ต้องแก้ก่อนวิ่ง กล่องเส้นแดงบอกว่าวัดอะไรได้ และต้องทำอะไร</dd>
+            <dt>กรอบแดงในภาพ</dt><dd>คนที่หุ่นกำลังตาม วงกลมดำคือคนอื่น</dd>
+            <dt>ล้อไม่มีไฟเข้า</dt><dd>ตรวจแบต 21V ว่าเสียบอยู่และมีไฟ แล้วทดสอบล้อใหม่</dd>
+            <dt>ล้อข้างหนึ่งไม่นับ encoder</dt><dd>ดูสาย encoder และสายมอเตอร์ของข้างนั้น</dd>
+            <dt>บอร์ดมอเตอร์ไม่ตอบ</dt><dd>ดูสาย USB จาก Pi ไปบอร์ด และไฟของบอร์ด</dd>
+            <dt>ไม่พบ LiDAR หรือกล้อง</dt><dd>ถอดแล้วเสียบสาย USB ใหม่ รอ 5 วินาที หน้านี้จะลองเปิดเองอีกครั้ง</dd>
+            <dt>Jetson ไม่ตอบ</dt><dd>ดูว่า Jetson เปิดอยู่ และสาย LAN เสียบอยู่ ถ้าใช้ได้แต่ Wi-Fi ให้เสียบสาย LAN</dd>
+            <dt>agent ไม่ตอบ</dt><dd>บน Jetson ยังไม่ได้รัน agent.py ดูวิธีใน base/docs/robot-console.md</dd>
+            <dt>Pi ร้อน</dt><dd>ให้ Pi มีลมผ่าน อย่าวางของทับ</dd>
+            <dt>แบต (ประมาณ)</dt><dd>คำนวณจากไฟที่ใช้ ไม่ได้วัดจริง power bank จ่ายไฟเฉพาะ Pi กับอุปกรณ์ USB หลังชาร์จเต็มกด ชาร์จเต็มแล้ว และกรอกค่าจากจอแบตเป็นระยะ ค่าจะแม่นขึ้น แบต 21V ของมอเตอร์ยังไม่รู้ความจุ จึงบอกเป็น Wh ที่ใช้ไปและเวลาที่ขับ ไม่ใช่เปอร์เซ็นต์</dd>
+            <dt>หยุดภาพสดชั่วคราว</dt><dd>ปกติ ระหว่างตรวจระบบ กล้องกับ LiDAR ถูกงานใช้อยู่ (เปิดได้ทีละโปรแกรม) ระหว่างงานวิ่ง ภาพสดมาจากงานเอง</dd>
+          </dl>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- the pieces that move to the open tab's slot (one camera stream at a time) -->
+  <div id="parking" hidden>
+    <div id="cam-box" class="cam">
+      <img id="img-camera" alt="" aria-label="กล้องของหุ่น">
+      <span class="ov" id="cam-ov">XTION</span>
+      <span class="opbox" id="cam-op" hidden></span>
+      <span class="ov right num" id="cam-state">-</span>
+    </div>
+    <div id="lidar-box" class="lidar"><canvas id="scan"></canvas></div>
+    <div id="cmds-box">
+      <div class="cmds" id="cmds">
+        <button type="button" class="btn" data-command="follow"><svg width="15" height="15"><use href="#i-person"/></svg>Follow</button>
+        <button type="button" class="btn" data-command="wait"><svg width="15" height="15"><use href="#i-pause"/></svg>Wait</button>
+        <button type="button" class="btn" data-command="resume"><svg width="15" height="15"><use href="#i-run"/></svg>Resume</button>
+        <button type="button" class="btn" data-command="return"><svg width="15" height="15"><use href="#i-back"/></svg>Back</button>
+      </div>
+      <div class="btnrow" id="idle-cmds">
+        <button type="button" class="btn pri" id="btn-go-task-desk"><svg width="16" height="16"><use href="#i-run"/></svg>เริ่มงาน</button>
+        <button type="button" class="btn" data-check="wheel">ทดสอบล้อ</button>
+      </div>
+    </div>
+    <div id="webcam-box" class="cam"><img id="img-webcam" alt="" aria-label="เว็บแคมของแขน"></div>
+  </div>
+
+  <button type="button" id="stopbar" class="phone-only" hidden><i></i><span id="stopbar-text">STOP</span></button>
+  <nav id="tabbar" class="phone-only" aria-label="แท็บ">
+    <a href="#overview" data-tab="overview"><svg width="20" height="20"><use href="#i-home"/></svg>ภาพรวม</a>
+    <a href="#live" data-tab="live"><svg width="20" height="20"><use href="#i-eye"/></svg>ภาพสด</a>
+    <a href="#task" data-tab="task"><svg width="20" height="20"><use href="#i-run"/></svg>งาน</a>
+    <a href="#data" data-tab="data"><svg width="20" height="20"><use href="#i-chart"/></svg>ข้อมูล</a>
+    <a href="#more" data-tab="more"><svg width="20" height="20"><use href="#i-menu"/></svg>อื่นๆ</a>
+  </nav>
+
+  <div id="modal" class="modal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <h3 id="modal-title">แน่ใจไหม</h3>
+      <p id="modal-text"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="modal-no">ยกเลิก</button>
+        <button type="button" class="btn pri" id="modal-yes">ใช่</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast" hidden></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

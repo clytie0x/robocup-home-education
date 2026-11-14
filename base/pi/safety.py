@@ -12,6 +12,13 @@ CYCLE = 0.1  # s, one control cycle: the command now may run this long before th
 SWEEP_DT = 0.05  # s, between two outline poses of the sweep
 BLIND_CAP = 0.3  # m/s, top speed when there is no depth image
 CLEARANCE = 0.30  # m, left ahead after a full stop at any speed (spec criterion 8: never closer than 0.3 m)
+MIN_CLEARANCE = 0.05  # m, the least params.json "stop_clearance" may ask for
+
+
+def clearance(p):
+    """m left ahead after a full stop: params.json "stop_clearance" (owner, 2026-11-15: 0.10 at 0.12 m/s),
+    else CLEARANCE; never below MIN_CLEARANCE."""
+    return max(MIN_CLEARANCE, float(p.get("stop_clearance", CLEARANCE)))
 
 
 def braking_distance(v, p, margin=0.15):
@@ -84,8 +91,8 @@ class Coast:
 def must_stop(points_base, v, w, p, cycle=CYCLE):
     """True when a point is in the path the body sweeps before it could stop.
 
-    Moving forward (v > 0): the strip 0 < x - FRONT < run-on distance + CLEARANCE, |y| < half width
-    + margin. So the base always stops with CLEARANCE left, also when creeping, when the run-on
+    Moving forward (v > 0): the strip 0 < x - FRONT < run-on distance + clearance(p), |y| < half width
+    + margin. So the base always stops with clearance(p) left, also when creeping, when the run-on
     distance alone would let it get within a few centimetres.
     Turning (w != 0): the real outline swept along the run-on arc (run_on_poses) must stay
     footprint.MARGIN from every point, or not come closer to a point already nearer than that.
@@ -105,7 +112,7 @@ def must_stop(points_base, v, w, p, cycle=CYCLE):
         ahead = x - FRONT
         corner = (x > CORNERS) & (numpy.abs(y) < p["robot_half_width"]) & (footprint.body_gap(pts, 0.0, 0.0, 0.0) > 0)
         front = (ahead > 0) | corner  # ahead of the front edge, or in a cut corner in front
-        if numpy.any(front & (ahead < braking_distance(v, p, margin=CLEARANCE))
+        if numpy.any(front & (ahead < braking_distance(v, p, margin=clearance(p)))
                      & (numpy.abs(y) < p["robot_half_width"] + SIDE_MARGIN)):
             return True
     return bool(w != 0 and not footprint.sweep_clear(pts, run_on_poses(v, w, p, cycle)))

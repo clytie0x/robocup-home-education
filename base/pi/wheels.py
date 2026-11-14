@@ -1,4 +1,5 @@
-"""Wheel packets for the base firmware, odometry parsing and a watchdog that stops the base."""
+"""Wheel packets for the base firmware, odometry and status parsing, a watchdog that stops the base, and
+a check that the wheels really turn."""
 import math
 import os
 import threading
@@ -14,8 +15,20 @@ STEP_MAX = 0.5  # m
 TURN_MAX = 1.0  # rad
 STOP_REPEATS = 3  # S# writes per stop: one byte lost to a parity error must not leave the base driving
 SAFE_RUN_ENV = "HMC_SAFE_RUN"  # set by tools/safe_run.py for the program it starts
-REVERSE_MAX = 0.06  # m/s, the top backward speed; only tools/back_up.py sends it, after safety.rear_clear
+REVERSE_MAX = 0.06  # m/s, the top backward speed; only tools/back_up.py and run_follow's escape (escape.py) send it, after safety.rear_clear
 REVERSE_TURN_MAX = 0.05  # rad/s: send_reverse backs straight, the only path rear_clear checks
+# E# (base firmware 0c020e4 on). It answers in a few ms; the old firmware has no E# and answers nothing,
+# so the read waits only this long, not the port's 0.2 s (a cycle is 0.1 s).
+STATUS_TIMEOUT = 0.05  # s
+FAULT_LEFT, FAULT_RIGHT, NO_COMMAND = 0x01, 0x02, 0x04  # E#'s flags: an encoder fault cuts the motors
+# Wheels that do not turn (2026-11-14: the motor supply died, the firmware cut the motors and run_follow
+# commanded 0.114 m/s for 60 s). A command at least STALL_V or STALL_W for STALL_TIME moves the base well
+# past STALL_MOVE or STALL_TURN (3 cm or 8.6 deg at the smallest watched command), start-up delay included.
+STALL_V = 0.03  # m/s
+STALL_W = 0.15  # rad/s
+STALL_TIME = 1.0  # s
+STALL_MOVE = 0.01  # m
+STALL_TURN = math.radians(2.0)
 NOT_SAFE_RUN = ("start it through tools/safe_run.py, which sends S# however it ends (the new firmware also stops by"
                 " itself 0.3 s after the last command; the old one did not): python tools/safe_run.py .venv/bin/python"
                 " <program> <arguments>")
@@ -71,6 +84,50 @@ def parse_odom(line):
     if not all(math.isfinite(n) for n in (x, y, th)):
         raise ValueError(f"bad odom {line!r}")
     return (x, y, th)
+
+
+def parse_status(line):
+    """'Eleft:+0000120,right:-0000007,pwm:+076,+076,flags:03#' to {"left", "right", "pwm": [l, r], "flags"}.
+    The flags are hex digits (FAULT_LEFT, FAULT_RIGHT, NO_COMMAND)."""
+    line = line.strip()
+    if not (line.startswith("E") and line.endswith("#")):
+        raise ValueError(f"bad status {line!r}")
+    parts = line[1:-1].split(",")
+    if len(parts) != 5 or [s.split(":")[0] for s in parts] != ["left", "right", "pwm", parts[3], "flags"]:
+        raise ValueError(f"bad status {line!r}")
+    try:
+        left, right, pwm_l = (int(s.split(":", 1)[1]) for s in parts[:3])
+        return {"left": left, "right": right, "pwm": [pwm_l, int(parts[3])], "flags": int(parts[4].split(":", 1)[1], 16)}
+    except ValueError:
+        raise ValueError(f"bad status {line!r}") from None
+
+
+class StallWatch:
+    """The Pi's own check that the wheels turn, with any firmware: a command of at least STALL_V or STALL_W
+    sent for STALL_TIME without a break, while the odometry moved less than STALL_MOVE and STALL_TURN."""
+
+    def __init__(self):
+        self.samples = []  # (time, pose) since the command became big enough; the first is the window start
+
+    def reset(self):
+        self.samples = []
+
+    def update(self, now, sent, pose):
+        """sent: the command the wheels had since the previous update. True: the wheels are not turning."""
+        if abs(sent[0]) < STALL_V and abs(sent[1]) < STALL_W:
+            self.samples = [(now, pose)]  # a big command sent now starts its window here
+            return False
+        if not self.samples:
+            self.samples = [(now, pose)]  # nothing known from before
+            return False
+        self.samples.append((now, pose))
+        while len(self.samples) > 1 and now - self.samples[1][0] >= STALL_TIME - 1e-6:
+            self.samples.pop(0)  # the window: from the newest sample at least STALL_TIME old
+        since, start = self.samples[0]
+        if now - since < STALL_TIME - 1e-6:
+            return False
+        turned = abs(math.atan2(math.sin(pose[2] - start[2]), math.cos(pose[2] - start[2])))
+        return math.dist(pose[:2], start[:2]) < STALL_MOVE and turned < STALL_TURN
 
 
 def true_step(pose, before, after, p):
@@ -146,7 +203,7 @@ class Wheels:
         return data
 
     def send_reverse(self, speed, w):
-        """The only backward command (reverse_packet); tools/back_up.py alone calls it."""
+        """The only backward command (reverse_packet); tools/back_up.py and run_follow's escape (escape.py) call it."""
         if not abs(w) <= REVERSE_TURN_MAX:  # NaN too
             raise ValueError(f"backing turn {w} outside +-{REVERSE_TURN_MAX}")
         data = reverse_packet(speed, w, self.p)
@@ -178,6 +235,21 @@ class Wheels:
             self._raw = raw
             return self._pose
         raise ValueError(f"bad odom {line!r}")
+
+    def read_status(self):
+        """E#: parse_status of the firmware's answer, ValueError when it does not parse (the old firmware
+        has no E#). One try, at STATUS_TIMEOUT; the timeout is set and put back under the lock, as writes are."""
+        timeout = self.port.timeout
+        try:  # a write timeout must not leave the short read timeout for the rest of the run
+            with self.lock:
+                self.port.reset_input_buffer()
+                self.port.timeout = STATUS_TIMEOUT
+                self.port.write(b"E#")
+            line = self.port.read_until(b"#").decode("ascii", "replace")
+        finally:
+            with self.lock:
+                self.port.timeout = timeout
+        return parse_status(line)
 
     def stop(self):
         with self.lock:

@@ -35,7 +35,7 @@ FILES = {  # URL path -> (file in VIEWER, content type)
 }
 
 
-def jpeg_of(frame, flip=True):
+def jpeg_of(frame, flip=True, quality=80):
     """JPEG bytes of a camera.Frame, mirrored back when flip."""
     import cv2
     import numpy as np
@@ -43,7 +43,7 @@ def jpeg_of(frame, flip=True):
     rgb = np.frombuffer(frame.rgb, dtype=np.uint8).reshape(frame.height, frame.width, 3)
     if flip:
         rgb = rgb[:, ::-1]
-    ok, jpeg = cv2.imencode(".jpg", np.ascontiguousarray(rgb[:, :, ::-1]), [cv2.IMWRITE_JPEG_QUALITY, 80])
+    ok, jpeg = cv2.imencode(".jpg", np.ascontiguousarray(rgb[:, :, ::-1]), [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
         raise ValueError("JPEG encoding failed")
     return jpeg.tobytes()
@@ -93,13 +93,14 @@ class Latest:
             return self.jpeg, self.n
 
 
-def relay(handler, url):
-    """Copy the Jetson's USB camera stream to one viewer, byte for byte (no decoding on the Pi)."""
+def relay(handler, url, code=502, why="USB camera not reachable"):
+    """Copy the Jetson's USB camera stream to one viewer, byte for byte (no decoding on the Pi).
+    code, why: the answer when url does not answer."""
     import urllib.request
     try:
         upstream = urllib.request.urlopen(url, timeout=3)
     except OSError:
-        handler.send_error(502, "USB camera not reachable")
+        handler.send_error(code, why)
         return
     with upstream:
         handler.send_response(200)

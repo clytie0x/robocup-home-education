@@ -15,28 +15,43 @@ START_WAIT s without it (warning logged; lines are still published), or at the f
 /robot/intent, which is then handled in ready. So the base obeys even with no voice. A /robot/event
 before that (base_bridge sends base_link_ok on connect) is only noted (link, person) and logged.
 
-States (spec "HmcFlow states"; slice 1 = the operator hands the bag over):
+States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, the arm picks it):
   ready      entry: say how to start. "follow me" -> following
   following  sent follow_me (Pi follow). lost_person (or no lock) for 5 s: say "Please come back." once.
-             "stop" / "wait" / "this is the car" / "here" / "we are here" (or "go back") -> at_car
-  at_car     sent wait (Pi wait). Say "Please put the bag in my gripper." (again after reask_s of silence).
-             "done" / "okay" / "go back" -> handover. "follow me" -> following (Pi resume)
-  handover   sent carry_bag {"handover": true}: the arm closes its gripper on the bag in it.
-             grab_success -> say "I will go back to the start now.", go_back (Pi return) -> returning
-             grab_failed / timeout -> error. "stop" -> at_car
-             (use_arm false: "done" goes straight to returning, no arm involved)
-  returning  the Pi does the breadcrumbs, queue and start heading. "stop"/"wait" -> wait (paused),
+             "stop" / "wait" / "this is the car" / "here" / "we are here" (or "go back") -> wait (Pi wait),
+             then pointing
+  pointing   say "Please point at the bag." and send find_bag (Pi BAG: base/pi/bag.py finds the pointing,
+             chooses the bag, turns and creeps up to it). bag_chosen -> say its text (which bag, which side).
+             bag_reached x,y -> picking (no arm: say what it would do, then returning).
+             bag_failed with NOT_POINTED, NO_BAG, BLOCKED, TIMEOUT or LOST_BAG -> say a short reason and
+             "Please point at the bag again." and send find_bag again (MAX_BAG_TRIES in a row, then at_car);
+             any other bag_failed (REFUSED, NO_LINK, CANCELLED) or no answer in bag_timeout -> at_car.
+             "stop" -> wait (cancels the Pi's bag task) -> at_car. "follow me" -> following (Pi resume).
+  at_car     standing at the car, no bag task: say "Please point at the bag, then say ready." (again after
+             reask_s of silence). "ready" / "done" / "okay" / "take it back" -> pointing.
+             "follow me" -> following (Pi resume)
+  picking    sent pick_bag {"x", "y"} (robot frame, from bag_reached) to the arm, timeout grab_timeout (90 s).
+             grab_success (or grab_failed HOLDING) -> returning. grab_failed MISSED or NOT_FOUND, the first
+             time: find_bag {"again": true} (the Pi measures and approaches the same bag once more) ->
+             pointing, whose bag_reached picks again. Other grab_failed, a second miss, or timeout -> error.
+             "stop" -> stop (the arm holds) -> at_car
+  returning  say "I will go back to the start now.", go_back: the Pi does the breadcrumbs (the drive to the
+             bag counts as path), queue and start heading. "stop"/"wait" -> wait (paused),
              "go back"/"continue" -> resume. at_start -> dropping_bag (no arm: say "Here is your bag." -> done)
-  dropping_bag  sent drop_bag. drop_done -> say "Here is your bag." -> done. drop_failed / timeout -> error
+  dropping_bag  sent drop_bag {"x": 0.31, "y": 0.0}. drop_done -> say "Here is your bag." -> done.
+             drop_failed / timeout -> error
   done       "follow me" starts a new run
-  error      on base_link_lost from following / at_car / handover / returning (after at_start the Pi's run
-             ends and its link with it, so a lost link in dropping_bag or done is only logged),
+  error      on base_link_lost from following / pointing / at_car / picking / returning (after at_start the
+             Pi's run ends and its link with it, so a lost link in dropping_bag or done is only logged),
              or on an arm failure: Pi stop ("end", or error_pi_cmd), say why.
              "follow me" starts again; "go back" tries the return again.
 
 Commands on /robot/command (JSON {"action","params","stamp","source"}):
-  follow_me, wait, resume, go_back, end (Pi stop), stop  -> base_bridge
-  carry_bag {"handover": true}, drop_bag                 -> arm_action_bridge
+  follow_me, wait, resume, go_back, end (Pi stop), stop, find_bag {"again"} -> base_bridge
+  pick_bag {"x", "y"}, drop_bag {"x", "y"}, stop                          -> bag_arm (arm_action_bridge)
+Events read: see_person, lost_person, base_link_ok, base_link_lost, at_start, bag_chosen|SIDE|text,
+  bag_reached|CODE|x,y, bag_failed|CODE|message (base_bridge); grab_success, grab_failed|CODE|message,
+  drop_done, drop_failed|CODE|message (the arm).
 
 Run: source /opt/ros/jazzy/setup.bash && ROS_DOMAIN_ID=42 python3 hmc_flow.py [--ros-args -p use_arm:=true]
 """
@@ -45,9 +60,16 @@ import json
 import re
 import time
 
-READY, FOLLOWING, AT_CAR, HANDOVER, RETURNING, DROPPING, DONE, ERROR = (
-    "ready", "following", "at_car", "handover", "returning", "dropping_bag", "done", "error")
-NEEDS_BASE = (FOLLOWING, AT_CAR, HANDOVER, RETURNING)  # a lost Pi link here is an error; not after at_start
+READY, FOLLOWING, POINTING, AT_CAR, PICKING, RETURNING, DROPPING, DONE, ERROR = (
+    "ready", "following", "pointing", "at_car", "picking", "returning", "dropping_bag", "done", "error")
+NEEDS_BASE = (FOLLOWING, POINTING, AT_CAR, PICKING, RETURNING)  # a lost Pi link here is an error; not after at_start
+DROP_AT = {"x": 0.31, "y": 0.0}  # m, robot frame: where the arm puts the bag down at the start
+MAX_BAG_TRIES = 3  # bag_failed answered with "point again" this many times in a row, then at_car
+RETRY_CODES = ("NOT_POINTED", "NO_BAG", "BLOCKED", "TIMEOUT", "LOST_BAG")  # the Pi looked: point again
+REMEASURE_CODES = ("MISSED", "NOT_FOUND")  # a grab that missed: the Pi measures the bag once more
+BAG_REASONS = {"NOT_POINTED": "I did not see you point.", "NO_BAG": "I see no bag there.",
+               "BLOCKED": "Something is in my way.", "TIMEOUT": "That took me too long.",
+               "LOST_BAG": "I lost sight of the bag."}
 # s to wait for tts_node on /tts/say before starting anyway: it may start late, crash or be absent,
 # and the base must still be commandable
 START_WAIT = 3.0
@@ -91,14 +113,19 @@ class HmcFlow:
     """Pure state machine (no ROS), unit-testable like voice's FlowLogic. Every method returns a list of
     ("say", text) | ("cmd", {"action", "params"}) | ("state", name) | ("text", sentence for the brain) | ("log", text)."""
 
-    def __init__(self, use_arm=True, grab_timeout=30.0, drop_timeout=20.0, come_back_s=5.0, reask_s=15.0,
+    def __init__(self, use_arm=True, grab_timeout=90.0, drop_timeout=20.0, come_back_s=5.0, reask_s=15.0,
                  error_pi_cmd="end", start_text="Say follow me when you are ready.",
-                 handover_text="Please put the bag in my gripper."):
+                 point_text="Please point at the bag.", bag_timeout=180.0):
         self.use_arm = use_arm
-        self.grab_timeout, self.drop_timeout = grab_timeout, drop_timeout
+        self.grab_timeout, self.drop_timeout = grab_timeout, drop_timeout  # grab: the arm's pick (slow on purpose)
         self.come_back_s, self.reask_s = come_back_s, reask_s
         self.error_pi_cmd = error_pi_cmd  # "end" = Pi stop as in the spec; "wait" keeps the Pi's run
-        self.start_text, self.handover_text = start_text, handover_text
+        self.start_text, self.point_text = start_text, point_text
+        self.ready_text = "Please point at the bag, then say ready."
+        self.bag_timeout = bag_timeout  # s without a bag result: longer than the Pi's own limits (20 s + 120 s)
+        self.bag_tries = 0  # bag_failed in a row answered with find_bag again
+        self.remeasured = False  # this bag was measured again after a missed grab
+        self.bag_at = None  # (x, y) robot frame from the last bag_reached
         self.state = None
         self.deadline = None  # arm timeout of the current state
         self.carrying = False
@@ -106,7 +133,7 @@ class HmcFlow:
         self.person_visible = False
         self.lost_since = None  # following: when the operator was lost (None = seen)
         self.come_back_said = False
-        self.last_prompt = 0.0  # at_car: when the handover line was said or someone spoke
+        self.last_prompt = 0.0  # at_car: when the ready line was said or someone spoke
         self.paused = False  # returning: halted by "stop"
 
     # ---------------- helpers ----------------
@@ -114,7 +141,7 @@ class HmcFlow:
     def _cmd(action, **params):
         return ("cmd", {"action": action, "params": params})
 
-    def _goto(self, state, now, msg=""):
+    def _goto(self, state, now, msg="", again=False):
         self.state = state
         self.deadline = None
         out = [("state", state)]
@@ -126,16 +153,20 @@ class HmcFlow:
             out.append(("say", "I will follow you."))
         elif state == AT_CAR:
             self.last_prompt = now
-            out.append(("say", self.handover_text))
-        elif state == HANDOVER:
+            out.append(("say", (msg + " " if msg else "") + self.ready_text))
+        elif state == POINTING:
+            self.deadline = now + self.bag_timeout
+            out.append(("say", msg or self.point_text))
+            out.append(self._cmd("find_bag", again=True) if again else self._cmd("find_bag"))
+        elif state == PICKING:
             self.deadline = now + self.grab_timeout
-            out.append(self._cmd("carry_bag", handover=True))
+            out.append(self._cmd("pick_bag", x=self.bag_at[0], y=self.bag_at[1]))
         elif state == RETURNING:
             self.paused = False
             out += [("say", "I will go back to the start now."), self._cmd("go_back")]
         elif state == DROPPING:
             self.deadline = now + self.drop_timeout
-            out.append(self._cmd("drop_bag"))
+            out.append(self._cmd("drop_bag", **DROP_AT))
         elif state == DONE:
             out.append(("say", msg or "Here is your bag."))
         elif state == ERROR:
@@ -148,9 +179,14 @@ class HmcFlow:
             return [("say", "I cannot reach my wheels. Please check the base.")]
         return [self._cmd("follow_me")] + self._goto(FOLLOWING, now)
 
-    def _after_handover(self, now):
+    def _after_pick(self, now):
         self.carrying = True
         return self._goto(RETURNING, now)
+
+    def _point(self, now, msg=""):
+        """pointing afresh: from following or at_car (not a retry)."""
+        self.bag_tries, self.remeasured = 0, False
+        return self._goto(POINTING, now, msg)
 
     def _at_start(self, now):
         if self.use_arm:
@@ -193,20 +229,25 @@ class HmcFlow:
             return None
         if s == FOLLOWING:
             if kind in ("stop", "back"):
-                return [self._cmd("wait")] + self._goto(AT_CAR, now)
+                return [self._cmd("wait")] + self._point(now)
             if kind == "follow":
                 return [("say", "I'm following you right now.")]
             return None
+        if s == POINTING:
+            if kind == "stop":  # wait cancels the Pi's bag task and holds it
+                return [self._cmd("wait")] + self._goto(AT_CAR, now, "Okay, cancelled.")
+            if kind in ("follow", "resume"):
+                return [self._cmd("resume")] + self._goto(FOLLOWING, now)
+            return [("say", self.point_text)]  # "take it back", "done": the bag first
         if s == AT_CAR:
             if kind in ("done", "back"):
-                return self._goto(HANDOVER, now) if self.use_arm else self._after_handover(now)
+                return self._point(now)
             if kind in ("follow", "resume"):
-                out = [self._cmd("resume")] + self._goto(FOLLOWING, now)
-                return out
+                return [self._cmd("resume")] + self._goto(FOLLOWING, now)
             if kind == "stop":
                 return [self._cmd("wait")]
             return None
-        if s == HANDOVER:
+        if s == PICKING:
             if kind == "stop":
                 return [self._cmd("stop"), ("say", "Okay, cancelled.")] + self._goto(AT_CAR, now)
             return [("say", "Please wait a moment.")]
@@ -267,10 +308,15 @@ class HmcFlow:
         if name == "arm_empty":
             self.carrying = False
             return []
-        if name == "grab_success" and s == HANDOVER:
-            return self._after_handover(now)
-        if name == "grab_failed" and s == HANDOVER:
-            return self._goto(ERROR, now, "Sorry. " + arm_msg if arm_msg else "Sorry, I could not hold the bag.")
+        if s == POINTING and name in ("bag_chosen", "bag_reached", "bag_failed"):
+            return self._bag_event(name, code, arm_msg, now)
+        if name == "grab_success" and s == PICKING:
+            return self._after_pick(now)
+        if name == "grab_failed" and s == PICKING:
+            if code in REMEASURE_CODES and not self.remeasured:
+                self.remeasured = True
+                return self._goto(POINTING, now, "I missed the bag. Let me look at it again.", again=True)
+            return self._goto(ERROR, now, "Sorry. " + arm_msg if arm_msg else "Sorry, I could not pick up the bag.")
         if name == "at_start" and s == RETURNING:
             return self._at_start(now)
         if name == "drop_done" and s == DROPPING:
@@ -280,6 +326,25 @@ class HmcFlow:
             return self._goto(ERROR, now, "Sorry. " + arm_msg if arm_msg else "Sorry, I could not put the bag down.")
         return [("log", "(event '%s' ignored in state %s)" % (name, s))]
 
+    def _bag_event(self, name, code, text, now):
+        """bag_chosen, bag_reached or bag_failed from base_bridge while pointing."""
+        if name == "bag_chosen":
+            return [("say", text)] if text else []
+        if name == "bag_reached":
+            try:
+                x, y = (float(v) for v in text.split(","))
+            except ValueError:
+                return [self._cmd("wait")] + self._goto(
+                    AT_CAR, now, "Sorry, I could not find the bag.")
+            self.bag_at, self.bag_tries = (x, y), 0
+            if self.use_arm:
+                return self._goto(PICKING, now)
+            return [("say", "I would pick up the bag now.")] + self._after_pick(now)
+        if code in RETRY_CODES and self.bag_tries < MAX_BAG_TRIES:
+            self.bag_tries += 1
+            return self._goto(POINTING, now, "%s Please point at the bag again." % BAG_REASONS[code])
+        return self._goto(AT_CAR, now, BAG_REASONS.get(code, "Sorry, I could not look for the bag."))
+
     def on_tick(self, now):
         s = self.state
         if s == FOLLOWING and self.lost_since is not None and not self.come_back_said \
@@ -288,9 +353,11 @@ class HmcFlow:
             return [("say", "Please come back.")]
         if s == AT_CAR and now - self.last_prompt > self.reask_s:
             self.last_prompt = now
-            return [("say", self.handover_text)]
-        if s == HANDOVER and self.deadline is not None and now > self.deadline:
-            return self._goto(ERROR, now, "Sorry, I could not hold the bag.")
+            return [("say", self.ready_text)]
+        if s == POINTING and self.deadline is not None and now > self.deadline:  # no answer: cancel the Pi's task
+            return [self._cmd("wait")] + self._goto(AT_CAR, now, "Sorry, that took me too long.")
+        if s == PICKING and self.deadline is not None and now > self.deadline:
+            return self._goto(ERROR, now, "Sorry, I could not pick up the bag.")
         if s == DROPPING and self.deadline is not None and now > self.deadline:
             return self._goto(ERROR, now, "Sorry, I could not put the bag down.")
         return []
@@ -305,18 +372,20 @@ def make_node():
     class HmcFlowNode(Node):
         def __init__(self):
             super().__init__("hmc_flow")
-            # false by default: arm_action_bridge ignores {"handover": true} and would run a full pick at
-            # its fixed test point, where the operator's hand is. Turn on once the arm side handles handover.
+            # false by default: the arm is the arm side's (bag_arm.py takes pick_bag and drop_bag); turn on
+            # when it runs. Off, bag_reached goes straight to the return.
             self.declare_parameter("use_arm", False)
-            self.declare_parameter("grab_timeout", 30.0)
+            self.declare_parameter("grab_timeout", 90.0)  # pick_bag: the arm moves slowly (correctness over speed)
             self.declare_parameter("drop_timeout", 20.0)
             self.declare_parameter("come_back_s", 5.0)
             self.declare_parameter("reask_s", 15.0)
             # "wait" by default: a short Wi-Fi drop on the way back must not end the Pi's run (500 points)
             self.declare_parameter("error_pi_cmd", "wait")
+            self.declare_parameter("bag_timeout", 180.0)
             p = lambda n: self.get_parameter(n).value  # noqa: E731
             self.logic = HmcFlow(bool(p("use_arm")), float(p("grab_timeout")), float(p("drop_timeout")),
-                                 float(p("come_back_s")), float(p("reask_s")), str(p("error_pi_cmd")))
+                                 float(p("come_back_s")), float(p("reask_s")), str(p("error_pi_cmd")),
+                                 bag_timeout=float(p("bag_timeout")))
             self.pub_text = self.create_publisher(String, "/speech/text", 10)
             self.pub_say = self.create_publisher(String, "/tts/say", 10)
             self.pub_cmd = self.create_publisher(String, "/robot/command", 10)

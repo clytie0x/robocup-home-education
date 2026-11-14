@@ -144,22 +144,40 @@ class ScanStream:
         return self.last
 
 
+RESTART_S = 1.0  # s without a byte from the LiDAR before START is sent again (and at most this often)
+
+
 class LidarSession:
-    def __init__(self, port=LIDAR_PORT, handle=None):
+    """The LiDAR stream. The port is opened exclusively (pyserial `exclusive`, a POSIX lock): a second
+    program opening it fails instead of sharing it, because one reader's STOP silences the other
+    (2026-11-15: a one-off scan left the console's live LiDAR stale for 5 minutes). A LiDAR that falls
+    silent for RESTART_S gets START again, so a stray STOP or a glitch does not blind the reader."""
+
+    def __init__(self, port=LIDAR_PORT, handle=None, clock=time.monotonic):
         if handle is None:
             import serial
 
-            handle = serial.Serial(port, 230400, timeout=0.05)
+            handle = serial.Serial(port, 230400, timeout=0.05, exclusive=True)
         self.handle = handle
-        self.stream = ScanStream()
+        self.clock = clock
+        self.stream = ScanStream(clock=clock)
+        self.restarts = 0
         self.handle.reset_input_buffer()
         self.handle.write(START)
         self.handle.flush()
+        self.last_data = self.last_start = clock()
 
     def latest(self):
         waiting = self.handle.in_waiting
+        now = self.clock()
         if waiting:
             self.stream.feed(self.handle.read(min(waiting, 65536)))
+            self.last_data = now
+        elif now - self.last_data > RESTART_S and now - self.last_start > RESTART_S:
+            self.handle.write(START)
+            self.handle.flush()
+            self.last_start = now
+            self.restarts += 1
         return self.stream.latest()
 
     def close(self):
@@ -173,7 +191,7 @@ class LidarSession:
 def read_scan(port=LIDAR_PORT, seconds=1.2):
     import serial
 
-    handle = serial.Serial(port, 230400, timeout=0.05)
+    handle = serial.Serial(port, 230400, timeout=0.05, exclusive=True)
     try:
         handle.reset_input_buffer()
         handle.write(START)

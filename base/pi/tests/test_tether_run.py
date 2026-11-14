@@ -22,7 +22,7 @@ from test_tether import drive
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import tether_run  # noqa: E402
 
-P = params.load()
+P = dict(params.load(), stop_clearance=0.30)  # the scenes below were laid out for the 0.30 m stop clearance
 FLOOR = scene()  # tiles, no cable
 CABLE = scene(cable=(-0.3, 0.3))  # a cable across the path about 0.85 m ahead of the base centre
 BLIND = np.zeros_like(FLOOR)
@@ -153,6 +153,7 @@ class Runner(unittest.TestCase):
             return open_
 
         for target, name, value in ((tether_run, "clock", self.clock), (tether_run, "sleep", self.clock.sleep),
+                                    (tether_run.params, "load", lambda *_a, **_k: dict(P)),
                                     (tether_run.lidar, "LidarSession", opener("lidar", lambda: FakeSession(self))),
                                     (tether_run.wheels_module, "Wheels", opener("wheels", lambda: self.wheels)),
                                     (tether_run.camera, "Camera", opener("camera", lambda: FakeCamera(self)))):

@@ -4,6 +4,7 @@ import math
 import signal
 import socket
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -17,10 +18,13 @@ from hmc.follower import Follower, Mode, Senses
 from hmc.perception import MotionTracker
 from hmc.world import Circle
 
+import cable as cable_module
 import command_server
+import escape
 import params
 import run_follow
 import safety
+import wheels as wheels_module
 from link import Answer, Seen
 from test_command_server import Broken, Client
 from test_legs import person, scan_of
@@ -43,13 +47,25 @@ class FakeBase:
         self.command = (0.0, 0.0)
         self.sent = []
         self.stops = 0  # S# sent (stop() also counts as a (0, 0) command)
+        self.asked = []  # times read_status was called (E#), by self.clock
+        self.clock = lambda: None
 
     def send(self, v, w):
         self.command = (v, w)
         self.sent.append((v, w))
 
+    def send_reverse(self, speed, w):
+        """wheels.Wheels.send_reverse: B packets, backward at `speed`."""
+        self.backed = getattr(self, "backed", 0) + 1
+        self.send(-speed, w)
+
     def read_odom(self):
         return self.pose
+
+    def read_status(self):
+        """E# of the new firmware, from a base whose wheels turn: no fault."""
+        self.asked.append(self.clock())
+        return {"left": 0, "right": 0, "pwm": [0, 0], "flags": 0}
 
     def stop(self):
         self.stops += 1
@@ -159,6 +175,13 @@ class Crowded:
         return Senses(now, None, None, {}, [])
 
 
+def wheels_unwatched(state):
+    """For a test of something else whose FakeBase never moves while it drives: the Pi's wheel check
+    (wheels.StallWatch) would stop it after a second."""
+    state.stall.update = lambda now, sent, pose: False
+    return state
+
+
 class Logged(unittest.TestCase):
     """A log folder and the cycle helpers; no tests of its own."""
 
@@ -199,7 +222,7 @@ class Loop(Logged):
                 mock.patch.object(run_follow.lidar, "LidarSession", return_value=lidar_session), \
                 mock.patch.object(run_follow.camera, "Camera", return_value=cam), \
                 mock.patch.object(run_follow, "LOG_ROOT", self.folder / "logs"), \
-                mock.patch("builtins.input", return_value=""), mock.patch("builtins.print"):
+                mock.patch("sys.stdin", SimpleNamespace(isatty=lambda: True)),                 mock.patch("builtins.input", return_value=""), mock.patch("builtins.print"):  # a console: Enter
             run_follow.main(["--seconds", "0.35", "--no-jetson"])
         opened.assert_not_called()
         logs = list((self.folder / "logs").iterdir())
@@ -363,6 +386,30 @@ class Loop(Logged):
         record = self.cycle(state, 0.2)
         self.assertIn("dashboard", record["end"])
         self.assertEqual(base.sent[-1], (0.0, 0.0))
+
+    def test_each_cycle_puts_the_frame_scan_and_record_in_the_live_feed(self):
+        state = self.state(FakeBase())
+        put = []
+        state.dashboard = SimpleNamespace(latest=None, feed=SimpleNamespace(put=lambda *args: put.append(args)))
+        record = self.cycle(state, 0.0)
+        (frame, points, overlay, now), = put
+        self.assertIsNotNone(frame)  # the fake camera's frame
+        self.assertIs(overlay, record)
+        self.assertEqual(now, 0.0)
+        numpy.testing.assert_array_equal(points, run_follow.scan_points(WALL_ONLY, P))  # the LiDAR, robot frame
+
+    def test_a_broken_live_feed_never_stops_the_cycle(self):
+        base = FakeBase()
+        state = self.state(base)
+
+        def broken(*args):
+            raise RuntimeError("the live view broke")
+        state.dashboard = SimpleNamespace(latest=None, feed=SimpleNamespace(put=broken))
+        for i in range(3):
+            record = self.cycle(state, 0.1 * i)
+            self.assertNotIn("end", record)
+        self.assertIs(state.dashboard.latest, record)
+        self.assertEqual(base.sent[-1], (0.1, 0.0))  # still driving
 
     def test_the_page_can_switch_the_search_turn_off(self):
         state = self.search_state(FakeBase(), [])
@@ -564,7 +611,8 @@ L_WALLS = ([((-1.0, -1.0), (7.0, -1.0)), ((-1.0, 1.0), (5.0, 1.0)), ((-1.0, -1.0
             ((7.0, -1.0), (7.0, 7.0)), ((5.0, 1.0), (5.0, 7.0)), ((5.0, 7.0), (7.0, 7.0))]
            + _pillar(1.5, -0.85) + _pillar(4.0, -0.85) + _pillar(0.5, 0.85) + _pillar(3.0, 0.85)
            + _pillar(6.85, 2.0) + _pillar(6.85, 5.0) + _pillar(5.15, 3.5) + _pillar(5.15, 1.5))
-FAST = dict(P, max_speed=0.25)  # the simulated base is perfect: drive faster, so the test runs in seconds
+FAST = dict(P, max_speed=0.25, cable_free_m=0.0)  # the simulated base is perfect: drive faster, so the test runs in seconds; its
+# 2 m corridor with pillars has no comfortable room beside the cable at 0.25 m/s: no lay (cable.Lay) there
 
 
 class Return(Logged):
@@ -638,6 +686,46 @@ class Return(Logged):
         self.assertEqual(self.records()[-1]["phase"], "return")
         self.assertEqual(presses, [])
 
+    def test_go_back_on_the_page_is_enter_and_wait_holds_without_remote(self):
+        base = FakeBase()
+        state = self.state(base, brain=None)
+        now = self.carried_out(state, base, 2.0)
+        state.controls.command("wait")
+        record = self.cycle(state, now + 0.1)
+        self.assertEqual((record["phase"], record["v"], record["w"], record["stop"]), ("follow", 0.0, 0.0, "page"))
+        state.controls.command("resume")
+        self.assertIsNone(self.cycle(state, now + 0.2)["stop"])
+        state.controls.command("return")  # Go back
+        record = self.cycle(state, now + 0.3)
+        self.assertEqual(record["phase"], "return")
+        self.assertEqual(self.speech(), [hri.RETURN_TEXT])
+        self.assertEqual([r["page_cmd"] for r in self.records() if "page_cmd" in r], ["wait", "resume", "return"])
+
+    def test_enter_after_a_page_wait_goes_back_and_ends_the_wait(self):
+        base = FakeBase()
+        state = self.state(base, brain=None)
+        now = self.carried_out(state, base, 2.0)
+        state.controls.command("wait")
+        self.assertEqual(self.cycle(state, now + 0.1)["stop"], "page")
+        presses = [True]
+        state.enter = lambda: bool(presses) and presses.pop()
+        record = self.cycle(state, now + 0.2)
+        self.assertEqual(record["phase"], "return")
+        self.assertNotIn(record["stop"], ("page", "wait"))
+        self.assertEqual((state.waiting, state.page_wait), (False, False))
+
+    def test_a_console_that_went_away_is_no_enter(self):
+        ours, theirs = socket.socketpair()
+        console = ours.makefile("rb", buffering=0)
+        theirs.close()
+        console.close()
+        ours.close()
+        self.assertFalse(run_follow.enter_pressed(console))  # closed: no Enter, and no crash
+        self.assertFalse(run_follow.console_is_tty(None))
+        self.assertFalse(run_follow.console_is_tty(console))
+        self.assertFalse(run_follow.console_is_tty(SimpleNamespace(isatty=lambda: False)))
+        self.assertTrue(run_follow.console_is_tty(SimpleNamespace(isatty=lambda: True)))
+
     def test_a_keyframe_is_stored_with_each_breadcrumb(self):
         base = FakeBase()
         state = self.state(base, brain=None)
@@ -659,6 +747,34 @@ class Return(Logged):
         state.keyframes = Shifted(None)
         records = self.drive(state, base, now, seconds, world)
         return state, base, world, records
+
+    def lay_gap(self, record):
+        """m from the robot's centre to the cable laid on the way out: the left post's path, y = ATTACH[1]."""
+        x, y = record["pose"][:2]
+        return math.hypot(max(0.0, cable_module.ATTACH[0] - x, x - 3.0 - cable_module.ATTACH[0]), y - cable_module.ATTACH[1])
+
+    def test_the_way_back_goes_beside_the_cable_not_on_it(self):
+        state, base, world, records = self.returning(seconds=40.0)
+        self.assertTrue(records[-1]["end"].startswith("done"), records[-1].get("end"))
+        self.assertAlmostEqual(records[0]["cable_lay_m"], 3.0, delta=0.1)
+        middle = [r for r in records if 0.5 <= r["pose"][0] <= 2.0]
+        self.assertGreater(len(middle), 10)
+        self.assertGreaterEqual(min(self.lay_gap(r) for r in middle), P["robot_half_width"] + 0.05)
+        self.assertTrue(all(r["cable_cross"] is None for r in records))
+
+    def test_with_no_way_beside_the_cable_it_crosses_slowly_and_logs_it(self):
+        def straight(start, goal, shapes, near_side=False, heading=None):  # no way at all past the cable
+            return None if any(getattr(s, "r", None) == cable_module.RADIUS for s in shapes) else [start, goal]
+
+        with mock.patch.object(run_follow, "_plan_path", straight), mock.patch.object(run_follow, "REMOTE", None):
+            state, base, world, records = self.returning(seconds=20.0)
+        crossing = [r for r in records if r["cable_cross"] is not None]
+        self.assertTrue(crossing)
+        near = [r for r in crossing if self.lay_gap(r) < P["robot_radius"] + cable_module.CROSS_NEAR - 0.05
+                and r["time"] - r["cable_cross"]["since"] >= 1.0]  # a second to slow down at the brain's ramp
+        self.assertTrue(near)
+        self.assertLessEqual(max(r["v"] for r in near), cable_module.CROSS_SPEED + 1e-9)
+        self.assertGreater(max(r["v"] for r in records), cable_module.CROSS_SPEED)  # elsewhere at its own speed
 
     def test_a_pose_correction_clears_the_brains_memory_and_keeps_the_speed_limits(self):
         # Review Focus 2: the believed pose jumps 0.3 m sideways while driving back
@@ -772,7 +888,9 @@ class Return(Logged):
         self.assertGreater(len(used), 10)
         self.assertTrue(all(r["stop"] is None for r in out + back))  # never near enough to anything to stop
         self.assertTrue(all(r["v"] >= 0.0 for r in out + back))  # never backward
-        self.assertLess(time.monotonic() - started, 60.0)
+        # 1488 simulated cycles; their clock is the test's, so a slow CPU changes nothing above, only the
+        # wall time (about 25 s on a PC, 160 s on the Pi). A hang guard, not a speed test.
+        self.assertLess(time.monotonic() - started, 600.0)
 
     def test_without_a_link_the_queue_is_never_joined(self):
         # Three people walk up and stand as a group beside the route for 7 s: no looks, no crowd.
@@ -868,7 +986,11 @@ class Return(Logged):
 
         base = FakeBase()
         world = Room(base, box(-4.0, -2.5, 7.0, 3.0), lambda t: sum((person(x, y) for x, y, _ in people(t)), []))
-        state = run_follow.State(P, base, world, Camera(), Eyes(base, world, people), self.log, clock=lambda: self.now)
+        # No cable lay (cable.Lay): beside it the turnaround is a goal behind, it unwinds to the right and the camera
+        # never sees the one who walks by on the left (measured 2026-11-15).
+        state = run_follow.State(dict(P, cable_free_m=0.0), base, world, Camera(), Eyes(base, world, people), self.log,
+                                 clock=lambda: self.now)
+        wheels_unwatched(state)  # the base stands still for the 7 s facing the crowd below, whatever it is sent
         for _ in range(20):
             state.follower.operator_look.add(LOOK)  # learned already: nobody in the crowd is enrolled
         now = self.carried_out(state, base, 3.0)
@@ -887,7 +1009,140 @@ class Return(Logged):
 
 
 STATUS_FIELDS = {"t", "phase", "waiting", "held", "locked", "operator_m", "breadcrumbs", "queue_tail", "at_start",
-                 "stop", "ack"}
+                 "stop", "ack", "ack_by", "wheels", "cable_deg", "bag"}
+
+
+class DeadMotors(FakeBase):
+    """The motor supply is gone (2026-11-14): the firmware still answers, the wheels never turn.
+    old_firmware: E# does not parse. Else the firmware's encoder-fault flags (03) are up while driving,
+    until S# (a stop, or a zero command, which is S#) clears them."""
+
+    def __init__(self, old_firmware=False):
+        super().__init__()
+        self.old_firmware = old_firmware
+        self.fault = False
+        self.alive = False  # True: the power is back, the wheels turn
+
+    def send(self, v, w):
+        super().send(v, w)
+        self.fault = (v, w) != (0.0, 0.0)
+
+    def advance(self, dt):
+        if self.alive:
+            super().advance(dt)  # else no motor power
+
+    def read_status(self):
+        self.asked.append(self.clock())
+        if self.old_firmware:
+            raise ValueError("bad status 'Ox:+000.00,y:+000.00,th:+000.00#'")
+        return {"left": 0, "right": 0, "pwm": [76, 76] if self.fault else [0, 0], "flags": 3 if self.fault else 0}
+
+
+class WheelWatch(Logged):
+    """Task 1: wheels that do not turn are found two ways, stop the robot, say so and end the run at the third time."""
+
+    def run_dead(self, base, seconds, state=None, resume_at=()):
+        """Cycles every 0.1 s; Resume pressed on the page at the times in resume_at."""
+        state = state or self.state(base)
+        if base is not None:
+            base.clock = lambda: self.now
+        records = []
+        for i in range(round(seconds / 0.1)):
+            if round(0.1 * i, 1) in resume_at:
+                state.controls.command("resume")
+            records.append(self.cycle(state, round(0.1 * i, 1)))
+            if "end" in records[-1]:
+                break
+            if base is not None:
+                base.advance(0.1)
+        return state, records
+
+    def said(self):
+        return [r["say"] for r in self.records() if "say" in r]
+
+    def test_wheels_that_do_not_turn_stop_say_hold_and_end_the_run_the_third_time(self):
+        base = DeadMotors(old_firmware=True)  # only the Pi's own check can find it
+        state, records = self.run_dead(base, 20.0, resume_at=(4.0, 8.0))
+        by_time = {r["time"]: r for r in records}
+        self.assertEqual((by_time[0.9]["v"], by_time[0.9]["stop"], by_time[0.9]["wheels"]), (0.1, None, None))
+        first = by_time[1.0]  # one second of 0.1 m/s that moved nothing
+        self.assertEqual((first["v"], first["w"], first["stop"], first["wheels"]), (0.0, 0.0, "wheels", "not turning"))
+        self.assertGreaterEqual(base.stops, 1)  # S#: clears the firmware's fault
+        held = [r for r in records if 1.0 <= r["time"] < 4.0]
+        self.assertTrue(all((r["v"], r["stop"]) == (0.0, "wheels") for r in held))
+        self.assertEqual((by_time[4.0]["v"], by_time[4.0]["stop"], by_time[4.0]["wheels"]), (0.1, None, None))  # resumed
+        self.assertEqual(by_time[5.0]["stop"], "wheels")  # the second time
+        end = records[-1]
+        self.assertEqual(end["time"], 9.0)  # the third time ends the run
+        self.assertEqual(end["stop"], "wheels not turning")
+        self.assertIn("motor power", end["end"])
+        self.assertEqual(base.sent[-1], (0.0, 0.0))
+        self.assertEqual(self.said(), [run_follow.WHEELS_TEXT] * 3)  # once per time, not every held cycle
+        # the old firmware's E# does not parse: asked WHEELS_MISSES times, then never again this run
+        self.assertEqual(len(base.asked), run_follow.WHEELS_MISSES)
+        self.assertEqual(len([r for r in self.records() if "firmware" in str(r.get("wheels"))]), 1)
+
+    def test_the_count_is_forgotten_after_good_motion(self):
+        base = DeadMotors(old_firmware=True)
+        state = self.state(base)
+        base.clock = lambda: self.now
+        records = []
+        for i in range(250):
+            now = round(0.1 * i, 1)
+            base.alive = 4.0 <= now < 8.0  # dead, then 4 s of good driving (0.4 m), then dead again
+            if now in (4.0, 12.0, 16.0):
+                state.controls.command("resume")  # someone checked the power each time
+            records.append(self.cycle(state, now))
+            if "end" in records[-1]:
+                break
+            base.advance(0.1)
+        episodes = [r["episode"] for r in self.records() if "episode" in r]
+        self.assertEqual(episodes, [1, 1, 2, 3])  # 0.3 m of driving forgot the first
+        self.assertEqual(records[-1]["time"], 17.0)
+        self.assertTrue(any("forgotten" in str(r.get("wheels")) for r in self.records()))
+
+    def test_the_wheel_hold_stays_until_an_explicit_resume(self):
+        # the robot asks to check the motor power; someone plugs the battery in with a hand on the robot
+        base = DeadMotors(old_firmware=True)
+        state, records = self.run_dead(base, 1.1)
+        self.assertEqual(records[-1]["stop"], "wheels")
+        base.alive = True  # the power is back: the robot must not drive off by itself
+        for i in range(11, 120):
+            record = self.cycle(state, round(0.1 * i, 1))
+            base.advance(0.1)
+        self.assertEqual((record["v"], record["w"], record["stop"], record["wheels"]), (0.0, 0.0, "wheels", "not turning"))
+        state.controls.command("resume")
+        record = self.cycle(state, 12.0)
+        self.assertEqual((record["v"], record["stop"], record["wheels"]), (0.1, None, None))
+        self.assertEqual([r["episode"] for r in self.records() if "episode" in r], [1])
+
+    def test_a_failed_wheel_write_ends_as_wheels_port(self):
+        class Unplugged(FakeBase):
+            def send(self, v, w):
+                raise OSError("write failed")
+
+        record = self.cycle(self.state(Unplugged()), 0.0)
+        self.assertEqual(record["stop"], "wheels port")
+
+    def test_the_firmware_fault_flags_find_it_first(self):
+        base = DeadMotors()
+        state, records = self.run_dead(base, 2.0)
+        by_time = {r["time"]: r for r in records}
+        self.assertEqual(by_time[0.5]["stop"], "wheels")  # the second E#, 0.5 s after the first
+        self.assertEqual(by_time[0.5]["wheels"], "fault 03")
+        self.assertTrue(all(b - a >= run_follow.WHEELS_POLL - 1e-9 for a, b in zip(base.asked, base.asked[1:])))
+        self.assertEqual(base.asked[:2], [0.0, 0.5])
+        self.assertEqual(self.said(), [run_follow.WHEELS_TEXT])
+
+    def test_turning_wheels_and_a_dry_run_are_left_alone(self):
+        base = FakeBase()
+        _, records = self.run_dead(base, 3.0)
+        self.assertTrue(all(r["stop"] is None and r["wheels"] is None for r in records))
+        self.assertEqual(len(base.asked), 6)  # every 0.5 s
+        _, records = self.run_dead(None, 3.0, state=self.state(None))  # no wheels: nothing to watch
+        self.assertTrue(all(r["stop"] is None and r["wheels"] is None for r in records))
+        self.assertEqual(self.said(), [])
+
 
 
 class Remote(Logged):
@@ -1029,7 +1284,7 @@ class Remote(Logged):
 
     def test_two_seconds_of_silence_hold_until_resume_and_a_ping_does_not_release(self):
         base = FakeBase()
-        state = self.remote_state(base)
+        state = wheels_unwatched(self.remote_state(base))
         jetson = self.client()
         jetson.cmd("follow")
         for i in range(21):  # 0.0 .. 2.0 s: still heard
@@ -1091,8 +1346,8 @@ class Remote(Logged):
         for s in statuses:
             self.assertEqual(set(s), STATUS_FIELDS)
             self.assertEqual((s["phase"], s["waiting"], s["held"], s["locked"], s["operator_m"], s["queue_tail"],
-                              s["at_start"], s["stop"], s["ack"]),
-                             ("FOLLOW", False, None, False, None, None, False, None, "follow"))
+                              s["at_start"], s["stop"], s["ack"], s["ack_by"], s["cable_deg"]),
+                             ("FOLLOW", False, None, False, None, None, False, None, "follow", "client", 0.0))
             self.assertIsInstance(s["breadcrumbs"], int)
 
     def test_operator_m_is_the_kept_operator_while_locked_but_not_seen(self):
@@ -1123,7 +1378,7 @@ class Remote(Logged):
 
     def test_a_disconnect_holds_still_after_two_seconds_until_a_command(self):
         base = FakeBase()
-        state = self.remote_state(base)
+        state = wheels_unwatched(self.remote_state(base))
         jetson = self.client()
         jetson.cmd("follow")
         self.cycle(state, 0.0)
@@ -1156,7 +1411,7 @@ class Remote(Logged):
 
     def test_only_malformed_lines_past_two_seconds_still_hold(self):
         base = FakeBase()
-        state = self.remote_state(base)
+        state = wheels_unwatched(self.remote_state(base))
         jetson = self.client()
         jetson.cmd("follow")
         for i in range(22):
@@ -1259,6 +1514,7 @@ class Remote(Logged):
         state = run_follow.State(P, base, Scans(WALL_ONLY), Camera(), None, self.log, clock=lambda: self.now,
                                  velocity_loop=True, remote=self.server)
         state.follower = Pushy(state.body.robot)
+        wheels_unwatched(state)
         state.estimates._avg["speed_gain"].value, state.estimates._avg["speed_gain"].samples = 0.8, 100
         jetson = self.client()
         self.assertEqual(self.cycle(state, 0.0)["stop"], "idle")
@@ -1288,6 +1544,135 @@ class Remote(Logged):
         self.assertEqual((record["phase"], record["v"]), ("follow", 0.1))
         self.assertTrue(any("broke" in str(r.get("remote")) for r in self.records()))
 
+    def test_the_wheel_hold_says_held_wheels_and_the_clients_resume_releases_it(self):
+        base = DeadMotors()
+        base.clock = lambda: self.now
+        state = self.remote_state(base)
+        jetson = self.client()
+        jetson.cmd("follow")
+        for i in range(30):  # found at 0.5 s, then held for good
+            record = self.cycle(state, round(0.1 * i, 1))
+            if i % 10 == 9:
+                jetson.cmd("ping")
+        self.assertEqual((record["stop"], record["remote"]["held"]), ("wheels", "wheels"))
+        self.assertEqual(jetson.read()[-1]["held"], "wheels")
+        jetson.cmd("resume")
+        record = self.cycle(state, 3.0)
+        self.assertEqual((record["v"], record["stop"], record["remote"]["held"]), (0.1, None, None))
+
+    def test_the_status_says_why_the_wheels_stopped(self):
+        base = DeadMotors()
+        base.clock = lambda: self.now
+        state = self.remote_state(base)
+        jetson = self.client()
+        jetson.cmd("follow")
+        for i in range(7):  # found at 0.5 s; the next 5 Hz status line goes at 0.6 s
+            record = self.cycle(state, round(0.1 * i, 1))
+        self.assertEqual((record["stop"], record["wheels"]), ("wheels", "fault 03"))
+        status = jetson.read()[-1]
+        self.assertEqual((status["phase"], status["stop"], status["wheels"]), ("FOLLOW", "wheels", "fault 03"))
+
+    def test_a_page_wait_holds_until_the_page_resumes_whatever_the_client_sends(self):
+        base = FakeBase()
+        state = self.remote_state(base)
+        jetson = self.client()
+        jetson.cmd("follow")
+        self.assertEqual(self.cycle(state, 0.0)["v"], 0.1)
+        state.controls.command("wait")
+        record = self.cycle(state, 0.1)
+        self.assertEqual((record["v"], record["stop"], record["remote"]["held"]), (0.0, "page", "page"))
+        self.assertEqual(jetson.read()[-1]["held"], "page")
+        for t, cmd in ((0.2, "resume"), (0.3, "follow")):  # the bridge restoring its intent: not a release
+            jetson.cmd(cmd)
+            record = self.cycle(state, t)
+            self.assertEqual((record["v"], record["stop"]), (0.0, "page"), cmd)
+            self.assertEqual(jetson.read()[-1]["held"], "page")
+        state.controls.command("resume")
+        record = self.cycle(state, 0.4)
+        self.assertEqual((record["v"], record["stop"], record["remote"]["held"]), (0.1, None, None))
+
+    def test_a_client_return_still_acts_under_a_page_wait_but_does_not_drive(self):
+        base = FakeBase()
+        state = self.remote_state(base, brain=None)
+        jetson = self.client()
+        jetson.cmd("follow")
+        for i in range(21):
+            base.pose = (0.1 * i, 0.0, 0.0)
+            self.cycle(state, round(0.1 * i, 1))
+        state.controls.command("wait")
+        self.assertEqual(self.cycle(state, 2.1)["stop"], "page")
+        jetson.cmd("return")
+        record = self.cycle(state, 2.2)
+        self.assertEqual((record["phase"], record["v"], record["w"], record["stop"]), ("return", 0.0, 0.0, "page"))
+        state.controls.command("resume")
+        self.assertNotIn(self.cycle(state, 2.3)["stop"], ("page", "wait", "silent"))
+
+    def test_the_pages_buttons_take_the_clients_path(self):
+        base = FakeBase()
+        state = self.remote_state(base)
+        jetson = self.client()
+        state.controls.command("return")  # refused while idle, as from the client; the client gets no error for it
+        record = self.cycle(state, 0.0)
+        self.assertEqual((record["phase"], record["stop"]), ("idle", "idle"))
+        self.assertEqual([r["why"] for r in self.records() if "remote_refused" in r], ["not following yet"])
+        self.assertFalse(jetson.errors())
+        state.controls.command("follow")
+        record = self.cycle(state, 0.1)
+        self.assertEqual((record["phase"], record["v"], record["stop"]), ("follow", 0.1, None))
+        status = jetson.read()[-1]
+        self.assertEqual((status["ack"], status["ack_by"]), (None, None))  # ack is the client's own last command: a page press is not one
+        jetson.cmd("wait")
+        self.cycle(state, 0.15)
+        state.controls.command("resume")
+        self.cycle(state, 0.18)
+        status = jetson.read()[-1]
+        self.assertEqual((status["ack"], status["ack_by"]), ("wait", "client"))  # base_bridge takes a wait ack only from the client
+        state.controls.command("wait")
+        self.assertEqual(self.cycle(state, 0.2)["stop"], "page")
+        state.controls.command("resume")
+        self.assertEqual(self.cycle(state, 0.3)["stop"], None)
+        self.assertEqual([r["page_cmd"] for r in self.records() if "page_cmd" in r], ["follow", "resume", "wait", "resume"])
+
+    def polled(self, state, start, until, poll=True):
+        """As quiet(), with the page polling /status every cycle when poll. Returns the last record."""
+        record = None
+        for i in range(int(round(start * 10)), int(round(until * 10)) + 1):
+            self.now = round(0.1 * i, 1)
+            if poll:
+                state.controls.polled()
+            record = self.cycle(state, self.now)
+        return record
+
+    def test_with_no_jetson_the_page_runs_the_task_while_it_polls(self):
+        state = wheels_unwatched(self.remote_state(FakeBase()))
+        state.controls.clock = lambda: self.now
+        record = self.quiet(state, 0.0, 2.1)  # nobody connects: held for the silence
+        self.assertEqual(record["remote"]["held"], "silent")
+        state.controls.command("follow")
+        record = self.polled(state, 2.2, 5.0)  # the page leads while it polls: the client's silence holds nothing
+        self.assertEqual((record["phase"], record["v"], record["stop"]), ("follow", 0.1, None))
+        record = self.polled(state, 5.1, 6.9, poll=False)  # the phone lost the Wi-Fi: under 2 s, still driving
+        self.assertEqual(record["stop"], None)
+        record = self.polled(state, 7.0, 7.0, poll=False)  # 2 s without a poll: the silence hold is back
+        self.assertEqual((record["v"], record["stop"]), (0.0, "silent"))
+        record = self.polled(state, 7.1, 7.5)  # polling again does not release it by itself
+        self.assertEqual(record["stop"], "silent")
+        state.controls.command("resume")
+        self.assertEqual(self.polled(state, 7.6, 7.6)["stop"], None)
+
+    def test_a_client_heard_again_after_the_page_led_is_not_held_for_its_silence(self):
+        state = wheels_unwatched(self.remote_state(FakeBase()))
+        state.controls.clock = lambda: self.now
+        self.quiet(state, 0.0, 2.1)
+        state.controls.command("follow")
+        self.polled(state, 2.2, 5.0)
+        jetson = self.client()  # a bridge just restarted: it pings, with no intent to send
+        jetson.cmd("ping")
+        record = self.polled(state, 5.1, 5.1)
+        self.assertEqual((record["v"], record["stop"], record["remote"]["held"]), (0.1, None, None))
+        jetson.cmd("ping")
+        self.assertEqual(self.polled(state, 5.2, 5.2)["stop"], None)
+
     def test_main_with_remote_starts_in_idle_without_enter(self):
         old = {s: signal.getsignal(s) for s in run_follow.STOP_SIGNALS}
         self.addCleanup(lambda: [signal.signal(s, h) for s, h in old.items()])
@@ -1296,8 +1681,8 @@ class Remote(Logged):
         cam = SimpleNamespace(start=lambda: None, stop=lambda: None, latest=lambda: None)
         made, real = [], command_server.CommandServer
 
-        def server(port):
-            made.append(real("127.0.0.1", port))  # not on every interface in a test
+        def server(port, allow):
+            made.append(real("127.0.0.1", port, allow=allow))  # not on every interface in a test
             return made[-1]
 
         with mock.patch.object(run_follow.lidar, "LidarSession", return_value=lidar_session), \
@@ -1309,6 +1694,8 @@ class Remote(Logged):
                              "--remote", "0"])
         self.assertEqual(len(made), 1)
         self.assertEqual(made[0].listener.fileno(), -1)  # closed at the end of the run
+        # only the Jetson's addresses (cable, Wi-Fi, Tailscale) and this computer may send commands
+        self.assertEqual(list(made[0].allow), [P["jetson_host"]] + P["jetson_hosts_backup"] + ["127.0.0.1"])
         logs = list((self.folder / "logs").iterdir())
         cycles = [json.loads(line) for line in (logs[0] / "log.jsonl").read_text().splitlines()]
         cycles = [r for r in cycles if "pose" in r]
@@ -1316,6 +1703,198 @@ class Remote(Logged):
         self.assertTrue(all((r["phase"], r["v"], r["w"]) == ("idle", 0.0, 0.0) for r in cycles))
         with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
             run_follow.main(["--seconds", "1", "--remote", "x"])
+
+
+    def test_remote_allow_overrides_the_allow_list(self):
+        old = {s: signal.getsignal(s) for s in run_follow.STOP_SIGNALS}
+        self.addCleanup(lambda: [signal.signal(s, h) for s, h in old.items()])
+        lidar_session = Scans(WALL_ONLY)
+        lidar_session.close = lambda: None
+        cam = SimpleNamespace(start=lambda: None, stop=lambda: None, latest=lambda: None)
+        made, real = [], command_server.CommandServer
+
+        def server(port, allow):
+            made.append(real("127.0.0.1", port, allow=allow))  # not on every interface in a test
+            return made[-1]
+
+        with mock.patch.object(run_follow.lidar, "LidarSession", return_value=lidar_session), \
+                mock.patch.object(run_follow.camera, "Camera", return_value=cam), \
+                mock.patch.object(run_follow.command_server, "CommandServer", side_effect=server), \
+                mock.patch.object(run_follow, "LOG_ROOT", self.folder / "logs"), \
+                mock.patch("builtins.input", side_effect=AssertionError("Enter asked")), mock.patch("builtins.print"):
+            run_follow.main(["--seconds", "0.35", "--no-jetson", "--planner", "here", "--dashboard", "0",
+                             "--remote", "0", "--remote-allow", "127.0.0.1, 10.1.2.3"])
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0].listener.fileno(), -1)  # closed at the end of the run
+        # --remote-allow: the lab's list instead
+        self.assertEqual(list(made[0].allow), ["127.0.0.1", "10.1.2.3"])
+
+    def test_main_keeps_the_page_to_this_computer_unless_asked(self):
+        # by default only the console (and its PIN) reaches the switches: anyone on the Wi-Fi could drive
+        old = {s: signal.getsignal(s) for s in run_follow.STOP_SIGNALS}
+        self.addCleanup(lambda: [signal.signal(s, h) for s, h in old.items()])
+        lidar_session = Scans(WALL_ONLY)
+        lidar_session.close = lambda: None
+        cam = SimpleNamespace(start=lambda: None, stop=lambda: None, latest=lambda: None)
+        pages, real, real_server = [], run_follow.dashboard_module.Dashboard, command_server.CommandServer
+
+        def page(controls, run_info, port, remote, host):
+            pages.append(real(controls, run_info, port=0, host=host, remote=remote))
+            return pages[-1]
+
+        with mock.patch.object(run_follow.lidar, "LidarSession", return_value=lidar_session), \
+                mock.patch.object(run_follow.camera, "Camera", return_value=cam), \
+                mock.patch.object(run_follow.dashboard_module, "Dashboard", side_effect=page), \
+                mock.patch.object(run_follow.command_server, "CommandServer",
+                                  side_effect=lambda port, allow: real_server("127.0.0.1", port, allow=allow)), \
+                mock.patch.object(run_follow, "LOG_ROOT", self.folder / "logs"), \
+                mock.patch("builtins.input", side_effect=AssertionError("Enter asked")), mock.patch("builtins.print"):
+            run_follow.main(["--seconds", "0.35", "--no-jetson", "--planner", "here", "--remote", "0"])
+            run_follow.main(["--seconds", "0.35", "--no-jetson", "--planner", "here", "--remote", "0",
+                             "--dashboard-host", "0.0.0.0"])  # opened on purpose
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(pages[0].server.server_address[0], "127.0.0.1")
+        self.assertEqual(pages[1].server.server_address[0], "0.0.0.0")
+
+    def test_main_without_a_console_waits_for_follow_on_the_page(self):
+        # under nohup stdin is no terminal and input() raises EOFError (2026-11-14: the run died of it)
+        old = {s: signal.getsignal(s) for s in run_follow.STOP_SIGNALS}
+        self.addCleanup(lambda: [signal.signal(s, h) for s, h in old.items()])
+        lidar_session = Scans(WALL_ONLY)
+        lidar_session.close = lambda: None
+        cam = SimpleNamespace(start=lambda: None, stop=lambda: None, latest=lambda: None)
+        pages, real, pressed = [], run_follow.dashboard_module.Dashboard, []
+
+        def page(controls, run_info, port, remote, host):
+            self.assertEqual(host, "127.0.0.1")  # by hand too: only the console reaches the switches
+            pages.append(real(controls, run_info, port=0, host="127.0.0.1", remote=remote))
+            return pages[-1]
+
+        def follow():  # Follow on the page, a while after the start
+            pressed.append(time.monotonic())
+            pages[0].controls.command("follow")
+
+        press = threading.Timer(0.3, follow)
+        self.addCleanup(press.cancel)
+        no_tty = SimpleNamespace(isatty=lambda: False)
+        with mock.patch.object(run_follow.lidar, "LidarSession", return_value=lidar_session), \
+                mock.patch.object(run_follow.camera, "Camera", return_value=cam), \
+                mock.patch.object(run_follow.dashboard_module, "Dashboard", side_effect=page), \
+                mock.patch.object(run_follow, "LOG_ROOT", self.folder / "logs"), \
+                mock.patch("sys.stdin", no_tty), \
+                mock.patch("builtins.input", side_effect=EOFError), mock.patch("builtins.print"):
+            press.start()
+            run_follow.main(["--seconds", "0.35", "--no-jetson", "--planner", "here"])
+        self.assertEqual(len(pages), 1)
+        self.assertIsInstance(pages[0].feed, run_follow.live_feed.LiveFeed)
+        logs = list((self.folder / "logs").iterdir())
+        cycles = [json.loads(line) for line in (logs[0] / "log.jsonl").read_text().splitlines()]
+        cycles = [r for r in cycles if "pose" in r]
+        self.assertGreaterEqual(len(cycles), 1)
+        self.assertGreaterEqual(cycles[0]["time"], pressed[0])  # the run waited for Follow
+        self.assertTrue(all(r["phase"] == "follow" for r in cycles))
+        # nothing could start it: no console, no --remote and no page
+        with self.assertRaises(SystemExit) as refused, mock.patch("sys.stdin", no_tty):
+            run_follow.main(["--seconds", "1", "--dashboard", "0"])
+        self.assertIn("REFUSED", str(refused.exception))
+
+
+class Blocked(Pushy):
+    """A brain that follows an operator 2 m away (believed frame) but finds no way there: it stands."""
+
+    def __init__(self, robot):
+        super().__init__(robot)
+        self.last_operator_pos = (2.0, 0.0)
+        self.follow_distance = P["follow_gap"] + safety.FRONT
+        self.navigator = SimpleNamespace(path=[], _goal=None)
+
+    def step(self, senses, dt):
+        self.robot.speed = self.robot.turn_speed = 0.0
+
+
+CORNER_WALLS = [((0.45, -1.5), (0.45, 1.5)), ((-1.5, 0.45), (0.45, 0.45))]  # ahead and to the left
+DEAD_END_WALLS = [((0.3, -0.27), (0.3, 0.27)), ((-0.15, 0.27), (0.6, 0.27)), ((-0.15, -0.27), (0.6, -0.27))]
+
+
+class Stuck(Logged):
+    """Owner's request A (2026-11-15): out of a corner when stuck, then plan again."""
+
+    def run_stuck(self, walls, seconds, state=None, base=None, page=None):
+        base = base or FakeBase()
+        world = Room(base, walls)
+        state = state or run_follow.State(P, base, world, Camera(), None, self.log, clock=lambda: self.now)
+        if not isinstance(state.follower, Blocked):
+            state.follower = Blocked(state.body.robot)
+        records = []
+        for i in range(round(seconds / 0.1)):
+            if page and round(0.1 * i, 1) == 0.0:
+                state.controls.command(page)
+            records.append(self.cycle(state, round(0.1 * i, 1)))
+            base.advance(0.1)
+        return state, base, records
+
+    def test_four_seconds_stuck_in_a_corner_turn_out_and_log_it(self):
+        state, base, records = self.run_stuck(CORNER_WALLS, 12.0)
+        events = [(r["time"], r["escape"]) for r in records if r["escape"]]
+        self.assertEqual(events[0][0], escape.STUCK_S)
+        self.assertEqual(events[0][1]["start"], "turn")
+        self.assertIn("no path", events[0][1]["why"])
+        self.assertTrue(any(e.get("end") == "turn" and e["result"] == "done" for _, e in events))
+        turning = [r for r in records if r["w"]]
+        self.assertTrue(turning)
+        self.assertTrue(all(r["w"] == -escape.TURN_W and r["v"] == 0.0 for r in turning))  # right: away from both walls
+        self.assertTrue(all(r["stop"] is None for r in records))
+        self.assertLess(base.pose[2], math.radians(-60))
+        self.assertLessEqual(len([e for _, e in events if "start" in e]), escape.MAX_ESCAPES)
+
+    def test_no_room_to_turn_backs_up_with_reverse_packets(self):
+        state, base, records = self.run_stuck(DEAD_END_WALLS, 12.0)
+        start = next(r["escape"] for r in records if r["escape"])
+        self.assertEqual(start["start"], "back", start)
+        self.assertGreater(base.backed, 0)
+        self.assertIn((-wheels_module.REVERSE_MAX, 0.0), base.sent)
+        self.assertAlmostEqual(base.pose[0], -start["m"], delta=0.02)
+        self.assertTrue(any(r["escape"] == {"end": "back", "result": "done"} for r in records))
+        self.assertTrue(all(r["stop"] is None for r in records))
+
+    def test_held_or_in_a_dry_run_it_never_escapes(self):
+        state, base, records = self.run_stuck(CORNER_WALLS, 10.0, page="wait")  # the page's Wait
+        self.assertEqual([r["escape"] for r in records if r["escape"]], [])
+        self.assertEqual(base.pose, (0.0, 0.0, 0.0))
+        world = Room(FakeBase(), CORNER_WALLS)
+        state = run_follow.State(P, None, world, Camera(), None, self.log, clock=lambda: self.now)
+        state.follower = Blocked(state.body.robot)
+        records = [self.cycle(state, round(0.1 * i, 1)) for i in range(100)]
+        self.assertEqual([r["escape"] for r in records if r["escape"]], [])
+
+    def test_the_cable_is_counted_saved_and_reported(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / "cable.json"
+        cable_module.save(path, 140.0, 12.0)
+        base = FakeBase()
+        state = self.search_spin(base, path)
+        records = []
+        for i in range(60):  # 6 s of the search turn to the left at 0.3 rad/s
+            records.append(self.cycle(state, round(0.1 * i, 1)))
+            base.advance(0.1)
+        self.assertTrue(all("cable_deg" in r for r in records))
+        self.assertLessEqual(max(r["cable_deg"] for r in records), cable_module.WARN_DEG + 2.0)
+        self.assertIn(-run_follow.SEARCH_TURN, [r["w"] for r in records])  # turned round at 150 deg
+        self.assertIn("the other way round", [r["cable"] for r in records])
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved["set_at"], 12.0)
+        self.assertAlmostEqual(saved["net_deg"], records[-1]["cable_deg"], delta=math.degrees(0.3) * 1.1)
+
+    def search_spin(self, base, path):
+        """Not locked yet, the link up and nobody in view: run_follow's own search turns on the spot."""
+        link = SimpleNamespace(latest=lambda: Answer(self.now, []), alive=lambda now, silence: True,
+                               send=lambda frame: None)
+        state = run_follow.State(P, base, Scans(WALL_ONLY), Camera(), link, self.log, clock=lambda: self.now,
+                                 cable_path=path)
+        state.follower = Pushy(state.body.robot)
+        state.follower.operator_look = SimpleNamespace(count=0)
+        return state
 
 
 if __name__ == "__main__":

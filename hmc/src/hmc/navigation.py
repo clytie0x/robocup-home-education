@@ -67,6 +67,12 @@ NEAR = 0.3  # metres: a shape farther than this from the corner circle cannot co
 # True when the last plan_path needed the close plan. The Navigator then judges the room ahead by
 # the real outline too, or the circle would stop it in front of the gap it just planned through.
 LAST_PLAN_TIGHT = False
+# When no way leads to the goal, plan to the reachable cell nearest to it (with the wide berth) and
+# wait there. The real base stood still 2.5 m from its operator on 2026-11-15 because stray remembered
+# circles closed every way across open floor; it should come as close as it can instead. Off in the
+# simulation (its runs stay byte-identical); the real base (body.py, plan_server.py) turns it on.
+TOWARD_UNREACHABLE = False
+TOWARD_GAIN = 2 * CELL  # metres the reachable cell must be nearer to the goal than we are, or we stay
 
 Cell = tuple[int, int]
 
@@ -84,17 +90,20 @@ def plan_path(start: Point, goal: Point, shapes: list[Shape],
     """
     global LAST_PLAN_TIGHT, _tight_skip
     LAST_PLAN_TIGHT = False
-    path = _grid_path(start, goal, shapes, near_side, hmc_world.ROBOT_RADIUS + SAFETY, [])
+    # With TOWARD_UNREACHABLE the wide search also notes the way to the reachable cell nearest the
+    # goal; it is the answer only when neither the wide nor the close plan reaches the goal itself.
+    toward: dict | None = {} if TOWARD_UNREACHABLE else None
+    path = _grid_path(start, goal, shapes, near_side, hmc_world.ROBOT_RADIUS + SAFETY, [], toward=toward)
     if path is not None or not CLOSE_PLAN:
-        return path
+        return path if path is not None or toward is None else toward.get("path")
     if _tight_skip > 0:
         _tight_skip -= 1
-        return None
+        return None if toward is None else toward.get("path")
     path = _close_plan(start, goal, shapes, near_side, heading)
     if path is None:
         _tight_skip = TIGHT_COOLDOWN
-    else:
-        LAST_PLAN_TIGHT = True
+        return None if toward is None else toward.get("path")
+    LAST_PLAN_TIGHT = True
     return path
 
 
@@ -204,11 +213,14 @@ def path_clear(path: list[Point], start: Point, start_heading: float | None,
 
 
 def _grid_path(start: Point, goal: Point, shapes: list[Shape], near_side: bool,
-               inflate: float, avoid: list[Point], marked: dict | None = None) -> list[Point] | None:  # fmt: skip
+               inflate: float, avoid: list[Point], marked: dict | None = None,
+               toward: dict | None = None) -> list[Point] | None:  # fmt: skip
     """A* on a grid whose cells closer than inflate to a shape, or holding an avoid point, are blocked.
 
     marked, if given, keeps the cells the shapes block between calls with the same shapes and
     inflate (the close plan's rounds), so they are worked out once.
+    toward, if given and the goal cannot be reached, gets "path": the way to the reachable cell
+    nearest to the goal, or None when that cell is not TOWARD_GAIN nearer to it than the start.
     """
     x0 = min(start[0], goal[0]) - MARGIN
     y0 = min(start[1], goal[1]) - MARGIN
@@ -268,17 +280,26 @@ def _grid_path(start: Point, goal: Point, shapes: list[Shape], near_side: bool,
             ring = [c for c in free if distance(centre(c), goal) <= nearest + CELL]
             goal_cell = min(ring, key=lambda c: (distance(centre(c), start), c))
 
+    def way_to(cell: Cell) -> list[Point]:
+        path = [cell]
+        while path[-1] in came_from:
+            path.append(came_from[path[-1]])
+        return [centre(c) for c in reversed(path[:-1])]  # drop the start cell
+
     # A* search. Steps go to the 8 neighbours. A diagonal step needs both side cells free.
     came_from: dict[Cell, Cell] = {}
     cost = {start_cell: 0.0}
     frontier = [(distance(start, centre(goal_cell)), start_cell)]
+    best = start_cell  # the reached cell nearest to the goal, for toward
+    # Toward the goal, not round the houses: only cells whose way is no longer than the goal is far
+    # (the recorded case found a cell 0.9 m from the operator, but over a 4.8 m detour out of view).
+    detour = distance(start, goal)
     while frontier:
         _, current = heapq.heappop(frontier)
         if current == goal_cell:
-            path = [current]
-            while path[-1] in came_from:
-                path.append(came_from[path[-1]])
-            return [centre(c) for c in reversed(path[:-1])]  # drop the start cell
+            return way_to(current)
+        if cost[current] <= detour and distance(centre(current), goal) < distance(centre(best), goal):
+            best = current  # the cost of a popped cell is final (the guess never overestimates)
         for di in (-1, 0, 1):
             for dj in (-1, 0, 1):
                 nxt = (current[0] + di, current[1] + dj)
@@ -293,6 +314,10 @@ def _grid_path(start: Point, goal: Point, shapes: list[Shape], near_side: bool,
                     came_from[nxt] = current
                     guess = new_cost + distance(centre(nxt), centre(goal_cell))
                     heapq.heappush(frontier, (guess, nxt))
+    # The search ran out: every cell we can reach was visited, and best is the nearest to the goal.
+    if toward is not None:
+        gain = distance(start, goal) - distance(centre(best), goal)
+        toward["path"] = way_to(best) if best != start_cell and gain >= TOWARD_GAIN else None
     return None
 
 

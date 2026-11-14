@@ -12,11 +12,14 @@ from hmc_flow import (  # noqa: E402
     DROPPING,
     ERROR,
     FOLLOWING,
-    HANDOVER,
+    PICKING,
+    POINTING,
     READY,
     RETURNING,
     HmcFlow,
 )
+
+REACHED = "bag_reached|OK|0.310,0.015"
 
 
 def says(out):
@@ -50,10 +53,15 @@ class FlowCase(unittest.TestCase):
         if state == FOLLOWING:
             return
         f.on_heard("this is the car", now)
-        if state == AT_CAR:
+        if state == POINTING:
             return
-        f.on_heard("done", now)
-        if state == HANDOVER:
+        if state == AT_CAR:
+            f.on_heard("stop", now)
+            return
+        f.on_event(REACHED, now)
+        if state in (PICKING, RETURNING) and not f.use_arm:
+            return
+        if state == PICKING:
             return
         f.on_event("grab_success", now)
         if state == RETURNING:
@@ -209,28 +217,28 @@ class ReadyTests(FlowCase):
 
 
 class FollowingTests(FlowCase):
-    def test_arrival_words_send_wait_and_ask_for_the_handover(self):
+    def test_arrival_words_send_wait_then_ask_for_the_pointing(self):
         for words in ("stop", "wait", "this is the car", "here", "we are here"):
             self.make()
             self.go(FOLLOWING)
             out = self.flow.on_heard(words, 2.0)
-            self.assertEqual(self.flow.state, AT_CAR, words)
-            self.assertEqual(actions(out), ["wait"], words)
-            self.assertIn("Please put the bag in my gripper.", says(out))
+            self.assertEqual(self.flow.state, POINTING, words)
+            self.assertEqual(cmds(out), [{"action": "wait", "params": {}}, {"action": "find_bag", "params": {}}], words)
+            self.assertEqual(says(out), ["Please point at the bag."], words)
 
-    def test_stop_intent_goes_to_at_car(self):
+    def test_stop_intent_goes_to_pointing(self):
         f = self.make()
         self.go(FOLLOWING)
         out = f.on_intent({"action": "stop"}, 2.0)
-        self.assertEqual(f.state, AT_CAR)
-        self.assertEqual(actions(out), ["wait"])
+        self.assertEqual(f.state, POINTING)
+        self.assertEqual(actions(out), ["wait", "find_bag"])
 
     def test_go_back_while_following_stops_at_the_car_first(self):
         f = self.make()
         self.go(FOLLOWING)
         out = f.on_heard("go back", 2.0)
-        self.assertEqual(f.state, AT_CAR)
-        self.assertEqual(actions(out), ["wait"])
+        self.assertEqual(f.state, POINTING)
+        self.assertEqual(actions(out), ["wait", "find_bag"])
 
     def test_lost_person_for_5_s_asks_to_come_back_once(self):
         f = self.make()
@@ -271,39 +279,135 @@ class FollowingTests(FlowCase):
         self.assertEqual(len(says(out)), 1)
 
 
-class AtCarTests(FlowCase):
-    def test_done_closes_the_gripper_as_a_handover(self):
+class PointingTests(FlowCase):
+    def test_bag_chosen_is_said(self):
         f = self.make()
-        self.go(AT_CAR)
-        out = f.on_heard("done", 3.0)
-        self.assertEqual(f.state, HANDOVER)
-        self.assertEqual(cmds(out), [{"action": "carry_bag", "params": {"handover": True}}])
+        self.go(POINTING)
+        out = f.on_event("bag_chosen|RIGHT|I will take the right bag, on your right.", 3.0)
+        self.assertEqual(says(out), ["I will take the right bag, on your right."])
+        self.assertEqual(f.state, POINTING)
+        self.assertEqual(actions(out), [])
 
-    def test_okay_and_go_back_also_mean_done(self):
-        for words in ("okay", "go back", "take it back"):
-            self.make()
-            self.go(AT_CAR)
-            self.flow.on_heard(words, 3.0)
-            self.assertEqual(self.flow.state, HANDOVER, words)
-
-    def test_carry_bag_intent_means_done(self):
+    def test_bag_reached_picks_it_where_the_pi_measured_it(self):
         f = self.make()
-        self.go(AT_CAR)
-        f.on_intent({"action": "carry_bag"}, 3.0)
-        self.assertEqual(f.state, HANDOVER)
+        self.go(POINTING)
+        out = f.on_event(REACHED, 20.0)
+        self.assertEqual(f.state, PICKING)
+        self.assertEqual(cmds(out), [{"action": "pick_bag", "params": {"x": 0.31, "y": 0.015}}])
+        self.assertEqual(f.deadline, 20.0 + 90.0)  # the arm moves slowly
 
-    def test_without_the_arm_done_starts_the_return_directly(self):
+    def test_without_the_arm_bag_reached_says_so_and_goes_back(self):
         f = self.make(use_arm=False)
-        self.go(AT_CAR)
-        out = f.on_heard("done", 3.0)
+        self.go(POINTING)
+        out = f.on_event("bag_reached|ESTIMATED|0.300,0.010", 20.0)
         self.assertEqual(f.state, RETURNING)
         self.assertEqual(actions(out), ["go_back"])
+        self.assertIn("I would pick up the bag now.", says(out))
         self.assertIn("I will go back to the start now.", says(out))
+
+    def test_bag_failed_says_why_and_asks_to_point_again(self):
+        for code, why in (("NOT_POINTED", "I did not see you point."), ("NO_BAG", "I see no bag there."),
+                          ("BLOCKED", "Something is in my way."), ("TIMEOUT", "That took me too long."),
+                          ("LOST_BAG", "I lost sight of the bag.")):
+            f = self.make()
+            self.go(POINTING)
+            out = f.on_event("bag_failed|%s|details for the log" % code, 10.0)
+            self.assertEqual(f.state, POINTING, code)
+            self.assertEqual(says(out), [why + " Please point at the bag again."], code)
+            self.assertEqual(cmds(out), [{"action": "find_bag", "params": {}}], code)
+
+    def test_after_three_failures_in_a_row_it_waits_for_ready(self):
+        f = self.make()
+        self.go(POINTING)
+        for i in range(3):
+            f.on_event("bag_failed|NO_BAG|none", 10.0 + i)
+            self.assertEqual(f.state, POINTING)
+        out = f.on_event("bag_failed|NO_BAG|none", 14.0)
+        self.assertEqual(f.state, AT_CAR)
+        self.assertEqual(actions(out), [])
+        self.assertEqual(says(out), ["I see no bag there. Please point at the bag, then say ready."])
+        out = f.on_heard("ready", 20.0)
+        self.assertEqual(f.state, POINTING)
+        self.assertEqual(actions(out), ["find_bag"])
+        f.on_event("bag_failed|NO_BAG|none", 30.0)
+        self.assertEqual(f.state, POINTING)  # the count starts again
+
+    def test_a_refused_or_cancelled_bag_is_not_retried_by_itself(self):
+        for code in ("REFUSED", "NO_LINK", "CANCELLED", "SOMETHING_NEW"):
+            f = self.make()
+            self.go(POINTING)
+            out = f.on_event("bag_failed|%s|why" % code, 10.0)
+            self.assertEqual(f.state, AT_CAR, code)
+            self.assertEqual(actions(out), [], code)
+
+    def test_stop_cancels_the_bag_task(self):
+        f = self.make()
+        self.go(POINTING)
+        out = f.on_heard("stop", 5.0)
+        self.assertEqual(f.state, AT_CAR)
+        self.assertEqual(actions(out), ["wait"])  # the Pi's wait cancels its bag task
+        self.assertEqual(says(out), ["Okay, cancelled. Please point at the bag, then say ready."])
+        self.assertEqual([k for k, _ in f.on_event("bag_failed|CANCELLED|wait came", 5.2) if k != "log"], [])
+
+    def test_follow_me_while_pointing_resumes_following(self):
+        f = self.make()
+        self.go(POINTING)
+        out = f.on_heard("follow me", 5.0)
+        self.assertEqual(f.state, FOLLOWING)
+        self.assertEqual(actions(out), ["resume"])
+
+    def test_other_task_words_ask_for_the_pointing(self):
+        f = self.make()
+        self.go(POINTING)
+        for words in ("take it back", "done"):
+            out = f.on_heard(words, 5.0)
+            self.assertEqual(says(out), ["Please point at the bag."], words)
+            self.assertEqual(actions(out), [], words)
+            self.assertEqual(f.state, POINTING)
+
+    def test_no_answer_in_time_cancels_and_waits(self):
+        f = self.make(bag_timeout=180.0)
+        self.go(POINTING, now=1.0)
+        self.assertEqual(f.on_tick(180.9), [])
+        out = f.on_tick(181.1)
+        self.assertEqual(f.state, AT_CAR)
+        self.assertEqual(actions(out), ["wait"])
+
+    def test_a_bad_reached_line_is_not_a_pick(self):
+        f = self.make()
+        self.go(POINTING)
+        out = f.on_event("bag_reached|OK|nowhere", 5.0)
+        self.assertEqual(f.state, AT_CAR)
+        self.assertNotIn("pick_bag", actions(out))
+
+    def test_bag_events_outside_pointing_are_only_logged(self):
+        f = self.make()
+        self.go(FOLLOWING)
+        for ev in ("bag_chosen|LEFT|I will take the left bag, on your left.", REACHED, "bag_failed|NO_BAG|x"):
+            out = f.on_event(ev, 3.0)
+            self.assertEqual([k for k, _ in out], ["log"], ev)
+        self.assertEqual(f.state, FOLLOWING)
+
+
+class AtCarTests(FlowCase):
+    def test_ready_okay_or_take_it_back_look_for_the_bag(self):
+        for words in ("ready", "okay", "done", "take it back"):
+            self.make()
+            self.go(AT_CAR)
+            out = self.flow.on_heard(words, 6.0)
+            self.assertEqual(self.flow.state, POINTING, words)
+            self.assertEqual(actions(out), ["find_bag"], words)
+
+    def test_carry_bag_intent_looks_for_the_bag(self):
+        f = self.make()
+        self.go(AT_CAR)
+        f.on_intent({"action": "carry_bag"}, 6.0)
+        self.assertEqual(f.state, POINTING)
 
     def test_follow_me_at_the_car_resumes_following(self):
         f = self.make()
         self.go(AT_CAR)
-        out = f.on_heard("follow me", 3.0)
+        out = f.on_heard("follow me", 6.0)
         self.assertEqual(f.state, FOLLOWING)
         self.assertEqual(actions(out), ["resume"])
 
@@ -311,21 +415,21 @@ class AtCarTests(FlowCase):
         f = self.make(reask_s=15.0)
         self.go(AT_CAR, now=1.0)
         self.assertEqual(says(f.on_tick(15.9)), [])
-        self.assertEqual(says(f.on_tick(16.1)), ["Please put the bag in my gripper."])
+        self.assertEqual(says(f.on_tick(16.1)), ["Please point at the bag, then say ready."])
 
     def test_unrelated_speech_is_forwarded(self):
         f = self.make()
         self.go(AT_CAR)
-        out = f.on_heard("what is your name", 3.0)
+        out = f.on_heard("what is your name", 6.0)
         self.assertEqual(forwarded(out), ["what is your name"])
         self.assertEqual(f.state, AT_CAR)
 
 
-class HandoverTests(FlowCase):
+class PickingTests(FlowCase):
     def test_grab_success_starts_the_return(self):
         f = self.make()
-        self.go(HANDOVER)
-        out = f.on_event("grab_success", 4.0)
+        self.go(PICKING)
+        out = f.on_event("grab_success", 40.0)
         self.assertEqual(f.state, RETURNING)
         self.assertEqual(actions(out), ["go_back"])
         self.assertIn("I will go back to the start now.", says(out))
@@ -333,37 +437,50 @@ class HandoverTests(FlowCase):
 
     def test_grab_failed_holding_counts_as_success(self):
         f = self.make()
-        self.go(HANDOVER)
-        f.on_event("grab_failed|HOLDING|I already hold something.", 4.0)
+        self.go(PICKING)
+        f.on_event("grab_failed|HOLDING|I already hold something.", 40.0)
         self.assertEqual(f.state, RETURNING)
 
-    def test_grab_failed_is_an_error_with_the_arm_message(self):
+    def test_a_missed_grab_has_the_bag_measured_again_once(self):
+        for code in ("MISSED", "NOT_FOUND"):
+            f = self.make()
+            self.go(PICKING)
+            out = f.on_event("grab_failed|%s|I missed it." % code, 40.0)
+            self.assertEqual(f.state, POINTING, code)
+            self.assertEqual(cmds(out), [{"action": "find_bag", "params": {"again": True}}], code)
+            out = f.on_event("bag_reached|OK|0.305,0.012", 50.0)
+            self.assertEqual(cmds(out), [{"action": "pick_bag", "params": {"x": 0.305, "y": 0.012}}])
+            out = f.on_event("grab_failed|%s|I missed it again." % code, 90.0)
+            self.assertEqual(f.state, ERROR, code)
+            self.assertTrue(any("I missed it again." in t for t in says(out)))
+
+    def test_other_grab_failures_are_an_error_with_the_arm_message(self):
         f = self.make()
-        self.go(HANDOVER)
-        out = f.on_event("grab_failed|MISSED|I missed it.", 4.0)
+        self.go(PICKING)
+        out = f.on_event("grab_failed|COLLISION|Something is in the way.", 40.0)
         self.assertEqual(f.state, ERROR)
         self.assertEqual(actions(out), ["end"])
-        self.assertTrue(any("I missed it." in s for s in says(out)))
+        self.assertTrue(any("Something is in the way." in t for t in says(out)))
 
     def test_grab_timeout_is_an_error(self):
-        f = self.make(grab_timeout=30.0)
-        self.go(HANDOVER, now=1.0)
-        self.assertEqual(f.on_tick(30.9), [])
-        f.on_tick(31.1)
+        f = self.make(grab_timeout=90.0)
+        self.go(PICKING, now=1.0)
+        self.assertEqual(f.on_tick(90.9), [])
+        f.on_tick(91.1)
         self.assertEqual(f.state, ERROR)
 
     def test_stop_cancels_back_to_at_car(self):
         f = self.make()
-        self.go(HANDOVER)
-        out = f.on_heard("stop", 4.0)
+        self.go(PICKING)
+        out = f.on_heard("stop", 40.0)
         self.assertEqual(f.state, AT_CAR)
         self.assertEqual(actions(out)[0], "stop")
 
     def test_other_words_get_please_wait(self):
         f = self.make()
-        self.go(HANDOVER)
-        out = f.on_heard("go back", 4.0)
-        self.assertEqual(f.state, HANDOVER)
+        self.go(PICKING)
+        out = f.on_heard("go back", 40.0)
+        self.assertEqual(f.state, PICKING)
         self.assertEqual(says(out), ["Please wait a moment."])
 
 
@@ -373,12 +490,12 @@ class ReturningTests(FlowCase):
         self.go(RETURNING)
         out = f.on_event("at_start", 5.0)
         self.assertEqual(f.state, DROPPING)
-        self.assertEqual(actions(out), ["drop_bag"])
+        self.assertEqual(cmds(out), [{"action": "drop_bag", "params": {"x": 0.31, "y": 0.0}}])
 
     def test_at_start_without_the_arm_is_done(self):
         f = self.make(use_arm=False)
-        self.go(AT_CAR)
-        f.on_heard("done", 3.0)
+        self.go(RETURNING)
+        self.assertEqual(f.state, RETURNING)
         out = f.on_event("at_start", 5.0)
         self.assertEqual(f.state, DONE)
         self.assertIn("Here is your bag.", says(out))
@@ -470,7 +587,7 @@ class ErrorTests(FlowCase):
         self.assertEqual(actions(out), ["go_back"])
 
     def test_link_lost_while_the_base_is_needed_is_an_error(self):
-        for state in (FOLLOWING, AT_CAR, HANDOVER, RETURNING):
+        for state in (FOLLOWING, POINTING, AT_CAR, PICKING, RETURNING):
             self.make()
             self.go(state)
             self.flow.on_event("base_link_lost", 9.0)
@@ -479,10 +596,7 @@ class ErrorTests(FlowCase):
     def test_link_lost_after_at_start_is_only_logged(self):
         for use_arm, state in ((True, DROPPING), (True, DONE), (False, DONE)):
             self.make(use_arm=use_arm)
-            self.go(AT_CAR)
-            self.flow.on_heard("done", 3.0)
-            if use_arm:
-                self.flow.on_event("grab_success", 4.0)
+            self.go(RETURNING)
             self.flow.on_event("at_start", 5.0)
             if state == DONE and use_arm:
                 self.flow.on_event("drop_done", 6.0)
@@ -541,19 +655,27 @@ class ScriptedRunTests(unittest.TestCase):
         emit(f.on_tick(15.5))
         emit(f.on_event("see_person", 16.0))
         emit(f.on_heard("this is the car", 30.0))
-        emit(f.on_heard("done", 40.0))
-        emit(f.on_event("grab_success", 43.0))
-        for t in range(44, 120, 5):
+        emit(f.on_event("bag_failed|NOT_POINTED|no steady pointing in 20 s", 50.5))
+        emit(f.on_event("bag_chosen|LEFT|I will take the left bag, on your left.", 55.0))
+        for t in range(56, 85, 5):
             emit(f.on_tick(float(t)))
-        emit(f.on_event("at_start", 120.0))
-        emit(f.on_event("drop_done", 130.0))
+        emit(f.on_event("bag_reached|OK|0.312,0.016", 85.0))
+        emit(f.on_event("grab_success", 140.0))
+        for t in range(141, 220, 5):
+            emit(f.on_tick(float(t)))
+        emit(f.on_event("at_start", 220.0))
+        emit(f.on_event("drop_done", 230.0))
 
         states = [v for t, v in published if t == "/flow/state"]
-        self.assertEqual(states, [READY, FOLLOWING, AT_CAR, HANDOVER, RETURNING, DROPPING, DONE])
-        acts = [v["action"] for t, v in published if t == "/robot/command"]
-        self.assertEqual(acts, ["follow_me", "wait", "carry_bag", "go_back", "drop_bag"])
+        self.assertEqual(states, [READY, FOLLOWING, POINTING, POINTING, PICKING, RETURNING, DROPPING, DONE])
+        commands = [v for t, v in published if t == "/robot/command"]
+        self.assertEqual([v["action"] for v in commands],
+                         ["follow_me", "wait", "find_bag", "find_bag", "pick_bag", "go_back", "drop_bag"])
+        self.assertEqual(commands[4]["params"], {"x": 0.312, "y": 0.016})
         spoken = [v for t, v in published if t == "/tts/say"]
-        for line in ("I will follow you.", "Please come back.", "Please put the bag in my gripper.",
+        for line in ("I will follow you.", "Please come back.", "Please point at the bag.",
+                     "I did not see you point. Please point at the bag again.",
+                     "I will take the left bag, on your left.",
                      "I will go back to the start now.", "Here is your bag."):
             self.assertIn(line, spoken)
         self.assertEqual(f.state, DONE)

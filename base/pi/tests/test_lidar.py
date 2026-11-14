@@ -1,5 +1,6 @@
 # Copied from xohm@pi:~/pi-drive/test_lidar.py on 2026-11-13.
 import math
+import sys
 import time
 import unittest
 from pathlib import Path
@@ -207,6 +208,67 @@ class SessionTest(unittest.TestCase):
     def test_a_dead_lidar_returns_no_scan(self):
         handle = FakeHandle([])
         self.assertEqual(LidarSession(handle=handle).latest(), [])
+
+    def test_a_silent_lidar_is_started_again_once_a_second(self):
+        now = [0.0]
+        handle = FakeHandle([])
+        session = LidarSession(handle=handle, clock=lambda: now[0])
+        self.assertEqual(handle.written, [START])
+        for t in (0.5, 0.9):                 # quiet under RESTART_S: nothing sent
+            now[0] = t
+            session.latest()
+        self.assertEqual(handle.written, [START])
+        now[0] = 1.1
+        session.latest()
+        self.assertEqual(handle.written, [START, START])
+        now[0] = 1.5                         # not again within RESTART_S of the last try
+        session.latest()
+        self.assertEqual(handle.written, [START, START])
+        now[0] = 2.2
+        session.latest()
+        self.assertEqual(handle.written, [START, START, START])
+        self.assertEqual(session.restarts, 2)
+
+    def test_data_keeps_it_from_restarting(self):
+        now = [0.0]
+        data = sweep(0, 360) + sweep(0, 30)
+        handle = FakeHandle([data[i:i + 500] for i in range(0, len(data), 500)])
+        session = LidarSession(handle=handle, clock=lambda: now[0])
+        for _ in range(len(handle.chunks)):
+            now[0] += 0.4
+            session.latest()
+        self.assertEqual(handle.written, [START])
+
+    def test_the_port_is_opened_exclusively(self):
+        import lidar
+        opened = {}
+
+        class Serial:
+            def __init__(self, port, baud, **kw):
+                opened.update(kw, port=port)
+                self.in_waiting = 0
+
+            def reset_input_buffer(self):
+                pass
+
+            def write(self, data):
+                pass
+
+            def flush(self):
+                pass
+
+        fake = type(sys)("serial")
+        fake.Serial = Serial
+        saved = sys.modules.get("serial")
+        sys.modules["serial"] = fake
+        try:
+            lidar.LidarSession()
+        finally:
+            if saved is None:
+                del sys.modules["serial"]
+            else:
+                sys.modules["serial"] = saved
+        self.assertTrue(opened.get("exclusive"))
 
 
 if __name__ == "__main__":

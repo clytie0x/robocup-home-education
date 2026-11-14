@@ -1,13 +1,15 @@
 """The robot's telemetry in one SQLite file: the Pi, the Jetson and the link between them over time, the
-run logs, and an estimate of the power bank's charge. See docs/telemetry.md for what is recorded and how to query it.
+run logs, an estimate of the power bank's charge, and the energy drawn from the motor battery. See
+docs/telemetry.md for what is recorded and how to query it.
 
   python telemetry.py --once                 one sample as JSON, nothing written (a check on the robot)
   python telemetry.py --run                  record until Ctrl+C (every 5 s, every 1 s while a run is logging)
   python telemetry.py --export pi_temp_c,jetson_vdd_in_mw --since 2d --out temps.csv
   python telemetry.py --export runs --out runs.csv     (a table: samples, events, runs, run_samples, charge_marks)
   python telemetry.py --charged              the power bank was just charged to 100 %
+  python telemetry.py --charged motor        the 21V motor battery was just charged (its energy counts from now)
   python telemetry.py --reading 62           the bank's display shows 62 %
-  python telemetry.py --estimate             the bank's estimated charge now, as JSON
+  python telemetry.py --estimate             the bank's estimated charge now, and the motor battery's use, as JSON
   python telemetry.py --fit                  fit the energy model's scale to the readings so far
   (all take --db FILE; the default is data/robot.db next to this file: ~/hmc-base/data/robot.db on the Pi)
 
@@ -55,15 +57,17 @@ RUN_DONE_S = 60.0  # a log without an end record, untouched this long, is a fini
 RUN_HZ = 5.0  # run_samples keeps at most this many cycles per second
 MAX_PENDING = 200_000  # rows kept in memory while the database cannot be written; the oldest go first
 
-# The UGREEN power bank (feeds the Pi, its USB devices and the wheel motors; the Jetson is on mains) has no
-# data link, so its charge is estimated from a model of the power drawn. Every coefficient below is a guess
+# The UGREEN power bank (145 W, 25,000 mAh) feeds only the Pi and its USB devices (Xtion, LiDAR, the base
+# board's logic); the wheel motors run off a separate "21V MAX LITHIUM" power-tool battery through a DC-DC
+# converter, and the Jetson is on mains (owner and a measurement, 2026-11-15). Neither battery has a data link,
+# so the bank's charge is estimated from a model of the Pi-side power. Every coefficient below is a guess
 # to be fitted (fit_coefficients scales the whole model from the owner's display readings).
 BANK_WH = 25.0 * 3.7  # 92.5 Wh: 25,000 mAh at the 3.7 V cell voltage, computed from the label, not measured
 BANK_EFFICIENCY = 0.85  # guess: the bank's output conversion losses
 PI_BASE_W = 3.0  # guess: the Pi idle
 PI_PER_CPU_W = 3.0  # guess: added at 100 % CPU
 USB_DEVICES_W = 2.5  # guess: Xtion ~2 W + LiDAR ~0.5 W, assumed always on
-MOTOR_W_AT_FULL = 12.0  # guess: both motors at 100 % PWM (L298N)
+MOTOR_W_AT_FULL = 12.0  # guess: both motors at 100 % PWM (L298N), drawn from the 21V tool battery, not the bank
 MOTOR_FULL_V = 0.5  # guess: m/s the base would drive at 100 % PWM (the logs carry the command, not the PWM)
 MOTOR_FULL_W = 3.0  # guess: rad/s of turning at 100 % PWM
 DEFAULT_CPU_PCT = 25.0  # used while the CPU load is not known yet
@@ -73,8 +77,13 @@ WARN_PCT = 30.0  # 2026-11-14: the display read 15 % when the motors had already
 MIN_DROP_PCT = 5.0  # a pair of readings closer than this is too coarse (the display shows whole %) to fit
 MIN_PAIRS = 2
 SCALE_BOUNDS = (0.5, 2.0)
+# The motor battery's capacity is not known, so only its energy used is counted (motor_usage), not a percent.
+# When the owner gives the battery's Ah (printed on it), set this to Ah * its nominal V and the percent can be
+# shown.
+MOTOR_BATTERY_WH = None
+BATTERIES = ("bank", "motor")  # charge_marks.battery: the UGREEN power bank, the 21V motor battery
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MIGRATIONS = [  # MIGRATIONS[n] takes the database from version n to n + 1; never edit a step once shipped
     """
     CREATE TABLE samples (ts REAL NOT NULL, host TEXT NOT NULL, metric TEXT NOT NULL, value REAL);
@@ -91,6 +100,9 @@ MIGRATIONS = [  # MIGRATIONS[n] takes the database from version n to n + 1; neve
     CREATE INDEX run_samples_run_t ON run_samples (run_id, t);
     CREATE TABLE charge_marks (ts REAL NOT NULL, kind TEXT NOT NULL, percent REAL NOT NULL, note TEXT);
     CREATE TABLE bank_fits (ts REAL NOT NULL, scale REAL NOT NULL, pairs INTEGER NOT NULL);
+    """,
+    """
+    ALTER TABLE charge_marks ADD COLUMN battery TEXT NOT NULL DEFAULT 'bank';
     """,
 ]
 TABLES = {"samples": "ts", "events": "ts", "runs": "started", "run_samples": None, "charge_marks": "ts",
@@ -301,7 +313,7 @@ def parse_jetson(status):
 
 
 def motor_bus():
-    """The wheel motors' supply: nothing can read it yet (the power bank has no data link), so null. A sensor
+    """The wheel motors' supply: nothing can read it yet (the 21V tool battery has no data link), so null. A sensor
     plugs in here, e.g. an INA219 on the motor line over I2C: return its mV and mA (docs/telemetry.md)."""
     return {"motor_bus_mv": None, "motor_bus_ma": None}
 
@@ -348,7 +360,7 @@ def latest_command(logs_dir, tail=16384):
     return None
 
 
-# --- the power bank's estimated charge --------------------------------------------------------------------------
+# --- the power bank's estimated charge, and the motor battery's energy used ------------------------------------
 
 def pi_watts(cpu_pct):
     """Model watts drawn by the Pi and its USB devices at this CPU load (DEFAULT_CPU_PCT when unknown)."""
@@ -357,16 +369,19 @@ def pi_watts(cpu_pct):
 
 
 def motor_watts(v, w, wheels=None):
-    """Model watts the wheel motors draw for the command v (m/s), w (rad/s). Wheels that do not turn have
-    lost their power (the 2026-11-14 symptom), so they draw nothing."""
+    """Model watts the wheel motors draw (from the 21V battery) for the command v (m/s), w (rad/s). Wheels that
+    do not turn have lost their power (the 2026-11-14 symptom), so they draw nothing."""
     if wheels:
         return 0.0
     return MOTOR_W_AT_FULL * min(1.0, abs(v) / MOTOR_FULL_V + abs(w) / MOTOR_FULL_W)
 
 
-def mark_full(db, ts=None, note=None):
-    """The owner charged the bank to 100 %."""
-    db.execute("INSERT INTO charge_marks VALUES (?, 'full', 100.0, ?)", (time.time() if ts is None else ts, note))
+def mark_full(db, ts=None, note=None, battery="bank"):
+    """The owner charged a battery full: "bank" (the power bank, to 100 %) or "motor" (the 21V tool battery)."""
+    if battery not in BATTERIES:
+        raise ValueError("battery is one of %s" % ", ".join(BATTERIES))
+    db.execute("INSERT INTO charge_marks (ts, kind, percent, note, battery) VALUES (?, 'full', 100.0, ?, ?)",
+               (time.time() if ts is None else ts, note, battery))
     db.commit()
 
 
@@ -375,12 +390,13 @@ def add_reading(db, percent, ts=None, note=None):
     percent = _number(percent)
     if percent is None or not 0.0 <= percent <= 100.0:
         raise ValueError("a reading is a percent from 0 to 100")
-    db.execute("INSERT INTO charge_marks VALUES (?, 'reading', ?, ?)", (time.time() if ts is None else ts, percent, note))
+    db.execute("INSERT INTO charge_marks (ts, kind, percent, note, battery) VALUES (?, 'reading', ?, ?, 'bank')",
+               (time.time() if ts is None else ts, percent, note))
     db.commit()
 
 
 def _marks(db):
-    return db.execute("SELECT ts, kind, percent FROM charge_marks ORDER BY ts, rowid").fetchall()
+    return db.execute("SELECT ts, kind, percent FROM charge_marks WHERE battery = 'bank' ORDER BY ts, rowid").fetchall()
 
 
 def _scale(db):
@@ -388,17 +404,19 @@ def _scale(db):
     return 1.0 if row is None else row[0]
 
 
-def _usage(db, start, end):
-    """(model Wh drawn from the bank's cells, seconds on, seconds driving) in [start, end], unscaled. Each sample's
-    watts hold until the next sample, at most MAX_GAP_S."""
-    before = db.execute("SELECT max(ts) FROM samples WHERE metric = 'pi_est_w' AND ts < ?", (start,)).fetchone()[0]
-    rows = db.execute("SELECT ts, sum(value), max(CASE WHEN metric = 'motor_est_w' THEN value END) FROM samples"
-                      " WHERE metric IN ('pi_est_w', 'motor_est_w') AND ts >= ? AND ts <= ? GROUP BY ts ORDER BY ts",
-                      (start if before is None else before, end)).fetchall()
+def _usage(db, start, end, metric="pi_est_w", efficiency=BANK_EFFICIENCY):
+    """(model Wh of metric's watts / efficiency, seconds on, seconds driving) in [start, end], unscaled. The
+    default is the Wh drawn from the bank's cells by the Pi side (pi_est_w only: the motors are on the other
+    battery). Each sample's watts hold until the next sample, at most MAX_GAP_S; driving is motor_est_w > 0."""
+    before = db.execute("SELECT max(ts) FROM samples WHERE metric = ? AND ts < ?", (metric, start)).fetchone()[0]
+    rows = db.execute("SELECT ts, max(CASE WHEN metric = ? THEN value END),"
+                      " max(CASE WHEN metric = 'motor_est_w' THEN value END) FROM samples"
+                      " WHERE metric IN (?, 'motor_est_w') AND ts >= ? AND ts <= ? GROUP BY ts ORDER BY ts",
+                      (metric, metric, start if before is None else before, end)).fetchall()
     wh = on = driving = 0.0
     for (ts, watts, motor), following in zip(rows, [r[0] for r in rows[1:]] + [end]):
         seconds = max(0.0, min(following, ts + MAX_GAP_S, end) - max(ts, start))
-        wh += (watts or 0.0) * seconds / 3600.0 / BANK_EFFICIENCY
+        wh += (watts or 0.0) * seconds / 3600.0 / efficiency
         on += seconds
         if motor:
             driving += seconds
@@ -424,12 +442,30 @@ def estimate(db, now=None):
     percent = _percent(mark_percent, wh)
     warning = None
     if percent < WARN_PCT:
-        warning = ("about %.0f %% left (an estimate): the wheels may stop below ~15-20 %%, charge the power bank"
-                   % percent)
+        warning = ("เหลือประมาณ %.0f%% (ค่าประมาณ) ต่ำกว่า 30%% แล้ว ชาร์จ power bank ก่อน ถ้าแบตหมด Pi จะดับ"
+                   % percent)  # the bank feeds only the Pi
     return {"percent": percent, "low": _percent(mark_percent, wh * (1 + BAND)),
             "high": _percent(mark_percent, wh * (1 - BAND)), "wh_used": wh, "mark_ts": mark_ts, "mark_kind": kind,
             "mark_percent": mark_percent, "hours_on": on / 3600.0, "driving_min": driving / 60.0, "scale": scale,
             "warning": warning}
+
+
+def _motor_mark(db, now):
+    """ts of the last motor battery full mark at or before now, or None."""
+    return db.execute("SELECT max(ts) FROM charge_marks WHERE battery = 'motor' AND kind = 'full' AND ts <= ?",
+                      (now,)).fetchone()[0]
+
+
+def motor_usage(db, now=None):
+    """The 21V motor battery since its last full mark: {"since": that mark's ts or None, "wh_used": model Wh at
+    the motors from the motor_est_w samples (the DC-DC converter's loss not included), "drive_minutes": minutes
+    with motor_est_w > 0}. Energy, not percent: its capacity is unknown (MOTOR_BATTERY_WH)."""
+    now = time.time() if now is None else now
+    since = _motor_mark(db, now)
+    if since is None:
+        return {"since": None, "wh_used": None, "drive_minutes": None}
+    wh, _, driving = _usage(db, since, now, "motor_est_w", 1.0)
+    return {"since": since, "wh_used": wh, "drive_minutes": driving / 60.0}
 
 
 def fit_coefficients(db, now=None):
@@ -479,8 +515,9 @@ class Recorder:
         self.committed = self.pruned = self.imported = self.error_at = None
         self.throttled = None
         self.jetson = self.path = _UNSET
-        self.bank = None  # [mark ts, scale, mark percent, Wh used since the mark] while a mark exists
-        self.last = None  # (ts, watts) of the previous sample, for the energy since
+        self.bank = None  # [mark ts, scale, mark percent, Wh used since the mark] while a bank mark exists
+        self.motor = None  # [mark ts, motor Wh used since the mark] while a motor battery mark exists
+        self.last = None  # (ts, Pi-side watts, motor watts) of the previous sample, for the energy since
 
     def label(self, host):
         return HOST_NAMES.get(host, host)
@@ -573,9 +610,8 @@ class Recorder:
         return data
 
     def _bank(self, now, bank):
-        watts = bank["pi_est_w"] + bank["motor_est_w"]
-        marks = self.db.execute("SELECT ts, percent FROM charge_marks WHERE ts <= ? ORDER BY ts DESC, rowid DESC"
-                                " LIMIT 1", (now,)).fetchone()
+        marks = self.db.execute("SELECT ts, percent FROM charge_marks WHERE battery = 'bank' AND ts <= ?"
+                                " ORDER BY ts DESC, rowid DESC LIMIT 1", (now,)).fetchone()
         if marks is None:
             self.bank = None
         else:
@@ -588,7 +624,17 @@ class Recorder:
                 self.bank[3] += scale * self.last[1] * seconds / 3600.0 / BANK_EFFICIENCY
             bank["bank_est_wh_used"] = self.bank[3]
             bank["bank_est_pct"] = _percent(self.bank[2], self.bank[3])
-        self.last = (now, watts)
+        motor_mark = _motor_mark(self.db, now)
+        if motor_mark is None:
+            self.motor = None
+        else:
+            if self.motor is None or self.motor[0] != motor_mark:
+                self.flush()  # as for the bank: the samples so far must be in the database to count them
+                self.motor = [motor_mark, _usage(self.db, motor_mark, now, "motor_est_w", 1.0)[0]]
+            elif self.last is not None:
+                self.motor[1] += self.last[2] * max(0.0, min(now - self.last[0], MAX_GAP_S)) / 3600.0
+            bank["motor_est_wh_used"] = self.motor[1]
+        self.last = (now, bank["pi_est_w"], bank["motor_est_w"])
 
     def _events(self, now, data):
         bits = _number(data["pi"].get("pi_throttled"))
@@ -902,7 +948,8 @@ def main(argv=None):
     action.add_argument("--once", action="store_true", help="print one sample as JSON, write nothing")
     action.add_argument("--run", action="store_true", help="record until Ctrl+C")
     action.add_argument("--export", metavar="TABLE|METRIC,...", help="CSV of a table or of metrics")
-    action.add_argument("--charged", action="store_true", help="the power bank was just charged to 100 %%")
+    action.add_argument("--charged", nargs="?", const="bank", choices=BATTERIES,
+                        help="a battery was just charged full: bank (the power bank, the default) or motor (21V)")
     action.add_argument("--reading", type=float, metavar="PERCENT", help="the bank's display shows PERCENT")
     action.add_argument("--estimate", action="store_true", help="print the bank's estimated charge")
     action.add_argument("--fit", action="store_true", help="fit the energy model to the readings")
@@ -929,14 +976,15 @@ def main(argv=None):
             n = export_csv(db, what, None if args.since is None else when(args.since),
                            None if args.until is None else when(args.until), args.out)
             print("%d rows to %s" % (n, args.out))
-        elif args.charged:
-            mark_full(db)
-            print("marked: charged to 100 %")
+        elif args.charged is not None:
+            mark_full(db, battery=args.charged)
+            print("marked: the power bank charged to 100 %" if args.charged == "bank"
+                  else "marked: the 21V motor battery charged full (its energy counts from now)")
         elif args.reading is not None:
             add_reading(db, args.reading)
             print("marked: the display shows %g %%" % args.reading)
         elif args.estimate:
-            print(json.dumps(estimate(db), indent=1))
+            print(json.dumps(dict(estimate(db), motor=motor_usage(db)), indent=1))
         elif args.fit:
             print(json.dumps(fit_coefficients(db), indent=1))
     finally:

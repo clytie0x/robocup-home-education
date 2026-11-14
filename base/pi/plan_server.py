@@ -25,6 +25,7 @@ def answer(request):
     """The planner's answer to one request (a dict), as a dict."""
     world.ROBOT_RADIUS = request["robot_radius"]
     navigation.CLOSE_PLAN = request.get("close_plan", True)
+    navigation.TOWARD_UNREACHABLE = True  # no way to the operator: come as close as we can (body.py too)
     shapes = [KINDS[kind](*values) for kind, *values in request["shapes"]]
     t = time.perf_counter()
     path = navigation.plan_path(tuple(request["start"]), tuple(request["goal"]), shapes,

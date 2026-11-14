@@ -139,3 +139,40 @@ def test_a_tight_spot_far_along_the_path_does_not_refuse_it():
     assert path_clear(path, (0, 0), 0.0, shapes, OUTLINE_MARGIN) is None
     near = [Circle(c.x - 1.5, c.y, c.r) for c in shapes]  # the same gap at x = 1.0: checked
     assert path_clear(path, (0, 0), 0.0, near, OUTLINE_MARGIN) is not None
+
+
+def ring(centre, radius: float) -> list[Circle]:
+    """A closed ring of 0.05 m posts around `centre`: whatever stands inside cannot be reached."""
+    n = int(2 * math.pi * radius / 0.05) + 1
+    return [Circle(centre[0] + radius * math.cos(2 * math.pi * k / n), centre[1] + radius * math.sin(2 * math.pi * k / n), 0.05)
+            for k in range(n)]
+
+
+@pytest.fixture
+def toward_unreachable():
+    navigation.TOWARD_UNREACHABLE = True
+    yield
+    navigation.TOWARD_UNREACHABLE = False
+
+
+def test_an_unreachable_goal_has_no_path_by_default():
+    # the simulation's planner (and these settings' default) still answers None
+    assert plan_path((0, 0), (3, 0), ring((3, 0), 0.8), near_side=True, heading=0.0) is None
+
+
+def test_an_unreachable_goal_leads_to_the_nearest_reachable_spot(toward_unreachable):
+    # The real base (2026-11-15) stood still 2.5 m from its operator when no way led all the way:
+    # now it drives to the free cell nearest the goal that it can reach, with the wide berth, and waits.
+    shapes = ring((3, 0), 0.8)
+    path = plan_path((0, 0), (3, 0), shapes, near_side=True, heading=0.0)
+    assert path is not None
+    assert 1.15 < math.dist(path[-1], (3, 0)) < 1.4  # just outside the ring's berth (0.8 + 0.05 + 0.39 m)
+    assert min(s.clearance(p) for s in shapes for p in path) >= navigation.hmc_world.ROBOT_RADIUS + navigation.SAFETY - 1e-9
+    assert not navigation.LAST_PLAN_TIGHT  # the wide berth, not the close plan
+
+
+def test_no_creeping_once_as_close_as_it_can_get(toward_unreachable):
+    shapes = ring((3, 0), 0.8)
+    end = plan_path((0, 0), (3, 0), shapes, near_side=True, heading=0.0)[-1]
+    navigation._tight_skip = 0
+    assert plan_path(end, (3, 0), shapes, near_side=True, heading=0.0) is None  # stay: nothing nearer to go to

@@ -33,9 +33,22 @@ class SafetyTest(unittest.TestCase):
 
     def test_always_leaves_the_clearance_ahead_even_when_creeping(self):
         for v in (P["max_speed"], 0.04, 0.01):  # the robot's measured decel and stop_delay
-            edge = safety.FRONT + safety.braking_distance(v, P, margin=0.0) + safety.CLEARANCE
+            edge = safety.FRONT + safety.braking_distance(v, P, margin=0.0) + safety.clearance(P)
             self.assertTrue(safety.must_stop([(edge - 0.01, 0.0)], v, 0.0, P), v)
             self.assertFalse(safety.must_stop([(edge + 0.01, 0.0)], v, 0.0, P), v)
+
+    def test_the_clearance_comes_from_params_and_defaults_to_0_3(self):
+        v = P["max_speed"]
+        for clearance in (0.10, 0.30):
+            p = dict(P, stop_clearance=clearance)
+            edge = safety.FRONT + safety.braking_distance(v, p, margin=0.0) + clearance
+            self.assertTrue(safety.must_stop([(edge - 0.01, 0.0)], v, 0.0, p), clearance)
+            self.assertFalse(safety.must_stop([(edge + 0.01, 0.0)], v, 0.0, p), clearance)
+        p = {k: val for k, val in P.items() if k != "stop_clearance"}
+        self.assertEqual(safety.clearance(p), safety.CLEARANCE)
+
+    def test_the_clearance_is_never_below_5_cm(self):
+        self.assertEqual(safety.clearance(dict(P, stop_clearance=0.0)), safety.MIN_CLEARANCE)
 
     def test_the_operator_at_the_follow_gap_does_not_stop_the_robot_at_top_speed(self):
         # Fails if max_speed is raised before braking is measured again: the clearance would

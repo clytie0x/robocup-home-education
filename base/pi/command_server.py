@@ -1,7 +1,9 @@
 """The Jetson's commands for run_follow.py --remote: a TCP server on the Pi, JSON lines.
 
 One client at a time; a new connection replaces the old one, after the lines the old one already
-sent are read. Every line is one UTF-8 JSON object ending in "\\n". Client -> Pi: {"cmd": NAME},
+sent are read. Only a sender on the allow list (the Jetson's addresses) may connect: anyone else on
+the LAN could drive the robot, or keep the silence hold away with pings. Others are closed at once,
+never replace the client, and are logged once a minute per address. Every line is one UTF-8 JSON object ending in "\\n". Client -> Pi: {"cmd": NAME},
 NAME one of COMMANDS. Pi -> client: the status objects run_follow sends, and {"error": "..."} for a
 line that is not a command (it is ignored) or one longer than MAX_LINE (dropped whole).
 
@@ -16,15 +18,19 @@ import select
 import socket
 
 PORT = 5604
-COMMANDS = ("follow", "wait", "resume", "return", "stop", "ping")
+COMMANDS = ("follow", "wait", "resume", "return", "stop", "ping", "bag", "bag_again")  # bag: run_follow's BAG phase
 MAX_LINE = 4096  # bytes; a longer line is not a command
 MAX_READ = 16 * MAX_LINE  # bytes taken in one poll; the rest waits for the next cycle
 MAX_UNSENT = 65536  # bytes of status waiting for a client that does not read: drop that client
+LOOPBACK = ("127.0.0.1",)  # the allow list when none is given: this computer only
+REFUSED_LOG_EVERY = 60.0  # s between log lines for one refused address
 
 
 class CommandServer:
-    def __init__(self, host="0.0.0.0", port=PORT):
+    def __init__(self, host="0.0.0.0", port=PORT, allow=LOOPBACK):
         self.host, self.port = host, port
+        self.allow = tuple(allow)  # the addresses that may connect
+        self.refused = {}  # address -> cycle time of its last log line
         self.listener = self.client = None
         self.inbox = self.outbox = b""
         self.skipping = False  # the rest of a line cut at MAX_LINE: discarded up to its newline
@@ -43,7 +49,7 @@ class CommandServer:
         lines = []
         try:
             lines += self._lines()  # the current client first: a replaced client's last lines still count
-            lines += self._accept()
+            lines += self._accept(now)
             lines += self._lines()
         except Exception as error:  # a bug here must not stop the cycle (the handlers below catch the network)
             self._broken("poll failed: %s: %s" % (type(error).__name__, error))
@@ -72,8 +78,8 @@ class CommandServer:
         if self.listener is not None:
             self.listener.close()
 
-    def _accept(self):
-        """Take the waiting connections. Returns the lines of each client replaced on the way."""
+    def _accept(self, now):
+        """Take the waiting connections from the allow list. Returns the lines of each client replaced on the way."""
         lines = []
         while True:
             try:
@@ -84,6 +90,13 @@ class CommandServer:
             except Exception as error:  # gone again before accept (BlockingIOError, ECONNABORTED)
                 self.events.append("accept failed: %s: %s" % (type(error).__name__, error))
                 break
+            if address[0] not in self.allow:
+                with contextlib.suppress(Exception):
+                    client.close()
+                if now - self.refused.get(address[0], -REFUSED_LOG_EVERY) >= REFUSED_LOG_EVERY:
+                    self.refused[address[0]] = now
+                    self.events.append("refused %s: not on the allow list" % address[0])
+                continue
             if self.client is not None:
                 lines += self._lines()
                 if self.client is not None:

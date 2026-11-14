@@ -9,6 +9,7 @@ with normal certificate checks.
 |---|---|---|---|---|
 | yolo11n.pt | https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt | 5613764 | AGPL-3.0 (Ultralytics) | 0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1 |
 | yolov8n.pt | https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt | 6549796 | AGPL-3.0 (Ultralytics) | f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36 |
+| yolo11n-pose.pt (2026-11-15, owner approved, for pointing) | https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-pose.pt | 6255593 | AGPL-3.0 (Ultralytics) | 869e83fcdffdc7371fa4e34cd8e51c838cc729571d1635e5141e3075e9319dc0 |
 | yolox_nano.pth | https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.pth | 7694953 | Apache-2.0 (Megvii) | cd28f55fbbc1829f99d9ac9b38a16d259a22889739c8728ea877610201feff7b |
 | yolox_tiny.pth | https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.pth | 40755013 | Apache-2.0 (Megvii) | 9de513de589ac98bb92d3bca53b5af7b9acfa9b0bacb831f7999d0f7afaee8f0 |
 | osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth | https://huggingface.co/kaiyangzhou/osnet/resolve/a5c5cc037c24235cda3b21085b93ad77c9616224/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth | 9336983 | MIT (torchreid, Kaiyang Zhou) | cf55163d78fc44c62c82f85ab62d39f10438679b5abe8c698ae08cfa84aa6e18 |
@@ -22,6 +23,15 @@ Model code used only for the export (not shipped): YOLOX source at tag 0.1.1rc0 
 e1052df71842031413f6030723c3607b839c80ce, https://github.com/Megvii-BaseDetection/YOLOX, Apache-2.0) and
 `torchreid/models/osnet.py` at commit f8cd150fdf77e8d9e1ed143b7f308c2c609ded50 of
 https://github.com/KaiyangZhou/deep-person-reid (MIT).
+
+## Pose model export, 2026-11-15
+
+Laptop scratch venv on Python 3.13 with the system torch 2.13.0+cpu, `ultralytics 8.4.213`, `onnx 1.23.2`,
+`onnxslim` (venv deleted after the export): `YOLO("yolo11n-pose.pt").export(format="onnx", imgsz=(256, 320),
+opset=17, simplify=True, dynamic=False)` gives `yolo11n-pose_256x320.onnx` (11638357 bytes, SHA-256
+97d290f0e0b5180866614b0f2804d73dbbf6834576b89fb188e4ac677dfa070b), input `images` 1x3x256x320, output `output0`
+1x56x1680 (4 box, 1 score, 17 COCO keypoints x (x, y, visibility)). Engine on the Jetson:
+`/usr/bin/trtexec --onnx=yolo11n-pose_256x320.onnx --saveEngine=yolo11n-pose_256x320.engine --fp16 --skipInference`.
 
 ## Export to ONNX (laptop, scratch venv, Python 3.12)
 

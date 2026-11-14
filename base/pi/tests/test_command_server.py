@@ -172,6 +172,41 @@ class Server(unittest.TestCase):
         self.assertIsNone(self.server.client)
         self.assertTrue(any("send broke" in e for e in self.server.events))
 
+    def test_a_sender_not_on_the_allow_list_is_closed_at_once_and_logged_once_a_minute(self):
+        self.server.allow = ("10.9.9.9",)  # the Jetson only: this test's 127.0.0.1 is someone else on the LAN
+        stranger = self.client()
+        stranger.cmd("follow")
+        self.assertEqual(self.server.poll(0.0), [])
+        self.assertIsNone(self.server.client)
+        stranger.read()
+        self.assertTrue(stranger.closed)
+        self.assertEqual([e for e in self.server.events if "refused" in e], ["refused 127.0.0.1: not on the allow list"])
+        again = self.client()
+        again.cmd("follow")
+        self.assertEqual(self.server.poll(30.0), [])
+        self.assertEqual(len([e for e in self.server.events if "refused" in e]), 1)  # once a minute per address
+        third = self.client()
+        third.cmd("ping")
+        self.assertEqual(self.server.poll(61.0), [])
+        self.assertEqual(len([e for e in self.server.events if "refused" in e]), 2)
+
+    def test_a_refused_sender_does_not_replace_the_jetson(self):
+        jetson = self.client()
+        jetson.cmd("ping")
+        self.assertEqual(self.server.poll(0.0), ["ping"])
+        kept = self.server.client
+        self.server.allow = ("10.9.9.9",)  # whoever connects now is not the Jetson
+        stranger = self.client()
+        stranger.cmd("ping")  # its pings must not keep the silence hold away
+        self.assertEqual(self.server.poll(0.1), [])
+        self.assertIs(self.server.client, kept)
+        self.assertEqual(self.server.heard, 0.0)
+        jetson.cmd("wait")
+        self.assertEqual(self.server.poll(0.2), ["wait"])
+
+    def test_by_default_only_this_computer_may_send(self):
+        self.assertEqual(CommandServer().allow, ("127.0.0.1",))
+
     def test_silent_counts_from_the_first_poll_and_the_last_command(self):
         self.assertEqual(self.server.silent(5.0), 0.0)  # never polled
         self.server.poll(1.0)

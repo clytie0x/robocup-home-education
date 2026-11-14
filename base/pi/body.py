@@ -6,6 +6,17 @@ from hmc import navigation, world
 HEADING_DEADBAND_DEG = 4.0  # standing still, no turn for less: it turned back and forth 12 times in one run
 
 
+class _Robot(world.Robot):
+    """hmc's Robot that keeps the heading error its last turn went for (cable.Cable: does the long way round
+    still get there?). Every turn of the brain, on the spot or while driving, goes through _turn."""
+
+    turn_error = None
+
+    def _turn(self, error, dt):
+        self.turn_error = error
+        return super()._turn(error, dt)
+
+
 class Body:
     def __init__(self, p):
         self.p = p
@@ -17,12 +28,16 @@ class Body:
         world.STOP_DELAY = p["stop_delay"]
         world.HEADING_DEADBAND = math.radians(HEADING_DEADBAND_DEG)
         navigation.CLOSE_PLAN = True  # plan through gaps the 0.40 m body fits, checked with its outline
+        # No way to the goal: drive to the reachable spot nearest it and wait, not stand still far away
+        # (2026-11-15: 2.5 m from the operator over open floor). plan_server.py sets it as well.
+        navigation.TOWARD_UNREACHABLE = True
         navigation.REPLAN_ON_NEW_SHAPES = False  # the Pi cannot plan every cycle (0.12 s a plan)
-        self.robot = world.Robot(max_speed=p["max_speed"], max_turn_rate=p["max_turn_rate"])
+        self.robot = _Robot(max_speed=p["max_speed"], max_turn_rate=p["max_turn_rate"])
 
     def sync(self, pose):
         """Take the measured pose (x, y, heading). Speed stays: the brain ramps from it."""
         self.robot.x, self.robot.y, self.robot.heading = pose
+        self.robot.turn_error = None  # this cycle's brain step sets it again when it turns
 
     def command(self):
         """The wheel command (v, w) after the brain's step."""

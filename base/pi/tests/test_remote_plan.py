@@ -1,8 +1,10 @@
 import json
+import math
 import socket
 import threading
 import time
 import unittest
+from pathlib import Path
 
 import plan_server
 import remote_plan
@@ -27,6 +29,24 @@ class PlanServerTest(unittest.TestCase):
         self.assertEqual(got["id"], 7)
         self.assertIsNotNone(got["path"])
         self.assertGreater(got["path"][-1][0], 2.5)
+
+    def test_answer_drives_toward_an_operator_it_cannot_reach(self):
+        # Recorded 2026-11-15: the operator 2.5 m ahead, open floor between (photo), but stray
+        # remembered circles closed every way; the planner answered no path and the robot stood still.
+        recorded = json.loads((Path(__file__).parent / "fixtures" / "no-path-2026-11-15.json").read_text())
+        request = dict(recorded, id=3, close_plan=True)
+        shapes = [Circle(*values) for _, *values in recorded["shapes"]]
+        start, goal = recorded["start"], recorded["goal"]
+        path = plan_server.answer(request)["path"]
+        self.assertIsNotNone(path)  # before the fix: None, so the robot stood 2.5 m away
+        self.assertLess(math.dist(path[-1], goal), math.dist(start, goal) - 0.3)  # it comes closer (0.43 m here)
+        length = sum(math.dist(a, b) for a, b in zip([start] + path, path))
+        self.assertLessEqual(length, math.dist(start, goal) + 0.1)  # toward the operator, no detour out of view
+        # every waypoint keeps the wide berth (circle plus SAFETY) from every shape, or near the start
+        # (it stands inside that berth) no less than it has now
+        here = min(s.clearance(tuple(start)) for s in shapes)
+        for point in path:
+            self.assertGreaterEqual(min(s.clearance(tuple(point)) for s in shapes), min(here, 0.29 + 0.1) - 1e-9)
 
     def test_only_the_newest_waiting_request_counts(self):
         self.assertEqual(plan_server.newest([b'{"id": 1}', b'{"id": 2}'])["id"], 2)

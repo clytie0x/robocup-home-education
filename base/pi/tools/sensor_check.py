@@ -314,7 +314,7 @@ def _write(out_dir, name, result):
     print("wrote", path)
 
 
-def check_floor(p, out_dir, count=30):
+def check_floor(p, out_dir, count=30, min_range=1.6):
     cam = camera.Camera()
     cam.start()
     try:
@@ -324,7 +324,7 @@ def check_floor(p, out_dir, count=30):
     fits, reasons = [], collections.Counter()
     for frame in frames:
         try:
-            fits.append(fit_floor(frame.depth, p["camera_hfov_deg"]))
+            fits.append(fit_floor(frame.depth, p["camera_hfov_deg"], min_range=min_range))
         except ValueError as error:
             reasons[str(error).split(":")[0].split(" (")[0]] += 1
     misses = len(frames) - len(fits)
@@ -345,7 +345,7 @@ def check_floor(p, out_dir, count=30):
     for warning in warnings:
         print("WARNING:", warning, "- do not trust this result")
     _write(out_dir, "floor", {
-        "method": "RANSAC floor plane, lower half of the depth image, depth beyond 1.6 m",
+        "method": "RANSAC floor plane, lower half of the depth image, depth beyond %.1f m" % min_range,
         "date": time.strftime("%Y-%m-%d %H:%M:%S"),
         "frames": len(frames), "misses": misses,
         "camera_height": statistics.median(heights), "camera_height_range": [min(heights), max(heights)],
@@ -498,11 +498,13 @@ def main():
                         help="--object: lens height (default params camera_height, else 0.07)")
     parser.add_argument("--offset-left", type=float, default=0.0, metavar="M",
                         help="--yaw: the bottle is M metres to the robot's left (negative = right), at 1.5 m")
+    parser.add_argument("--min-range", type=float, default=1.6, metavar="M",
+                        help="--floor: use floor pixels beyond M m (at 12 deg up the floor from about 0.6 m is in view)")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="folder for the JSON result")
     args = parser.parse_args()
     p = params.load()
     if args.floor:
-        check_floor(p, args.out)
+        check_floor(p, args.out, min_range=args.min_range)
     elif args.wall:
         check_wall(p, args.out)
     elif args.object is not None:

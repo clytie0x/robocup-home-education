@@ -49,6 +49,17 @@
     <div class="card"><div class="label">Cycle time</div><div class="value" id="cycle">–</div></div>
     <div class="card"><div class="label">Stopped by</div><div class="value" id="stop">–</div></div>
     <div class="card"><div class="label">Planner</div><div class="value" id="planner">–</div></div>
+    <div class="card"><div class="label">Phase</div><div class="value" id="phase">–</div></div>
+    <div class="card"><div class="label">Wheels</div><div class="value" id="wheels">–</div></div>
+    <div class="card"><div class="label">Cable turn</div><div class="value" id="cable">–</div></div>
+  </div>
+
+  <h2>Task</h2>
+  <div class="controls">
+    <button id="follow">Follow</button>
+    <button id="wait">Wait</button>
+    <button id="resume">Resume</button>
+    <button id="goback">Go back</button>
   </div>
 
   <h2>Switches</h2>
@@ -74,11 +85,19 @@ function show(id, text, cls) { const el = $(id); el.textContent = text; el.class
 
 async function send(change) {
   try {
-    const r = await fetch("/control", {method: "POST", headers: {"Content-Type": "application/json"},
+    const r = await fetch("/control", {method: "POST", headers: {"Content-Type": "application/json", "X-HMC-Console": "1"},
                                        body: JSON.stringify(change)});
     const got = await r.json();
     $("err").textContent = got.error || "";
     if (got.controls) paint(got.controls);
+  } catch (e) { $("err").textContent = "could not reach the robot"; }
+}
+
+async function command(name) {
+  try {
+    const r = await fetch("/command", {method: "POST", headers: {"Content-Type": "application/json", "X-HMC-Console": "1"},
+                                       body: JSON.stringify({command: name})});
+    $("err").textContent = (await r.json()).error || "";
   } catch (e) { $("err").textContent = "could not reach the robot"; }
 }
 
@@ -93,12 +112,13 @@ function paint(c) {
   $("speed").max = c.top_speed;
   if (document.activeElement !== $("speed")) $("speed").value = c.max_speed;
   $("speedv").textContent = c.max_speed.toFixed(2) + " m/s";
-  for (const id of ["pause", "search", "close_plan", "end", "speed"]) $(id).disabled = c.end;
+  for (const id of ["pause", "search", "close_plan", "end", "speed", "follow", "wait", "resume", "goback"]) $(id).disabled = c.end;
 }
 
 async function poll() {
   try {
-    const s = await (await fetch("/status")).json();
+    // a heartbeat only while this tab is in view: a page in a pocket must not keep the task led
+    const s = await (await fetch(document.visibilityState === "visible" ? "/status?heartbeat=1" : "/status")).json();
     paint(s.controls);
     const r = s.record, run = s.run;
     $("run").textContent = (run.drive ? "DRIVING" : "dry run") + " · up " + s.uptime.toFixed(0) + " s of " + run.seconds + " s";
@@ -112,6 +132,10 @@ async function poll() {
       show("stop", r.stop || "–", r.stop ? "warn" : "");
       const p = r.planner || {};
       show("planner", (p.remote ? "remote " : "") + (p.local ? "local" : "") || "–");
+      show("phase", r.phase || "–");
+      show("wheels", r.wheels || (run.drive && (r.v || r.w) ? "turning" : "–"), r.wheels ? "bad" : "");
+      show("cable", r.cable_deg == null ? "–" : (r.cable_deg > 0 ? "+" : "") + r.cable_deg.toFixed(0) + "°" + (r.cable ? " · " + r.cable : ""),
+           r.cable_deg == null ? "" : Math.abs(r.cable_deg) >= 150 ? "bad" : Math.abs(r.cable_deg) >= 90 ? "warn" : "good");
     }
     $("err").textContent = $("err").textContent === "robot not answering" ? "" : $("err").textContent;
   } catch (e) { $("err").textContent = "robot not answering"; }
@@ -122,6 +146,10 @@ $("search").onclick = () => send({search: !controls.search});
 $("close_plan").onclick = () => send({close_plan: !controls.close_plan});
 $("speed").onchange = () => send({max_speed: parseFloat($("speed").value)});
 $("end").onclick = () => { if (confirm("Stop the wheels and end this run?")) send({end: true}); };
+$("follow").onclick = () => command("follow");
+$("wait").onclick = () => command("wait");
+$("resume").onclick = () => command("resume");
+$("goback").onclick = () => command("return");
 poll();
 setInterval(poll, 500);
 </script>

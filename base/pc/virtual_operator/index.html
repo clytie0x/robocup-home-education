@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>คนเสมือน</title>
+<style>
+/* Swiss minimal as the robot console: white, black rules, no rounded corners. Red only for STOP, faults
+   and the person the robot follows. */
+:root {
+  --bg: #fff; --ink: #000; --ink2: #5c5c5c; --ink3: #8f8f8f; --line2: #e2e2e2; --red: #e3120b;
+  --font: "Noto Sans Thai", "Leelawadee UI", "Sukhumvit Set", Tahoma, sans-serif;
+  --mono: ui-monospace, Consolas, "SF Mono", Menlo, monospace;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.5 var(--font); display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px; overflow: hidden; }
+button, input { font: inherit; color: inherit; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+#view { position: relative; min-width: 0; min-height: 0; border-right: 1px solid var(--ink); }
+#view canvas { display: block; width: 100%; height: 100%; }
+#hud { position: absolute; left: 12px; top: 10px; font-size: 12px; pointer-events: none; }
+#hud b { font-weight: 700; }
+#bubble { position: absolute; transform: translate(-50%, -100%); background: #fff; border: 1.5px solid var(--ink);
+  padding: 2px 8px; font-family: var(--mono); font-weight: 700; pointer-events: none; white-space: nowrap; }
+#hint { position: absolute; left: 12px; bottom: 10px; font-size: 12px; color: var(--ink2); pointer-events: none; }
+#nolib { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px;
+  text-align: center; color: var(--ink2); }
+aside { overflow-y: auto; padding: 0 16px 24px; min-width: 0; }
+h1 { font-size: 18px; margin: 14px 0 2px; letter-spacing: -0.01em; }
+.sub { color: var(--ink2); font-size: 12px; margin-bottom: 10px; }
+.panel { border-top: 1px solid var(--ink); padding: 8px 0 12px; }
+.ph { font-weight: 700; font-size: 12px; letter-spacing: 0.04em; display: flex; justify-content: space-between;
+  margin-bottom: 6px; }
+.ph span { font-weight: 400; color: var(--ink2); letter-spacing: 0; }
+.row { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px; padding: 4px 0;
+  border-bottom: 1px solid var(--line2); font-size: 13px; }
+.row:last-child { border-bottom: 0; }
+.row span:first-child { color: var(--ink2); }
+.row .bad { color: var(--red); font-weight: 700; }
+.btn { appearance: none; min-height: 40px; padding: 0 12px; border: 1.5px solid var(--ink); border-radius: 0;
+  background: #fff; font-weight: 600; cursor: pointer; }
+.btn:hover { background: #f3f3f3; }
+.btn.pri { background: var(--ink); color: #fff; }
+.btn.stop { background: var(--red); border-color: var(--red); color: #fff; }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; border: 1.5px solid var(--ink); margin-bottom: 6px; }
+.seg button { appearance: none; border: 0; border-right: 1px solid var(--line2); border-radius: 0; background: #fff;
+  min-height: 36px; cursor: pointer; font-weight: 600; color: var(--ink2); }
+.seg button:last-child { border-right: 0; }
+.seg button.on { background: var(--ink); color: #fff; }
+input[type=text], input[type=password], input[type=number] { height: 38px; border: 1.5px solid var(--ink);
+  border-radius: 0; padding: 0 8px; min-width: 0; width: 100%; background: #fff; font-family: var(--mono); }
+input:focus { outline: 2px solid var(--ink); outline-offset: -2px; }
+.inline { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; margin-bottom: 6px; }
+label { display: block; font-size: 12px; font-weight: 700; color: var(--ink2); margin: 6px 0 4px; }
+.note { font-size: 12px; color: var(--ink2); margin: 6px 0 0; }
+.msg { font-size: 13px; min-height: 20px; margin-top: 6px; }
+.msg.bad { color: var(--red); font-weight: 700; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { text-align: left; padding: 3px 4px 3px 0; border-bottom: 1px solid var(--line2); vertical-align: top; }
+th { color: var(--ink2); font-weight: 600; }
+.stopbar { position: sticky; top: 0; background: #fff; padding: 10px 0 8px; z-index: 2; }
+.stopbar .btn { width: 100%; min-height: 48px; font-size: 16px; }
+@media (max-width: 800px) {
+  body { grid-template-columns: minmax(0, 1fr); grid-template-rows: 55vh auto; overflow: auto; height: auto; }
+  #view { border-right: 0; border-bottom: 1px solid var(--ink); height: 55vh; }
+  aside { overflow: visible; }
+}
+</style>
+<script type="importmap">
+{"imports": {"three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+             "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"}}
+</script>
+</head>
+<body>
+<div id="view">
+  <div id="nolib" hidden>โหลด three.js จาก unpkg.com ไม่ได้ ต่ออินเทอร์เน็ตแล้วเปิดหน้านี้ใหม่</div>
+  <div id="hud"></div>
+  <div id="bubble" hidden></div>
+  <div id="hint">คลิกพื้นเพื่อให้คนเดินไป ลากเพื่อหมุนมุมมอง</div>
+</div>
+<aside>
+  <div class="stopbar"><button class="btn stop" id="btn-stop">หยุด</button></div>
+  <h1>คนเสมือน</h1>
+  <div class="sub">หุ่นจริงตามคน 3D ในห้องจริง กล้องจริงไม่ใช้หาคน</div>
+
+  <div class="panel">
+    <div class="ph">ควบคุมงาน<span id="conn">-</span></div>
+    <div class="seg" id="seg-control"><button data-v="ssh">ssh ไป Pi ไม่ต้องใช้ PIN</button><button data-v="console">คอนโซล ใช้ PIN</button></div>
+    <div class="note" id="ssh-note"></div>
+    <label for="console-url">คอนโซล</label>
+    <div class="inline"><input type="text" id="console-url" spellcheck="false"><button class="btn" id="btn-url">ใช้</button></div>
+    <div class="grid2"><button class="btn" data-url="0">Wi-Fi แล็บ</button><button class="btn" data-url="1">Tailscale</button></div>
+    <label for="pin">PIN ของคอนโซล (เก็บในหน่วยความจำของแอปเท่านั้น)</label>
+    <div class="inline"><input type="password" id="pin" autocomplete="off"><button class="btn" id="btn-pin">ใส่</button></div>
+  </div>
+
+  <div class="panel">
+    <div class="ph">งาน<span id="run-label">-</span></div>
+    <div class="seg" id="seg-mode"><button data-v="dry" class="on">ทดลอง ล้อไม่หมุน</button><button data-v="drive">ขับจริง</button></div>
+    <div class="seg" id="seg-speed"><button data-v="0.08" class="on">0.08 m/s</button><button data-v="0.12">0.12 m/s</button></div>
+    <div class="seg" id="seg-min"><button data-v="5">5 นาที</button><button data-v="10" class="on">10 นาที</button><button data-v="20">20 นาที</button></div>
+    <button class="btn pri" id="btn-run" style="width:100%">เริ่มงานคนเสมือน</button>
+    <div class="msg" id="run-msg"></div>
+  </div>
+
+  <div class="panel">
+    <div class="ph">หุ่น</div>
+    <div id="robot-rows"></div>
+  </div>
+
+  <div class="panel">
+    <div class="ph">คน<span id="person-pos">-</span></div>
+    <label for="speed">ความเร็วเดิน m/s (ค่ามัธยฐานจาก log จริง 0.24)</label>
+    <div class="inline"><input type="number" id="speed" min="0.05" max="1.5" step="0.01"><button class="btn" id="btn-speed">ตั้ง</button></div>
+    <div class="grid4" style="margin:6px 0">
+      <button class="btn" data-say="follow">follow</button><button class="btn" data-say="stop">stop</button>
+      <button class="btn" data-say="done">done</button><button class="btn" data-say="back">back</button>
+    </div>
+    <button class="btn" data-say="bag" style="width:100%;margin-bottom:6px">bag (หุ่นหาถุงที่ชี้แล้วเข้าไปหา)</button>
+    <button class="btn" id="btn-place" style="width:100%;margin-bottom:6px">วางคนหน้าหุ่น 1 m</button>
+    <div class="grid2"><button class="btn" id="btn-point-bag">ชี้ถุง</button><button class="btn" id="btn-point-click">ชี้จุดที่คลิก</button></div>
+    <div class="grid2" style="margin-top:6px"><button class="btn" id="btn-bag-place">วางถุงที่คลิก</button><button class="btn" id="btn-bag-clear">ล้างถุง</button></div>
+    <div class="note" id="point-note"></div>
+  </div>
+
+  <div class="panel">
+    <div class="ph">รอบอัตโนมัติ<span id="auto-step">off</span></div>
+    <button class="btn pri" id="btn-auto" style="width:100%">เริ่มรอบอัตโนมัติ</button>
+    <div class="msg" id="auto-msg"></div>
+    <p class="note">ยืนหน้าหุ่น 1 m จนล็อก พูด follow เดินไปจุดสุ่ม 2 ถึง 4 m พูด stop เมื่อหุ่นถึงใน 1.2 m รอ 5 วินาที พูด back
+      รอหุ่นกลับเสร็จ แล้วเริ่มรอบใหม่ หยุดเองเมื่อคอนโซลแจ้งล้อหรือ link เสีย งานจบเอง หุ่นชิดของใน 0.05 m หรือสายไฟบิดเกิน 150 องศา</p>
+  </div>
+
+  <div class="panel">
+    <div class="ph">รอบที่ผ่านมา<span>episodes.csv</span></div>
+    <table><thead><tr><th>เวลา</th><th>ถึง s</th><th>ใกล้ m</th><th>ค้าง s</th><th>ผล</th></tr></thead><tbody id="episodes"></tbody></table>
+  </div>
+</aside>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fixed = (v, n) => (v == null || Number.isNaN(v) ? "-" : Number(v).toFixed(n));
+let view = null, mapVersion = -1, three = null, pointNext = false, bagNext = false;
+const choice = { drive: false, speed: 0.08, minutes: 10 };
+
+async function post(url, body) {
+  try {
+    const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "X-VO-App": "1" },
+      body: JSON.stringify(body || {}) });
+    return await r.json();
+  } catch (e) { return { error: "แอปไม่ตอบ" }; }
+}
+function say(el, text, bad) { el.textContent = text || ""; el.className = "msg" + (bad ? " bad" : ""); }
+
+// ------------------------------------------------------------ the 3D view
+async function build() {
+  let THREE, OrbitControls;
+  try {
+    THREE = await import("three");
+    ({ OrbitControls } = await import("three/addons/controls/OrbitControls.js"));
+  } catch (e) { $("nolib").hidden = false; return null; }
+  const host = $("view");
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  host.prepend(renderer.domElement);
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xffffff);
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 100);
+  camera.position.set(-3.5, 5.5, 3.5);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 0, 0);
+  controls.maxPolarAngle = Math.PI * 0.49;
+  scene.add(new THREE.HemisphereLight(0xffffff, 0xcccccc, 2.2));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+  sun.position.set(3, 8, 2);
+  scene.add(sun);
+  const grid = new THREE.GridHelper(20, 40, 0xbdbdbd, 0xeeeeee);
+  scene.add(grid);
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshBasicMaterial({ visible: false }));
+  floor.rotation.x = -Math.PI / 2;
+  scene.add(floor);
+
+  // the room: one low wall block per occupied map cell
+  const wallGeo = new THREE.BoxGeometry(1, 0.3, 1);
+  const wallMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
+  let walls = null;
+  // the newest scan points
+  const scanGeo = new THREE.BufferGeometry();
+  const scanPts = new THREE.Points(scanGeo, new THREE.PointsMaterial({ color: 0x000000, size: 0.035 }));
+  scene.add(scanPts);
+  // the robot: a 0.40 m box, its heading, the camera's 58.6 degree view
+  const robot = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.24, 0.4), new THREE.MeshLambertMaterial({ color: 0xf2f2f2 }));
+  body.position.y = 0.12;
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(body.geometry), new THREE.LineBasicMaterial({ color: 0x000000 }));
+  edges.position.copy(body.position);
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.16, 16), new THREE.MeshLambertMaterial({ color: 0x000000 }));
+  nose.rotation.z = -Math.PI / 2;
+  nose.position.set(0.28, 0.12, 0);
+  const half = (58.59 / 2) * Math.PI / 180, reach = 3.0;
+  const fov = new THREE.Line(new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(reach * Math.cos(half), 0.01, -reach * Math.sin(half)), new THREE.Vector3(0.2, 0.01, 0),
+    new THREE.Vector3(reach * Math.cos(half), 0.01, reach * Math.sin(half))]), new THREE.LineBasicMaterial({ color: 0x8f8f8f }));
+  robot.add(body, edges, nose, fov);
+  scene.add(robot);
+  // the person: capsule body, head, two legs that swing
+  const red = new THREE.MeshLambertMaterial({ color: 0xe3120b });
+  const dark = new THREE.MeshLambertMaterial({ color: 0x333333 });
+  const person = new THREE.Group();
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.17, 0.45, 6, 16), red);
+  torso.position.y = 1.15;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 14), new THREE.MeshLambertMaterial({ color: 0xf0d5c0 }));
+  head.position.y = 1.62;
+  const legs = [0.09, -0.09].map((side) => {
+    const hip = new THREE.Group();
+    hip.position.set(0, 0.85, side);
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.055, 0.85, 12), dark);
+    leg.position.y = -0.425;
+    hip.add(leg);
+    person.add(hip);
+    return hip;
+  });
+  person.add(torso, head);
+  scene.add(person);
+  // the walk and its goal
+  const pathLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xe3120b }));
+  scene.add(pathLine);
+  const goal = new THREE.Mesh(new THREE.RingGeometry(0.12, 0.17, 32), new THREE.MeshBasicMaterial({ color: 0xe3120b, side: THREE.DoubleSide }));
+  goal.rotation.x = -Math.PI / 2;
+  goal.position.y = 0.01;
+  scene.add(goal);
+  const pointLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color: 0xe3120b, dashSize: 0.08, gapSize: 0.05 }));
+  scene.add(pointLine);
+  const spot = new THREE.Mesh(new THREE.CircleGeometry(0.1, 24), new THREE.MeshBasicMaterial({ color: 0xe3120b, side: THREE.DoubleSide }));
+  spot.rotation.x = -Math.PI / 2;
+  spot.position.y = 0.012;
+  scene.add(spot);
+  // the virtual bags (what the robot's LiDAR gets: 0.065 m circles), and the bag the robot chose
+  const bagMat = new THREE.MeshLambertMaterial({ color: 0xb07a3a });
+  const bagMeshes = [];
+  const chosen = new THREE.Mesh(new THREE.RingGeometry(0.14, 0.19, 32), new THREE.MeshBasicMaterial({ color: 0x0a7d2c, side: THREE.DoubleSide }));
+  chosen.rotation.x = -Math.PI / 2;
+  chosen.position.y = 0.013;
+  scene.add(chosen);
+
+  function resize() {
+    const w = host.clientWidth, h = host.clientHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / Math.max(1, h);
+    camera.updateProjectionMatrix();
+  }
+  new ResizeObserver(resize).observe(host);
+  resize();
+
+  // a click (not a drag) on the floor: walk there
+  const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+  let down = null;
+  renderer.domElement.addEventListener("pointerdown", (e) => { down = [e.clientX, e.clientY]; });
+  renderer.domElement.addEventListener("pointerup", async (e) => {
+    if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 5) return;
+    const r = renderer.domElement.getBoundingClientRect();
+    mouse.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(mouse, camera);
+    const hit = ray.intersectObject(floor)[0];
+    if (!hit) return;
+    const at = { x: hit.point.x, y: -hit.point.z }; // three (x, -z) is the robot's (x, y)
+    if (bagNext) {
+      bagNext = false;
+      const res = await post("/api/bags", at);
+      say($("point-note"), res.error || `วางถุงที่ ${fixed(at.x, 2)}, ${fixed(at.y, 2)}`, !!res.error);
+      return;
+    }
+    if (pointNext) {
+      pointNext = false;
+      const res = await post("/api/point", at);
+      say($("point-note"), res.error || `ชี้ที่ ${fixed(at.x, 2)}, ${fixed(at.y, 2)}`, !!res.error);
+      return;
+    }
+    const res = await post("/api/goal", at);
+    say($("auto-msg"), res.error || "", !!res.error);
+  });
+
+  let swing = 0, lastT = performance.now(), followed = false;
+  function frame(t) {
+    const dt = Math.min(0.1, (t - lastT) / 1000);
+    lastT = t;
+    if (view) {
+      const p = view.person, rb = view.robot;
+      person.position.set(p.x, 0, -p.y);
+      person.rotation.y = p.th;
+      swing = p.walking ? swing + dt * (p.speed / 0.8) * 2 * Math.PI : swing * 0.85;
+      const a = p.walking ? 0.35 * Math.sin(swing) : 0;
+      legs[0].rotation.z = a;
+      legs[1].rotation.z = -a;
+      if (rb.pose) {
+        robot.visible = true;
+        robot.position.set(rb.pose[0], 0, -rb.pose[1]);
+        robot.rotation.y = rb.pose[2];
+        if (!followed) { controls.target.set(rb.pose[0], 0, -rb.pose[1]); followed = true; }
+      } else robot.visible = false;
+      const pts = p.path.map(([x, y]) => new THREE.Vector3(x, 0.02, -y));
+      pathLine.geometry.dispose();
+      pathLine.geometry = new THREE.BufferGeometry().setFromPoints(pts.length > 1 ? pts : []);
+      spot.visible = pointLine.visible = !!p.pointing;
+      if (p.pointing) {
+        spot.position.set(p.pointing[0], 0.012, -p.pointing[1]);
+        pointLine.geometry.dispose();
+        pointLine.geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(p.x, 1.3, -p.y),
+          new THREE.Vector3(p.pointing[0], 0.02, -p.pointing[1])]);
+        pointLine.computeLineDistances();
+      }
+      goal.visible = !!p.goal;
+      if (p.goal) goal.position.set(p.goal[0], 0.01, -p.goal[1]);
+      while (bagMeshes.length < view.bags.length) {
+        const m = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.065, 0.3, 20), bagMat);
+        scene.add(m);
+        bagMeshes.push(m);
+      }
+      bagMeshes.forEach((m, i) => {
+        m.visible = i < view.bags.length;
+        if (m.visible) m.position.set(view.bags[i][0], 0.15, -view.bags[i][1]);
+      });
+      chosen.visible = !!rb.bag;
+      if (rb.bag) chosen.position.set(rb.bag[0], 0.013, -rb.bag[1]);
+      const word = p.speaking, bubble = $("bubble");
+      bubble.hidden = !word;
+      if (word) {
+        const v = new THREE.Vector3(p.x, 1.95, -p.y).project(camera);
+        bubble.style.left = `${(v.x + 1) / 2 * host.clientWidth}px`;
+        bubble.style.top = `${(1 - v.y) / 2 * host.clientHeight}px`;
+        bubble.textContent = `"${word}"`;
+      }
+    }
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  return {
+    scan(points) {
+      scanGeo.setAttribute("position", new THREE.Float32BufferAttribute(points.flatMap(([x, y]) => [x, 0.05, -y]), 3));
+      scanGeo.computeBoundingSphere();
+    },
+    map(m) {
+      if (walls) { scene.remove(walls); walls.dispose(); }
+      walls = new THREE.InstancedMesh(wallGeo, wallMat, Math.max(1, m.occupied.length));
+      const at = new THREE.Matrix4(), c = m.cell;
+      m.occupied.forEach(([i, j], k) => {
+        at.makeScale(c, 1, c).setPosition((i + 0.5) * c, 0.15, -(j + 0.5) * c);
+        walls.setMatrixAt(k, at);
+      });
+      walls.count = m.occupied.length;
+      scene.add(walls);
+    },
+  };
+}
+
+// ------------------------------------------------------------ the panel
+function rows(items) {
+  return items.map(([k, v, bad]) => `<div class="row"><span>${esc(k)}</span><span class="${bad ? "bad" : ""}">${esc(v)}</span></div>`).join("");
+}
+const PHASE = { idle: "รอ follow", follow: "กำลังตามคน", bag: "กำลังหาและเข้าหาถุง", return: "กำลังกลับ", done: "เสร็จแล้ว" };
+function bagText(t) {
+  if (!t) return "ยังไม่ได้หา";
+  const res = t.result;
+  if (res && res.ok) return `ถึงถุง ${fixed(res.x, 3)}, ${fixed(res.y, 3)} (${res.code})`;
+  if (res) return `ไม่สำเร็จ ${res.code}: ${res.message}`;
+  return (t.chosen ? `${t.chosen.say} · ` : "") + t.state;
+}
+
+function render() {
+  const v = view, r = v.robot, vr = r.virtual_report || {};
+  $("conn").textContent = v.config.control === "ssh" ? (v.connected ? `ssh ${v.config.ssh}` : "ssh ยังไม่ต่อ") :
+    (v.connected ? "คอนโซลต่อได้" : "คอนโซลต่อไม่ได้");
+  for (const b of $("seg-control").querySelectorAll("button")) b.classList.toggle("on", b.dataset.v === v.config.control);
+  $("ssh-note").textContent = v.config.control === "ssh" ? `เริ่มและหยุดงานทาง ssh ${v.config.ssh} (สำรอง Tailscale) อ่านสถานะผ่าน tunnel` : "";
+  $("conn").style.color = v.connected ? "" : "var(--red)";
+  if (document.activeElement !== $("console-url")) $("console-url").value = v.config.console;
+  if (document.activeElement !== $("speed") && !$("speed").value) $("speed").value = v.person.speed;
+  $("pin").placeholder = v.config.pin ? "ใส่แล้ว" : "ยังไม่ได้ใส่";
+  $("run-label").textContent = r.running ? (r.label || "งาน") : "ไม่มีงาน";
+  const dist = r.pose ? Math.hypot(v.person.x - r.pose[0], v.person.y - r.pose[1]) : null;
+  $("robot-rows").innerHTML = rows([
+    ["ช่วง", r.running ? (PHASE[r.phase] || r.phase || "กำลังเริ่ม") + (r.virtual ? " · คนเสมือน" : " · ไม่ใช่งานคนเสมือน") : "ไม่มีงาน", r.running && !r.virtual],
+    ["ล็อกคน", r.locked ? "ล็อกแล้ว" : "ยังไม่ล็อก"],
+    ["ห่างจากคน", dist == null ? "-" : `${fixed(dist, 2)} m`],
+    ["ชิดของสุด", r.gap == null ? "-" : `${fixed(r.gap, 3)} m จากตัวหุ่น`, r.gap != null && r.gap < 0.05],
+    ["เหตุที่หยุด", r.stop || "ไม่มี"],
+    ["สายไฟบิด", r.cable_deg == null ? "ไม่มีข้อมูล" : `${fixed(r.cable_deg, 0)}°`, r.cable_deg != null && Math.abs(r.cable_deg) > 150],
+    ["ล้อ", r.wheels || "ปกติ", !!r.wheels],
+    ["คนเสมือนที่หุ่นได้", vr.person ? `กล้อง${vr.seen ? "เห็น" : "ไม่เห็น"} · LiDAR ${vr.returns} จุด` : (r.running ? "ยังไม่ได้รับ" : "-"), r.running && r.virtual && !vr.person],
+    ["ส่งไปแล้ว", `${v.sent} แพ็กเก็ต` + (v.udp_error ? ` · ${v.udp_error}` : ""), !!v.udp_error],
+    ["ชี้", r.virtual_pointing ? `หุ่นได้ ${fixed(r.virtual_pointing[0], 2)}, ${fixed(r.virtual_pointing[1], 2)}` : "ไม่ได้ชี้"],
+    ["ถุงเสมือน", v.bags.length ? `${v.bags.length} ใบ` : "ไม่มี"],
+    ["ถุง", bagText(r.bag_task), !!(r.bag_task && r.bag_task.result && !r.bag_task.result.ok)],
+  ].concat(r.end ? [["จบ", r.end]] : []).concat(v.error ? [["ปัญหา", v.error, true]] : []));
+  $("person-pos").textContent = `${fixed(v.person.x, 2)}, ${fixed(v.person.y, 2)}`;
+  $("auto-step").textContent = v.auto.on ? v.auto.step : "off";
+  $("btn-auto").disabled = v.auto.on;
+  if (v.auto.message) say($("auto-msg"), v.auto.message, !v.auto.on && v.auto.message !== "รอบต่อไป");
+  $("episodes").innerHTML = v.episodes.slice().reverse().map((e) =>
+    `<tr><td class="num">${esc((e.start || "").slice(11))}</td><td class="num">${esc(e.time_to_reach_s ?? "-")}</td>` +
+    `<td class="num">${esc(e.nearest_m ?? "-")}</td><td class="num">${esc(e.stuck_s ?? "-")}</td><td>${esc(e.result)}</td></tr>`).join("");
+  $("hud").innerHTML = `<b>${esc(r.running ? (PHASE[r.phase] || r.phase || "") : "ไม่มีงาน")}</b>` +
+    (r.stop ? ` · หยุดเพราะ ${esc(r.stop)}` : "") + (v.auto.on ? ` · อัตโนมัติ ${esc(v.auto.step)}` : "");
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/view", { cache: "no-store" });
+    view = await r.json();
+    render();
+    if (three) three.scan(view.scan);
+    if (three && view.map_version !== mapVersion) {
+      const m = await (await fetch(`/api/map?v=${mapVersion}`, { cache: "no-store" })).json();
+      if (!m.same) { three.map(m); }
+      mapVersion = m.version;
+    }
+  } catch (e) { /* the app restarts: try again */ }
+  setTimeout(poll, 150);
+}
+
+function segment(id, pick) {
+  $(id).addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    for (const o of $(id).querySelectorAll("button")) o.classList.toggle("on", o === b);
+    pick(b.dataset.v);
+  });
+}
+segment("seg-mode", (v) => { choice.drive = v === "drive"; });
+segment("seg-speed", (v) => { choice.speed = Number(v); });
+segment("seg-min", (v) => { choice.minutes = Number(v); });
+
+async function sendRun() { return post("/api/config", { run: choice }); }
+$("btn-run").addEventListener("click", async () => {
+  if (choice.drive && !confirm("หุ่นจะเคลื่อนที่จริง พื้นที่โล่งและสายไฟปลอดภัยแล้วใช่ไหม")) return;
+  await sendRun();
+  say($("run-msg"), "กำลังเริ่ม...");
+  const r = await post("/api/run/start", {});
+  say($("run-msg"), r.error || "เริ่มงานแล้ว", !!r.error);
+});
+$("btn-auto").addEventListener("click", async () => {
+  if (choice.drive && !confirm("รอบอัตโนมัติจะเริ่มงานขับจริงเองซ้ำๆ พื้นที่โล่งและสายไฟปลอดภัยแล้วใช่ไหม")) return;
+  await sendRun();
+  const r = await post("/api/auto", { on: true });
+  say($("auto-msg"), r.error || "เริ่มรอบอัตโนมัติ", !!r.error);
+});
+$("btn-stop").addEventListener("click", async () => {
+  const r = await post("/api/stop", {});
+  say($("auto-msg"), r.error || "หยุดแล้ว ส่ง STOP ให้คอนโซล", !!r.error);
+});
+for (const b of document.querySelectorAll("[data-say]")) {
+  b.addEventListener("click", () => post("/api/say", { word: b.dataset.say }));
+}
+segment("seg-control", async (v) => {
+  const r = await post("/api/config", { control: v });
+  say($("run-msg"), r.error || (v === "ssh" ? "ควบคุมทาง ssh" : "ควบคุมทางคอนโซล ต้องใส่ PIN"), !!r.error);
+});
+$("btn-point-bag").addEventListener("click", async () => {
+  const r = await post("/api/point", { bag: true });
+  if (r.error) { pointNext = true; say($("point-note"), r.error, true); }
+  else say($("point-note"), `ชี้ถุงที่ ${fixed(r.pointing[0], 2)}, ${fixed(r.pointing[1], 2)}`);
+});
+$("btn-point-click").addEventListener("click", () => { pointNext = true; bagNext = false; say($("point-note"), "คลิกพื้นจุดที่จะชี้"); });
+$("btn-bag-place").addEventListener("click", () => { bagNext = true; pointNext = false; say($("point-note"), "คลิกพื้นจุดที่จะวางถุง"); });
+$("btn-bag-clear").addEventListener("click", async () => {
+  const r = await post("/api/bags", { clear: true });
+  say($("point-note"), r.error || "ล้างถุงแล้ว", !!r.error);
+});
+$("btn-place").addEventListener("click", async () => {
+  const r = await post("/api/place", {});
+  if (r.error) say($("auto-msg"), r.error, true);
+});
+$("btn-url").addEventListener("click", async () => {
+  const r = await post("/api/config", { console: $("console-url").value });
+  say($("run-msg"), r.error || "เปลี่ยนคอนโซลแล้ว", !!r.error);
+});
+for (const b of document.querySelectorAll("[data-url]")) {
+  b.addEventListener("click", async () => {
+    const url = view ? view.config.consoles[Number(b.dataset.url)] : null;
+    if (!url) return;
+    const r = await post("/api/config", { console: url });
+    say($("run-msg"), r.error || `ใช้ ${url}`, !!r.error);
+  });
+}
+$("btn-pin").addEventListener("click", async () => {
+  const r = await post("/api/config", { pin: $("pin").value });
+  $("pin").value = "";
+  say($("run-msg"), r.error || "รับ PIN แล้ว", !!r.error);
+});
+$("btn-speed").addEventListener("click", async () => {
+  const r = await post("/api/config", { speed: Number($("speed").value) });
+  say($("auto-msg"), r.error || "ตั้งความเร็วเดินแล้ว", !!r.error);
+});
+
+build().then((t) => { three = t; mapVersion = -1; });
+poll();
+</script>
+</body>
+</html>

@@ -1,11 +1,20 @@
 """Jetson side of the link: receives JPEG frames from the Pi and answers with the people in them.
 
 Wire format both ways: 4-byte big-endian length of the header, then the UTF-8 JSON header, then
-(requests only) the JPEG bytes. Request header {"seq", "t", "width", "height", "jpeg"}; reply
-{"seq", "t", "people": [{"box": [x1, y1, x2, y2], "conf": float, "look": [float, ...]}]}.
+(requests only) the JPEG bytes. Request header {"seq", "t", "width", "height", "jpeg"}, optional "pose": true;
+reply {"seq", "t", "people": [{"box": [x1, y1, x2, y2], "conf": float, "look": [float, ...]}],
+"objects": [{"cls": "handbag" | "backpack" | "suitcase", "box": [x1, y1, x2, y2], "conf": float}]}.
+With pose (asked in the header, or every --pose-every frames) a person whose box overlaps a pose box also
+has "kp": 17 COCO keypoints [x, y, visibility] in the frame's pixels. Old clients ignore the new keys.
 
 Run: python3 server.py --fake      (answers one person in the middle, for testing the link)
-     python3 server.py             (TensorRT detector and OSNet looks, see DETECTOR and REID)
+     python3 server.py             (TensorRT detector and OSNet looks, see DETECTOR and REID; pose with POSE)
+
+Pose cost, not measured: yolo11n-pose is 2.9 M parameters and 7.6 GFLOPs at 640 x 640 against 2.6 M and
+6.5 GFLOPs for yolo11n (Ultralytics' tables), so at 256 x 320 about 1.2 times the detector. Detector plus
+OSNet measured 94.7 frames/s (about 10.6 ms) on 2026-11-13, so pose should add roughly 5 to 8 ms a frame,
+inside the 100 ms of 10 Hz. It runs only when asked all the same, and the Pi asks only while the operator
+points at the bag.
 """
 
 import argparse
@@ -21,33 +30,116 @@ MAX_JPEG = 10_000_000
 
 DETECTOR = "models/yolo11n_256x320.engine"  # the choice waits for recall on this robot's frames (Task 11 step 4)
 REID = "models/osnet_x0_25_msmt17_256x128.engine"
+POSE = "models/yolo11n-pose_256x320.engine"
+POSE_CONF = 0.4
+KP_IOU = 0.3  # a pose box must overlap a person box at least this much to give it keypoints
 
 
-def people_in(jpeg, detector, reid):
-    """One JPEG to people dicts: TensorRT person boxes, then one look vector per person."""
+def seen_in(jpeg, detector, reid, pose=None):
+    """One JPEG to {"people", "objects"}: person and bag boxes from one detector run, a look vector per
+    person, and with a pose engine the keypoints of each person it finds."""
     import cv2
     import numpy as np
 
     bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
     if bgr is None:
-        return []  # a broken frame is "nobody seen", never an error that drops the link
-    boxes = detector.detect(bgr)
+        return {"people": [], "objects": []}  # a broken frame is "nobody seen", never an error that drops the link
+    boxes, objects = detector.detect_all(bgr) if hasattr(detector, "detect_all") else (detector.detect(bgr), [])
     looks = reid.looks(bgr, [b[:4] for b in boxes])
-    return [{"box": [float(v) for v in b[:4]], "conf": float(b[4]), "look": list(look)} for b, look in zip(boxes, looks)]
+    people = [{"box": [float(v) for v in b[:4]], "conf": float(b[4]), "look": list(look)} for b, look in zip(boxes, looks)]
+    if pose is not None:
+        attach_keypoints(people, pose.poses(bgr))
+    return {"people": people,
+            "objects": [{"cls": o[5], "box": [float(v) for v in o[:4]], "conf": float(o[4])} for o in objects]}
 
 
-def real_people(detector_path=DETECTOR, reid_path=REID):
-    """find_people for the server, with both engines loaded once."""
+def people_in(jpeg, detector, reid):
+    """One JPEG to people dicts: TensorRT person boxes, then one look vector per person."""
+    return seen_in(jpeg, detector, reid)["people"]
+
+
+def _iou(a, b):
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    if w <= 0 or h <= 0:
+        return 0.0
+    inter = w * h
+    return inter / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter)
+
+
+def attach_keypoints(people, poses, min_iou=KP_IOU):
+    """Give each person dict the "kp" of the pose box it overlaps best; each pose goes to one person at most."""
+    pairs = sorted(((_iou(p["box"], q[0]), i, j) for i, p in enumerate(people) for j, q in enumerate(poses)),
+                   reverse=True)
+    used_people, used_poses = set(), set()
+    for iou, i, j in pairs:
+        if iou < min_iou:
+            break
+        if i in used_people or j in used_poses:
+            continue
+        used_people.add(i)
+        used_poses.add(j)
+        people[i]["kp"] = [[float(v) for v in k] for k in poses[j][2]]
+    return people
+
+
+def decode_pose(output, scale, frame_w, frame_h, conf=POSE_CONF):
+    """yolo11n-pose output (1, 56, N): cx, cy, w, h, score, 17 x (x, y, visibility) in input pixels
+    -> [((x1, y1, x2, y2), score, 17 x [x, y, v])] in frame pixels, best first."""
+    import numpy as np
+    from detector import nms
+
+    out = output[0].T
+    out = out[out[:, 4] >= conf].astype(np.float32)
+    if not len(out):
+        return []
+    boxes = np.concatenate([out[:, :2] - out[:, 2:4] / 2, out[:, :2] + out[:, 2:4] / 2], axis=1) / scale
+    boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, frame_w)
+    boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, frame_h)
+    kps = out[:, 5:56].reshape(-1, 17, 3).copy()
+    kps[:, :, :2] /= scale
+    return [(tuple(map(float, boxes[i])), float(out[i, 4]), kps[i].tolist()) for i in nms(boxes, out[:, 4])]
+
+
+class Pose:
+    """The pose engine, letterboxed like the Ultralytics detector (RGB / 255, padding at the bottom)."""
+
+    def __init__(self, engine_path):
+        from engine import Engine
+
+        self._engine = Engine(engine_path)
+        _, _, self._h, self._w = self._engine.input_shape
+
+    def poses(self, bgr):
+        from detector import letterbox
+
+        x, scale = letterbox(bgr, self._h, self._w, yolox=False)
+        return decode_pose(self._engine.run(x)[0], scale, bgr.shape[1], bgr.shape[0])
+
+
+def real_people(detector_path=DETECTOR, reid_path=REID, pose_path=POSE):
+    """find_people for the server, with the engines loaded once. Without the pose engine, pose asks get no "kp"."""
+    import os
+
     from detector import Detector
     from reid import ReId
 
     detector, reid = Detector(detector_path), ReId(reid_path)
-    return lambda jpeg, width, height: people_in(jpeg, detector, reid)
+    pose_engine = Pose(pose_path) if pose_path and os.path.exists(pose_path) else None
+    if pose_engine is None:
+        print("no pose engine at", pose_path, "- answers carry no keypoints", flush=True)
+    return lambda jpeg, width, height, pose=False: seen_in(jpeg, detector, reid, pose_engine if pose else None)
 
 
-def fake_people(jpeg, width, height):
+def fake_people(jpeg, width, height, pose=False):
     box = [width * 0.4, height * 0.1, width * 0.6, height * 0.9]
-    return [{"box": box, "conf": 0.9, "look": [0.1, 0.2, 0.3, 0.4]}]
+    person = {"box": box, "conf": 0.9, "look": [0.1, 0.2, 0.3, 0.4]}
+    if pose:  # someone standing with both arms down, in the middle of the box
+        cx, top, h = width * 0.5, height * 0.1, height * 0.8
+        rows = [0.05, 0.03, 0.03, 0.04, 0.04, 0.18, 0.18, 0.35, 0.35, 0.5, 0.5, 0.52, 0.52, 0.72, 0.72, 0.95, 0.95]
+        side = [0, -1, 1, -2, 2, -5, 5, -6, 6, -6, 6, -3, 3, -3, 3, -3, 3]
+        person["kp"] = [[cx + s * width * 0.01, top + r * h, 0.9] for s, r in zip(side, rows)]
+    return [person]
 
 
 def _read_exactly(sock, count, stop, idle):
@@ -69,9 +161,11 @@ def _read_exactly(sock, count, stop, idle):
 
 
 class Server:
-    def __init__(self, detect, host="0.0.0.0", port=5601, idle=5.0):
+    def __init__(self, detect, host="0.0.0.0", port=5601, idle=5.0, pose_every=0):
         self._detect = detect
         self._idle = idle
+        self._pose_every = pose_every  # 0: pose only when a request header asks for it
+        self._frames = 0
         self._current = None  # the one client being served
         self._detect_lock = threading.Lock()  # a replaced client may still be mid-detect
         self._stop = threading.Event()
@@ -123,9 +217,13 @@ class Server:
                     if not 0 <= header["jpeg"] <= MAX_JPEG:
                         return
                     jpeg = _read_exactly(conn, header["jpeg"], self._stop, self._idle)
-                    with self._detect_lock:
-                        people = self._detect(jpeg, header["width"], header["height"])
-                    reply = json.dumps({"seq": header["seq"], "t": header["t"], "people": people}).encode("utf-8")
+                    self._frames += 1
+                    pose = header.get("pose") is True or (self._pose_every > 0 and self._frames % self._pose_every == 0)
+                    with self._detect_lock:  # pose passed only when wanted, so detect callables without it still work
+                        found = self._detect(jpeg, header["width"], header["height"], **({"pose": True} if pose else {}))
+                    reply = {"seq": header["seq"], "t": header["t"]}
+                    reply.update(found if isinstance(found, dict) else {"people": found})
+                    reply = json.dumps(reply).encode("utf-8")
                     conn.sendall(struct.pack(">I", len(reply)) + reply)
             except (OSError, ValueError, KeyError, TypeError):
                 return  # bad or closed connection: drop it, the Pi reconnects
@@ -137,8 +235,11 @@ def main():
     parser.add_argument("--port", type=int, default=5601)
     parser.add_argument("--detector", default=DETECTOR, help="person detector engine")
     parser.add_argument("--reid", default=REID, help="look vector engine")
+    parser.add_argument("--pose", default=POSE, help="pose engine (keypoints only when asked)")
+    parser.add_argument("--pose-every", type=int, default=0, help="also run pose every N frames (0: only when asked)")
     args = parser.parse_args()
-    server = Server(fake_people if args.fake else real_people(args.detector, args.reid), port=args.port)
+    server = Server(fake_people if args.fake else real_people(args.detector, args.reid, args.pose), port=args.port,
+                    pose_every=args.pose_every)
     server.start()
     print("listening on port", server.port, flush=True)
     try:

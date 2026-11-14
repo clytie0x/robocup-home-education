@@ -432,6 +432,58 @@ class Furniture(unittest.TestCase):
         self.assertIn(True, ambiguous)  # held or dropped next to the stranger, never drove on blind
 
 
+class SetDown(unittest.TestCase):
+    """Run 20261115-032329 at 172.9 s: the operator stood beside the gift bag they had put down, 0.31 m
+    away. The bag flickered in the scan; each new id was 'first seen within COMPANY of the operator',
+    so a person for good, and the robot held 'crowded' for 13.7 s while the camera saw one person."""
+
+    OP, BAG = (2.0, 0.0), (2.0, -0.31)
+
+    def run_set_down(self, link, frames=60, flicker=3):
+        s = enrolled(1.5, 0.0)
+        held = []
+        for i in range(frames):
+            t = round(0.1 * (i + 1), 1)
+            op = (1.5 + 0.05 * i, 0.0) if i < 10 else self.OP  # walks up with the bag, stops, puts it down
+            things = person(*op) + ([self.BAG] if i >= 10 and i % flicker else [])
+            answer = Answer(t, [seen(*op, OPERATOR)]) if link else None  # the camera sees one person
+            read(s, t, scan_of(things), answer, link_alive=link)
+            held.append(s.ambiguous or not s.locked)
+        return s, held
+
+    def test_a_still_bag_the_camera_does_not_see_as_a_person_stops_crowding(self):
+        s, held = self.run_set_down(link=True)
+        self.assertTrue(s.locked)
+        self.assertEqual(held[-15:], [False] * 15, "still holding 3.5 s after the bag was put down")
+
+    # Known gap, not fixed here: a bag that stays in every scan from the moment it is put down trips the
+    # split rule (_mixed_up, 0.6 s) and drops the track before the SET_DOWN_S evidence is in; the operator's
+    # own candidate then shares the bag's camera bearing. To be solved by the fused LiDAR and camera tracker
+    # (plan Milestone 3). The flickering case, the one seen in run 20261115-032329, passes above.
+    @unittest.expectedFailure
+    def test_a_bag_that_never_flickers_too(self):
+        s, held = self.run_set_down(link=True, flicker=1000)
+        self.assertEqual(held[-15:], [False] * 15)
+
+    def test_with_the_link_down_it_stays_careful(self):
+        _, held = self.run_set_down(link=False)
+        self.assertIn(True, held[10:])  # no camera to say it is not a person: the old rule holds
+
+    def test_a_person_who_stepped_out_and_stands_still_keeps_crowding(self):
+        # the camera does see a second person there: never treated as a bag
+        s = enrolled(1.5, 0.0)
+        held = []
+        for i in range(60):
+            t = round(0.1 * (i + 1), 1)
+            op = (1.5 + 0.05 * i, 0.0) if i < 10 else self.OP
+            st = (2.0, -0.31)
+            things = person(*op) + (person(*st) if i >= 10 else [])
+            answer = Answer(t, [seen(*op, OPERATOR)] + ([seen(*st, OTHER)] if i >= 10 else []))
+            read(s, t, scan_of(things), answer)
+            held.append(s.ambiguous or not s.locked)
+        self.assertEqual(held[-10:], [True] * 10)
+
+
 class Looks(unittest.TestCase):
     LEFT, RIGHT = (1.5, 0.8), (1.5, -0.8)
     A, B = (0.1, 0.2), (0.3, 0.4)

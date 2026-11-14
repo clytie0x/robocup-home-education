@@ -39,7 +39,8 @@ are deleted once a day. Events, runs and charge marks are kept.
 | jetson | `jetson_prog_<name>_running` | 0/1 | `"programs"` |
 | jetson | `jetson_temp_max_c` | °C | the older agent's `"system"` block, if that is what answers |
 | bank | `pi_est_w`, `motor_est_w` | W | the energy model below (model numbers, not measured) |
-| bank | `bank_est_pct`, `bank_est_wh_used` | %, Wh | the power bank estimate below, once a charge mark exists |
+| bank | `bank_est_pct`, `bank_est_wh_used` | %, Wh | the power bank estimate below (Pi side only), once a bank charge mark exists |
+| bank | `motor_est_wh_used` | Wh | the 21V motor battery's model energy used since its last full mark, once one exists |
 | motor | `motor_bus_mv`, `motor_bus_ma` | mV, mA | a future sensor, null today (see below) |
 
 Metric names are all lower case (`motor_bus_mv`, not `mV`), so `metric = '...'` in SQL never misses on case.
@@ -150,15 +151,20 @@ pandas (on a copy of the database):
     runs = pd.read_sql("SELECT * FROM runs", db)
     track = pd.read_sql("SELECT t, x, y, v_cmd, v_meas FROM run_samples WHERE run_id = ?", db, params=["20261115-201500"])
 
-## What cannot be measured: the power bank's charge
+## What cannot be measured: the batteries' charge
 
-The UGREEN power bank feeds the Pi (with the Xtion, the LiDAR and the base board's logic) and the wheel
-motors over USB-C. The Jetson is on mains. The bank has no data link, so its percentage cannot be read.
+Two batteries, confirmed by the owner and a measurement on 2026-11-15:
+- The UGREEN power bank (145 W, 25,000 mAh, 92.5 Wh nominal) feeds only the Pi and its USB devices (the
+  Xtion, the LiDAR and the base board's logic).
+- The wheel motors run off a separate "21V MAX LITHIUM" power-tool battery through a DC-DC converter.
+
+The Jetson is on mains. Neither battery has a data link, so neither charge can be read.
 What the robot does have that hints at power:
-- the Pi's under-voltage bits (`pi_undervolt`, the `undervolt` events)
-- the Jetson's input power `jetson_vdd_in_mw`, which is mains power and says nothing about the bank
-- from the run logs, the motor-side symptom: `wheels` in `run_samples`, and runs with `end_reason = 'wheels'`
-  (2026-11-14: the motors lost power while the display read 15 %)
+- the Pi's under-voltage bits (`pi_undervolt`, the `undervolt` events), for the power bank
+- the Jetson's input power `jetson_vdd_in_mw`, which is mains power and says nothing about either battery
+- from the run logs, the motor-side symptom: `wheels` in `run_samples`, and runs with `end_reason = 'wheels'`,
+  for the 21V battery (2026-11-14: the motors lost power while the bank's display read 15 %; the bank does
+  not feed the motors)
 
 ### The estimate
 
@@ -166,16 +172,17 @@ What the robot does have that hints at power:
 
 - Charge marks are the starting point. `python telemetry.py --charged` says the bank was charged to 100 %.
   `--reading 62` records the percentage on the bank's display. `mark_full(db)` and `add_reading(db, 62)`
-  do the same from code, for the console's buttons. The newest mark is the baseline.
-- The model estimates, every sample, the watts drawn from the bank:
+  do the same from code, for the console's buttons. The newest bank mark is the baseline. Each mark has a
+  `battery` column, `bank` or `motor` (schema version 2; marks made before it are `bank`).
+- The model estimates, every sample:
   - `pi_est_w = 3.0 + 3.0 × CPU fraction + 2.5`, which is the Pi idle, its CPU, and the Xtion and LiDAR,
-    assumed always on.
-  - `motor_est_w = 12.0 × min(1, |v| / 0.5 + |w| / 3.0)`. It uses the newest command in the run log being
-    written. The logs carry the command, not the PWM. The draw is 0 when no run is active, and 0 while the
-    log says the wheels are not turning, because they have no power then.
+    assumed always on. This alone is what the bank's estimate counts.
+  - `motor_est_w = 12.0 × min(1, |v| / 0.5 + |w| / 3.0)`, drawn from the 21V battery, not the bank. It uses
+    the newest command in the run log being written. The logs carry the command, not the PWM. The draw is 0
+    when no run is active, and 0 while the log says the wheels are not turning, because they have no power then.
   - Every coefficient is a guess to be fitted (`telemetry.py`, top of the file). The bank is 25,000 mAh at
     3.7 V, which is 92.5 Wh, computed from the label and not measured. The bank's output efficiency is a guessed 0.85.
-- `percent = mark % - 100 × scale × (model Wh since the mark / 0.85) / 92.5`, clamped to 0..100. Each
+- `percent = mark % - 100 × scale × (model Pi-side Wh since the mark / 0.85) / 92.5`, clamped to 0..100. Each
   sample's watts count until the next sample, but never longer than 60 s. A longer gap counts as the Pi off.
 - `estimate(db)` (or `--estimate`) gives `percent` and a `low`/`high` band of ±10 % of the energy used (a guess).
   It also gives `wh_used`, the mark used, `hours_on` and `driving_min` since the mark, and a `warning` below 30 %
@@ -184,14 +191,28 @@ What the robot does have that hints at power:
   display dropped by at least 5 % and the recorder ran in between. A full mark means a charge came between,
   so that pair is not used. It fits one scale on the whole model by least squares, bounded to 0.5..2.0. The
   scale is stored and used from then on only when at least 2 pairs were usable. The result says how many it used.
-- What it cannot see: power drawn while the recorder was not running, motors driven by a program that
-  writes no run log (wheel_test, back_up), the bank's own ageing, and the display's 1 % steps.
+- What it cannot see: power drawn while the recorder was not running, the bank's own ageing, and the
+  display's 1 % steps.
+
+### The 21V motor battery: energy, not percent
+
+Its capacity is not known yet, so only the energy drawn since it was charged is counted:
+
+- `python telemetry.py --charged motor` (or `mark_full(db, battery="motor")`, the console's second
+  ชาร์จเต็มแล้ว button: `POST /api/bank/full {"battery": "motor"}`) says it was just charged full.
+- `motor_usage(db)` gives `since` (the last motor full mark, or null), `wh_used` (the `motor_est_w` samples
+  integrated since then, as above: at most 60 s per sample) and `drive_minutes` (time with `motor_est_w > 0`).
+  `--estimate` prints it under `"motor"`. The recorder stores `motor_est_wh_used` every sample.
+- `wh_used` is at the motors: the DC-DC converter's loss is not included. It cannot see motors driven by a
+  program that writes no run log (wheel_test, back_up).
+- `MOTOR_BATTERY_WH = None` in `telemetry.py`: when the owner gives the battery's Ah (printed on it), its Wh
+  is known and a percent can be shown.
 
 ### Hardware that would measure it (prices not verified)
 
-- An inline USB-C power meter with a data port, between the bank and the robot's feed, for example the
+- An inline USB-C power meter with a data port, between the bank and the Pi's feed, for example the
   FNIRSI FNB58. It logs volts, amps and Wh, and reads over USB, so a reader could become a source.
-- An INA226 or INA219 current and voltage sensor on the motor supply line, on the Pi's I2C bus (`/dev/i2c-1`,
+- An INA226 or INA219 current and voltage sensor on the 21V motor supply line, on the Pi's I2C bus (`/dev/i2c-1`,
   usually address 0x40). The place for it already exists: `motor_bus()` in `telemetry.py` returns
   `motor_bus_mv` and `motor_bus_ma` as null today. Make it return the sensor's numbers, or add another
   `(host, function)` to `SOURCES`, and the recorder stores them every sample with no other change. Python

@@ -35,6 +35,16 @@ COMPANY_MIN = 0.6
 MOVED = 0.25  # m
 CAMERA_KEEP = 2.0  # s
 STATIC_NEAR = 0.1  # m; a candidate this close to last cycle's furniture is that furniture
+# Something set down next to the operator (run 20261115-032329: the gift bag 0.31 m from their foot held
+# the robot 'crowded' for 13.7 s) is first seen within COMPANY of them, so a person by the rule above.
+# It stops being one once it stood still SET_DOWN_S while the camera, answering fresh with that spot
+# in view, never saw a person there; its spot is remembered SET_DOWN_KEEP so that a flickering object
+# with a new id is furniture at once. With the link down nothing is demoted: no camera to ask.
+SET_DOWN_S = 2.0  # s
+SET_DOWN_MOVED = 0.10  # m: it moved less than this from where it was first seen
+SET_DOWN_KEEP = 10.0  # s
+SET_DOWN_NEAR = 0.15  # m: a candidate this close to a remembered spot is that object
+SPOT_GAP = 0.6  # s a spot may go unseen (the object flickers in the scan) and still collect its evidence
 
 
 class RealSenses:
@@ -57,6 +67,10 @@ class RealSenses:
         self._person = set()  # ids that showed they are people (moved, seen by the camera, or came out of the operator)
         self._camera_at = {}  # id -> last time the camera saw a person at it
         self._furniture = []  # odometry points of the candidates that are not people, last cycle
+        self._came_out = set()  # ids that are people only because they were first seen next to the operator
+        self._spots = []  # where 'came out' people stand: {"at", "seen", "watched_since", "person"}
+        self._camera_fresh = False  # this cycle has a fresh camera answer over a live link
+        self._set_down = []  # (odometry point, time) of objects demoted as set down next to the operator
         self._operator_at = None  # odometry point of the operator at the last fix
 
     @property
@@ -97,6 +111,7 @@ class RealSenses:
         if link_alive and answer is not None:
             self._answer = answer
         seen = self._fresh(now, answer) if link_alive else []
+        self._camera_fresh = link_alive and answer is not None and now - answer.t <= FRESH
         cands = candidates(scan)
         look = None
 
@@ -171,20 +186,58 @@ class RealSenses:
         for pid, c in cand_of.items():
             if pid not in self._first:
                 self._first[pid] = (everybody[pid], now)
-                if self._operator_at is not None and math.dist(everybody[pid], self._operator_at) <= COMPANY:
+                if self._operator_at is not None and math.dist(everybody[pid], self._operator_at) <= COMPANY                         and not self._at_set_down(everybody[pid], now):
                     self._person.add(pid)  # it may have come out of the operator
+                    self._came_out.add(pid)
             for bearing, _ in seen:
                 if track_bearing is not None and abs(bearing - track_bearing) <= MATCH_DEG:
                     continue  # that camera person is the operator
                 if abs(self._camera_bearing(c) - bearing) <= MATCH_DEG:
                     self._camera_at[pid] = now  # every candidate at that bearing: the person may be the farther one
+        for pid, c in cand_of.items():
+            self._demote_if_set_down(pid, c, everybody[pid], now)
         people = {pid: pt for pid, pt in everybody.items() if self._is_person(pid, now)}
         self._furniture = [pt for pid, pt in everybody.items() if pid not in people]
         for gone in [pid for pid in self._first if pid not in everybody]:  # forget ids no longer seen
             self._first.pop(gone)
             self._person.discard(gone)
             self._camera_at.pop(gone, None)
+            self._came_out.discard(gone)
+        self._spots = [sp for sp in self._spots if now - sp["seen"] <= SPOT_GAP]
         return people
+
+    def _demote_if_set_down(self, pid, c, at, now):
+        """A 'came out of the operator' person that stood still while the camera watched its spot and saw
+        nobody there is an object put down: furniture from now on, its spot remembered. The evidence is
+        kept per spot, not per id: a flickering object gets a new id every time it comes back."""
+        if pid not in self._came_out:
+            return
+        spot = next((sp for sp in self._spots if math.dist(sp["at"], at) <= SET_DOWN_NEAR), None)
+        if spot is None:
+            spot = {"at": at, "watched_since": None, "person": False}
+            self._spots.append(spot)
+        spot["seen"] = now
+        start, _ = self._first[pid]
+        if math.dist(start, at) >= SET_DOWN_MOVED or now - self._camera_at.get(pid, -math.inf) <= CAMERA_KEEP:
+            spot["person"] = True  # it moved or the camera saw someone there: a person, for good
+        if spot["person"]:
+            self._came_out.discard(pid)
+            return
+        half = self.p["camera_hfov_deg"] / 2 - 2.0  # its spot must be inside the picture, with a margin
+        if not (self._camera_fresh and abs(self._camera_bearing(c)) <= half):
+            spot["watched_since"] = None
+            return
+        if spot["watched_since"] is None:
+            spot["watched_since"] = now
+        if now - spot["watched_since"] >= SET_DOWN_S:
+            self._person.discard(pid)
+            self._came_out.discard(pid)
+            self._spots.remove(spot)
+            self._set_down.append((spot["at"], now))
+
+    def _at_set_down(self, at, now):
+        self._set_down = [(pt, t) for pt, t in self._set_down if now - t <= SET_DOWN_KEEP]
+        return any(math.dist(at, pt) <= SET_DOWN_NEAR for pt, _ in self._set_down)
 
     def _mixed_up(self, now, operator, people):
         """True when the LiDAR may have mixed the operator up with someone next to them.
@@ -253,7 +306,7 @@ class RealSenses:
     def _is_furniture(self, c):
         """A lidar-frame candidate standing where a non-person candidate stood last cycle."""
         at = geometry.base_to_odom(self._base(c), self._pose)
-        return any(math.dist(at, f) <= STATIC_NEAR for f in self._furniture)
+        return any(math.dist(at, f) <= STATIC_NEAR for f in self._furniture) or self._at_set_down(at, self._last_now or 0.0)
 
     def _is_person(self, pid, now):
         """Has the candidate with this id shown it is a person? Latched: once a person, always."""

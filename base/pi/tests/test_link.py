@@ -138,6 +138,51 @@ class LinkTests(unittest.TestCase):
         self.assertLess(link.bearing_deg([0, 0, 20, 240], 320, 58.59), -20)
         self.assertAlmostEqual(link.bearing_deg([140, 0, 180, 240], 320, 58.59), 0.0)
 
+    def test_bags_and_keypoints_are_parsed(self):
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        kp = [[float(i), 2.0 * i, 0.9] for i in range(17)]
+        reply = {"seq": 1, "t": 4.0, "people": [{"box": [140, 0, 180, 240], "conf": 0.9, "look": [0.5], "kp": kp}],
+                 "objects": [{"cls": "handbag", "box": [300, 200, 320, 230], "conf": 0.6}]}
+        jl = self.make_link(raw_server([framed(reply)], stop))
+        jl.send(make_frame(4.0))
+        self.assertTrue(wait_for(lambda: jl.alive(time.monotonic(), 5)))
+        answer = jl.latest()
+        self.assertEqual(answer.people[0].kp, kp)
+        bag = answer.objects[0]
+        self.assertEqual((bag.cls, bag.conf, bag.box), ("handbag", 0.6, [300, 200, 320, 230]))
+        self.assertGreater(bag.bearing_deg, 20)  # image right is robot left, as for people
+
+    def test_an_old_reply_without_bags_or_keypoints_still_works(self):
+        jl = self.make_link()
+        jl.send(make_frame(1.0))
+        self.assertTrue(wait_for(lambda: jl.alive(time.monotonic(), 5)))
+        answer = jl.latest()
+        self.assertEqual(answer.objects, [])
+        self.assertIsNone(answer.people[0].kp)
+        self.assertEqual(link.Answer(1.0, []).objects, [])  # positional use elsewhere is unchanged
+        self.assertIsNone(link.Seen(0.0, 0.9, (), [0, 0, 1, 1]).kp)
+
+    def test_pose_is_asked_only_for_frames_sent_with_pose(self):
+        self.srv.stop()
+        asked = []
+
+        def detect(jpeg, width, height, pose=False):
+            asked.append(pose)
+            return server.fake_people(jpeg, width, height, pose)
+
+        self.srv = server.Server(detect, "127.0.0.1", 0)
+        self.srv.start()
+        jl = self.make_link()
+        jl.send(make_frame(1.0))
+        self.assertTrue(wait_for(lambda: jl.alive(time.monotonic(), 5)))
+        self.assertIsNone(jl.latest().people[0].kp)
+        jl.send(make_frame(2.0), pose=True)
+        self.assertTrue(wait_for(lambda: len(asked) == 2))
+        self.assertTrue(wait_for(lambda: (jl._answer is not None and jl._answer.t == 2.0)))
+        self.assertEqual(len(jl.latest().people[0].kp), 17)
+        self.assertEqual(asked, [False, True])
+
     def test_send_never_blocks_without_a_server(self):
         self.srv.stop()
         self.srv = server.Server(server.fake_people, "127.0.0.1", 0)  # so tearDown has something to stop
@@ -258,6 +303,43 @@ class BackupHostTests(unittest.TestCase):
         jl = self.make_link(["cable", "wifi"])
         self.assertTrue(wait_for(self.answered, 5.0))
         self.assertEqual(jl.host, "cable")
+
+    def black_hole(self, name):
+        """Accepts connections and reads, never answers: TCP up, data not passing. Returns the accept count."""
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", self.ports[name]))
+        listener.listen(2)
+        listener.settimeout(0.2)
+        accepted, stop = [], threading.Event()
+        self.addCleanup(stop.set)
+
+        def run():
+            conns = []
+            while not stop.is_set():
+                try:
+                    conn, _ = listener.accept()
+                    accepted.append(1)
+                    conns.append(conn)
+                except socket.timeout:
+                    continue
+            for conn in conns:
+                conn.close()
+            listener.close()
+        threading.Thread(target=run, daemon=True).start()
+        return accepted
+
+    def test_a_host_that_connects_but_never_answers_is_skipped(self):
+        accepted = self.black_hole("cable")
+        self.serve("wifi")
+        jl = self.make_link(["cable", "wifi"], retry_primary=0.3)
+        self.assertTrue(wait_for(self.answered, 6.0))
+        self.assertEqual(jl.host, "wifi")
+        end = time.monotonic() + 2.0  # several retry_primary periods: the cable is not tried again
+        while time.monotonic() < end:
+            self.answered()
+            time.sleep(0.05)
+        self.assertEqual(jl.host, "wifi")
+        self.assertEqual(len(accepted), 1)
 
     def test_a_single_host_string_still_works(self):
         self.serve("cable")

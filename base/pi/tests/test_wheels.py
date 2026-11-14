@@ -8,6 +8,8 @@ P = dict(params.load(), linear_cmd_scale=None, max_speed=0.15, odom_distance_sca
 
 
 class FakePort:
+    timeout = 0.2  # as wheels.Wheels opens the real port
+
     def __init__(self, odom=b"Ox:+000.90,y:+000.00,th:+000.86#"):
         self.written = []
         self.odom = odom
@@ -183,6 +185,107 @@ class Watchdog(unittest.TestCase):
         with self.assertRaises(ValueError):
             w.read_odom()
         self.assertEqual(port.written.count(b"O#"), 4)
+
+
+class StatusPort(FakePort):
+    """The new firmware (0c020e4): E# answers with the encoder counts, the PWM and the fault flags."""
+
+    def __init__(self, status=b"Eleft:+0000120,right:-0000007,pwm:+076,+076,flags:03#"):
+        super().__init__()
+        self.status = status
+        self.timeouts = []  # the read timeout at each read
+
+    def read_until(self, _end):
+        self.timeouts.append(self.timeout)
+        return self.status if self.written[-1] == b"E#" else self.odom
+
+
+class FirmwareStatus(unittest.TestCase):
+    def test_parse_status_reads_counts_pwm_and_hex_flags(self):
+        self.assertEqual(wheels.parse_status("Eleft:+0000120,right:-0000007,pwm:+076,-012,flags:03#"),
+                         {"left": 120, "right": -7, "pwm": [76, -12], "flags": 3})
+        self.assertEqual(wheels.parse_status("Eleft:+0000000,right:+0000000,pwm:+000,+000,flags:0c#")["flags"], 12)
+
+    def test_an_unparsable_status_is_an_error(self):
+        # the old firmware has no E#: nothing, or an odometry line, comes back
+        for line in ("", "Ox:+000.90,y:+000.00,th:+000.86#", "Eleft:+1,right:+2,pwm:+3,+4#",
+                     "Eleft:+1,right:+2,pwm:+3,+4,flags:zz#", "Eleft:+1,right:+2,pwm:+3,+4,flags:03", "garbage#"):
+            with self.assertRaises(ValueError, msg=line):
+                wheels.parse_status(line)
+
+    def test_read_status_asks_e_with_a_short_timeout_and_puts_the_timeout_back(self):
+        port = StatusPort()
+        w = wheels.Wheels(P, port=port, start_thread=False)
+        self.assertEqual(w.read_status()["flags"], 3)
+        self.assertEqual([d for d in port.written if d != b"S#"], [b"E#"])
+        self.assertEqual(port.timeouts, [wheels.STATUS_TIMEOUT])
+        self.assertEqual(port.timeout, 0.2)
+        port.status = b""  # the old firmware: no answer before the timeout
+        with self.assertRaises(ValueError):
+            w.read_status()
+        self.assertEqual(port.timeout, 0.2)
+        self.assertAlmostEqual(w.read_odom()[0], 0.90 / 0.902, places=3)  # odometry is unaffected
+
+
+class StuckWrite(StatusPort):
+    """A USB write that times out on E#."""
+
+    def write(self, data):
+        if data == b"E#":
+            raise OSError("write timeout")
+        super().write(data)
+
+
+class StatusTimeout(unittest.TestCase):
+    def test_a_failed_e_write_still_puts_the_timeout_back(self):
+        port = StuckWrite()
+        w = wheels.Wheels(P, port=port, start_thread=False)
+        with self.assertRaises(OSError):
+            w.read_status()
+        self.assertEqual(port.timeout, 0.2)
+
+
+class Stall(unittest.TestCase):
+    """The Pi's own check that the wheels turn: works with any firmware (StallWatch)."""
+
+    def feed(self, watch, sent, poses, start=0.0):
+        """One update per 0.1 s; returns the times at which the watch said "not turning"."""
+        return [round(start + 0.1 * i, 1) for i, pose in enumerate(poses)
+                if watch.update(start + 0.1 * i, sent, pose)]
+
+    def test_a_command_that_does_not_move_the_odometry_for_a_second_is_not_turning(self):
+        watch = wheels.StallWatch()
+        self.assertEqual(self.feed(watch, (0.114, 0.0), [(0.0, 0.0, 0.0)] * 15), [1.0, 1.1, 1.2, 1.3, 1.4])
+
+    def test_a_turn_on_the_spot_counts_too(self):
+        watch = wheels.StallWatch()
+        self.assertEqual(self.feed(watch, (0.0, 0.3), [(0.0, 0.0, 0.0)] * 11), [1.0])
+
+    def test_a_base_that_moves_is_turning(self):
+        watch = wheels.StallWatch()
+        slow = [(0.03 * 0.1 * i, 0.0, 0.0) for i in range(30)]  # the smallest watched speed, really driven
+        self.assertEqual(self.feed(watch, (0.03, 0.0), slow), [])
+        turning = [(0.0, 0.0, 0.15 * 0.1 * i) for i in range(30)]
+        self.assertEqual(self.feed(wheels.StallWatch(), (0.0, 0.15), turning), [])
+
+    def test_small_commands_are_not_watched(self):
+        watch = wheels.StallWatch()
+        self.assertEqual(self.feed(watch, (0.02, 0.1), [(0.0, 0.0, 0.0)] * 30), [])
+
+    def test_the_second_must_be_continuous(self):
+        watch = wheels.StallWatch()
+        self.assertEqual(self.feed(watch, (0.1, 0.0), [(0.0, 0.0, 0.0)] * 9), [])
+        self.assertFalse(watch.update(0.9, (0.0, 0.0), (0.0, 0.0, 0.0)))  # a stop between
+        self.assertEqual(self.feed(watch, (0.1, 0.0), [(0.0, 0.0, 0.0)] * 10, start=1.0), [1.9])
+
+    def test_wheels_that_stop_turning_mid_drive_are_found_a_second_later(self):
+        watch = wheels.StallWatch()
+        driving = [(0.2 * 0.1 * i, 0.0, 0.0) for i in range(20)]  # 2 s at 0.2 m/s, then the power dies
+        dead = [driving[-1]] * 15
+        said = self.feed(watch, (0.2, 0.0), driving + dead)
+        self.assertEqual(said[0], 2.9)  # at 2.8 the pose 1 s before was still 2 cm back: not yet
+        watch.reset()
+        self.assertFalse(watch.update(10.0, (0.2, 0.0), dead[0]))  # reset: a new window
 
 
 if __name__ == "__main__":

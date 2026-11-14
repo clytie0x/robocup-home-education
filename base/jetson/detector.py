@@ -14,6 +14,8 @@ import numpy as np
 CONF = 0.4
 IOU = 0.45
 PERSON = 0  # COCO class index
+BAGS = {24: "backpack", 26: "handbag", 28: "suitcase"}  # COCO class index -> name, for the bag to carry
+BAG_CONF = 0.25
 
 
 def letterbox(bgr, height, width, yolox):
@@ -44,14 +46,14 @@ def nms(boxes, scores, iou=IOU):
     return keep
 
 
-def decode(output, scale, frame_w, frame_h, conf=CONF):
-    """Raw engine output -> [(x1, y1, x2, y2, conf)] for people, in frame pixels."""
+def decode(output, scale, frame_w, frame_h, conf=CONF, cls=PERSON):
+    """Raw engine output -> [(x1, y1, x2, y2, conf)] for one class (people by default), in frame pixels."""
     out = output[0]
     if out.shape[0] == 84:  # Ultralytics: (84, N)
         out = out.T
-        cxcywh, score = out[:, :4], out[:, 4 + PERSON]
+        cxcywh, score = out[:, :4], out[:, 4 + cls]
     else:  # YOLOX: (N, 85)
-        cxcywh, score = out[:, :4], out[:, 4] * out[:, 5 + PERSON]
+        cxcywh, score = out[:, :4], out[:, 4] * out[:, 5 + cls]
     mask = score >= conf
     cxcywh, score = cxcywh[mask].astype(np.float32), score[mask].astype(np.float32)
     boxes = np.concatenate([cxcywh[:, :2] - cxcywh[:, 2:] / 2, cxcywh[:, :2] + cxcywh[:, 2:] / 2], axis=1) / scale
@@ -60,6 +62,18 @@ def decode(output, scale, frame_w, frame_h, conf=CONF):
     seen = (boxes[:, 2] - boxes[:, 0] >= 2) & (boxes[:, 3] - boxes[:, 1] >= 2)  # drop boxes clipped to nothing
     boxes, score = boxes[seen], score[seen]
     return [(*map(float, boxes[i]), float(score[i])) for i in nms(boxes, score)]
+
+
+def decode_objects(output, scale, frame_w, frame_h, conf=BAG_CONF):
+    """Raw engine output -> [(x1, y1, x2, y2, conf, name)] for the bag classes, best first.
+
+    One bag often scores as two classes (handbag and backpack); NMS across the classes keeps the best name.
+    """
+    found = [(*b, name) for cls, name in BAGS.items() for b in decode(output, scale, frame_w, frame_h, conf, cls)]
+    if not found:
+        return []
+    boxes = np.array([b[:4] for b in found], np.float32)
+    return [found[i] for i in nms(boxes, np.array([b[4] for b in found], np.float32))]
 
 
 class Detector:
@@ -73,3 +87,9 @@ class Detector:
     def detect(self, bgr):
         x, scale = letterbox(bgr, self._h, self._w, self._yolox)
         return decode(self._engine.run(x)[0], scale, bgr.shape[1], bgr.shape[0])
+
+    def detect_all(self, bgr):
+        """People and bags from one engine run: ([(x1, y1, x2, y2, conf)], [(x1, y1, x2, y2, conf, name)])."""
+        x, scale = letterbox(bgr, self._h, self._w, self._yolox)
+        out = self._engine.run(x)[0]
+        return decode(out, scale, bgr.shape[1], bgr.shape[0]), decode_objects(out, scale, bgr.shape[1], bgr.shape[0])

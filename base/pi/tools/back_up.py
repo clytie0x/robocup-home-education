@@ -2,8 +2,9 @@
 
   python tools/safe_run.py .venv/bin/python tools/back_up.py --metres 0.2 --yes-back-up [--avoid trail.json]
 
-The only program that drives the base backward (wheels.Wheels.send_reverse, B packets); everything
-else stays forward-only (wheels.packet, safety.must_stop). Straight back at SPEED, at most MAX_METRES.
+With run_follow's escape from corners (escape.py), the only program that drives the base backward
+(wheels.Wheels.send_reverse, B packets); everything else stays forward-only (wheels.packet, safety.must_stop).
+Straight back at SPEED, at most MAX_METRES.
 Before the first packet and on every scan after it, for the distance still left plus the run-on
 after S#: the real outline must stay clear of the LiDAR points (safety.rear_clear) and AVOID_MARGIN
 from every --avoid point, by the rule of footprint.sweep_clear (a point already nearer only blocks

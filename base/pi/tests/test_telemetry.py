@@ -107,6 +107,20 @@ class SchemaTest(Temp):
         self.assertEqual(telemetry.migrate(db, steps), 2)
         self.assertEqual(db.execute("SELECT count(*) FROM a").fetchone()[0], 1)  # step 2 ran once
 
+    def test_migration_v1_to_v2_keeps_old_marks_as_bank(self):
+        db = sqlite3.connect(str(self.dir / "v1.db"))
+        self.opened.append(db)
+        self.assertEqual(telemetry.migrate(db, telemetry.MIGRATIONS[:1]), 1)
+        db.execute("INSERT INTO charge_marks VALUES (10.0, 'full', 100.0, NULL)")  # a v1 row: no battery column
+        db.execute("INSERT INTO charge_marks VALUES (20.0, 'reading', 80.0, 'display')")
+        db.commit()
+        self.assertEqual(telemetry.migrate(db), 2)
+        self.assertEqual(db.execute("SELECT ts, kind, percent, battery FROM charge_marks ORDER BY ts").fetchall(),
+                         [(10.0, "full", 100.0, "bank"), (20.0, "reading", 80.0, "bank")])
+        telemetry.mark_full(db, ts=30.0, battery="motor")
+        self.assertEqual((telemetry.estimate(db, now=40.0)["mark_ts"], telemetry.motor_usage(db, now=40.0)["since"]),
+                         (20.0, 30.0))
+
 
 class PiReaderTest(Temp):
     def test_nothing_readable_gives_nulls(self):
@@ -562,14 +576,49 @@ class BankTest(Temp):
         telemetry.mark_full(db, ts=0.0)
         self.watts(db, 0.0, 3600.0, 60.0, 8.0, 2.0)
         e = telemetry.estimate(db, now=3600.0)
-        self.assertAlmostEqual(e["wh_used"], 10.0 / telemetry.BANK_EFFICIENCY)
-        self.assertAlmostEqual(e["percent"], 100.0 - self.drop(10.0, 1.0))
-        self.assertAlmostEqual(e["low"], 100.0 - 1.1 * self.drop(10.0, 1.0))
-        self.assertAlmostEqual(e["high"], 100.0 - 0.9 * self.drop(10.0, 1.0))
+        self.assertAlmostEqual(e["wh_used"], 8.0 / telemetry.BANK_EFFICIENCY)  # the motors' 2 W are not the bank's
+        self.assertAlmostEqual(e["percent"], 100.0 - self.drop(8.0, 1.0))
+        self.assertAlmostEqual(e["low"], 100.0 - 1.1 * self.drop(8.0, 1.0))
+        self.assertAlmostEqual(e["high"], 100.0 - 0.9 * self.drop(8.0, 1.0))
         self.assertAlmostEqual(e["hours_on"], 1.0)
         self.assertAlmostEqual(e["driving_min"], 60.0)
         self.assertEqual((e["mark_kind"], e["mark_percent"]), ("full", 100.0))
         self.assertIsNone(e["warning"])
+
+    def test_bank_estimate_ignores_motor_watts(self):
+        db = self.db()
+        telemetry.mark_full(db, ts=0.0)
+        self.watts(db, 0.0, 3600.0, 60.0, 5.0, 12.0)
+        with_motors = telemetry.estimate(db, now=3600.0)
+        db2 = sqlite3.connect(":memory:")
+        telemetry.migrate(db2)
+        telemetry.mark_full(db2, ts=0.0)
+        self.watts(db2, 0.0, 3600.0, 60.0, 5.0, 0.0)
+        without = telemetry.estimate(db2, now=3600.0)
+        db2.close()
+        self.assertAlmostEqual(with_motors["wh_used"], 5.0 / telemetry.BANK_EFFICIENCY)
+        self.assertAlmostEqual(with_motors["percent"], without["percent"])
+        self.assertAlmostEqual(with_motors["driving_min"], 60.0)  # still reported, but costs the bank nothing
+
+    def test_motor_usage_sums_only_since_the_last_motor_mark(self):
+        db = self.db()
+        self.assertEqual(telemetry.motor_usage(db, now=0.0), {"since": None, "wh_used": None, "drive_minutes": None})
+        for t in range(0, 7201, 60):  # 12 W at the motors until 5400 s, then standing still
+            db.execute("INSERT INTO samples VALUES (?, 'bank', 'pi_est_w', 5.0)", (float(t),))
+            db.execute("INSERT INTO samples VALUES (?, 'bank', 'motor_est_w', ?)", (float(t), 12.0 if t < 5400 else 0.0))
+        db.commit()
+        telemetry.mark_full(db, ts=0.0, battery="motor")
+        telemetry.mark_full(db, ts=3600.0, battery="motor")  # charged again: the first hour no longer counts
+        telemetry.mark_full(db, ts=4000.0)  # a power bank mark changes nothing here
+        telemetry.add_reading(db, 90, ts=4500.0)
+        m = telemetry.motor_usage(db, now=7200.0)
+        self.assertEqual(m["since"], 3600.0)
+        self.assertAlmostEqual(m["wh_used"], 12.0 * 0.5)
+        self.assertAlmostEqual(m["drive_minutes"], 30.0)
+        self.assertEqual(telemetry.estimate(db, now=7200.0)["mark_ts"], 4500.0)  # motor marks are not bank marks
+        self.assertEqual(telemetry.motor_usage(db, now=1800.0)["since"], 0.0)
+        with self.assertRaises(ValueError):
+            telemetry.mark_full(db, battery="jetson")
 
     def test_gaps_longer_than_a_minute_count_as_off(self):
         db = self.db()
@@ -594,14 +643,15 @@ class BankTest(Temp):
         self.watts(db, 0.0, 36000.0, 60.0, 50.0)
         e = telemetry.estimate(db, now=36000.0)
         self.assertEqual((e["percent"], e["low"]), (0.0, 0.0))
-        self.assertIn("15-20 %", e["warning"])
+        self.assertIn("Pi จะดับ", e["warning"])  # the bank feeds only the Pi now: when it runs out the Pi goes off
+        self.assertNotIn("15-20", e["warning"])
 
     def test_warning_below_30(self):
         db = self.db()
         telemetry.add_reading(db, 31, ts=0.0)
         self.assertIsNone(telemetry.estimate(db, now=0.0)["warning"])
         telemetry.add_reading(db, 29, ts=1.0)
-        self.assertIn("wheels may stop", telemetry.estimate(db, now=1.0)["warning"])
+        self.assertIn("ต่ำกว่า 30% แล้ว ชาร์จ power bank ก่อน", telemetry.estimate(db, now=1.0)["warning"])
 
     def test_no_mark_yet(self):
         e = telemetry.estimate(self.db(), now=0.0)
@@ -681,6 +731,27 @@ class BankTest(Temp):
         stored = db.execute("SELECT value FROM samples WHERE metric='bank_est_pct' AND ts=60").fetchone()[0]
         self.assertAlmostEqual(stored, data["bank"]["bank_est_pct"])
 
+    def test_recorder_counts_motor_wh_apart_from_the_bank(self):
+        db = self.db()
+        telemetry.mark_full(db, ts=0.0)
+        telemetry.mark_full(db, ts=0.0, battery="motor")
+        rec = self.recorder(pi=FakePi({"pi_cpu_pct": 50.0}))
+        read_all = rec.read_all
+        def driving():
+            data = read_all()
+            data["bank"]["motor_est_w"] = 12.0
+            return data
+        rec.read_all = driving
+        for now in range(0, 61, 5):
+            data = rec.tick(float(now))
+        rec.close()
+        w = telemetry.pi_watts(50.0)
+        self.assertAlmostEqual(data["bank"]["bank_est_wh_used"], w * 60 / 3600 / telemetry.BANK_EFFICIENCY)
+        self.assertAlmostEqual(data["bank"]["motor_est_wh_used"], 12.0 * 60 / 3600)
+        self.assertAlmostEqual(data["bank"]["motor_est_wh_used"], telemetry.motor_usage(db, now=60.0)["wh_used"])
+        stored = db.execute("SELECT value FROM samples WHERE metric='motor_est_wh_used' AND ts=60").fetchone()[0]
+        self.assertAlmostEqual(stored, 0.2)
+
     def test_recorder_picks_up_a_new_mark(self):
         db = self.db()
         rec = self.recorder(pi=FakePi({"pi_cpu_pct": 0.0}))
@@ -694,9 +765,12 @@ class BankTest(Temp):
         args = ["--db", str(self.db_path)]
         self.assertEqual(telemetry.main(args + ["--charged"]), 0)
         self.assertEqual(telemetry.main(args + ["--reading", "62"]), 0)
+        self.assertEqual(telemetry.main(args + ["--charged", "motor"]), 0)
         self.assertEqual(telemetry.main(args + ["--estimate"]), 0)
-        rows = self.db().execute("SELECT kind, percent FROM charge_marks ORDER BY ts, rowid").fetchall()
-        self.assertEqual(rows, [("full", 100.0), ("reading", 62.0)])
+        rows = self.db().execute("SELECT kind, percent, battery FROM charge_marks ORDER BY ts, rowid").fetchall()
+        self.assertEqual(rows, [("full", 100.0, "bank"), ("reading", 62.0, "bank"), ("full", 100.0, "motor")])
+        with self.assertRaises(SystemExit):
+            telemetry.main(args + ["--charged", "jetson"])
 
 
 if __name__ == "__main__":

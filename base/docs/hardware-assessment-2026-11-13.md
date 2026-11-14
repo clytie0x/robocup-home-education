@@ -821,9 +821,75 @@ wheels, both encoder counts stay put, and after 0.3 s above 30 % PWM the firmwar
 counts (left 17983, later right 502), so both encoders and the board work: the motors get no
 power. The last drive that moved was base_check at 08:31 to 08:35 (new firmware).
 
-Motor power: the owner said on 2026-11-13 that the one UGREEN power bank (145 W, 25,000 mAh)
-feeds the Pi and the motors; the motor feed is a USB-C cable from it down to the driver board.
-I had wrongly told the owner tonight that the 21V tool battery feeds the motors (my guess from
-photos). The bank showed 15 % at 23:30. Not measured, but consistent: a USB-C source gives 12 V
-only when it agrees to (PD), and a nearly empty bank, or one being charged, may give only 5 V.
-run_follow did not notice the wheels were not turning; the `E#` fault flags are not read by the Pi.
+Motor power, settled 2026-11-15 about 01:30: the owner reconnected the "21V MAX LITHIUM" tool
+battery and the same probe moved both wheels (encoder counts rising on both, flags 00, odometry
++0.05 m; speed overshot the 50 mm/s target to 66 mm/s at 0.8 s). So the motors run off the 21V
+battery through the DC-DC converter, and the night's cause was that battery being disconnected.
+The note above from 2026-11-13 ("one power bank feeds everything") is outdated: the UGREEN bank
+feeds the Pi side. During the night I first said the 21V battery (right), then followed that old
+note and sent the owner after the power bank (wrong). run_follow did not notice the wheels were
+not turning; the `E#` fault flags were not read by the Pi (the wheel watch added since does).
+
+## Lowest speeds that turn the wheels, 2026-11-15 about 02:05
+
+New firmware 0c020e4, 21V battery connected, robot on the floor. One-off sweep under safe_run:
+each command held 1.5 s (sent every 0.05 s), then S# and 1 s rest; encoder counts from `E#`.
+
+| command | packet | left counts | right counts | last D# speed (mm/s) |
+|---|---|---|---|---|
+| v 0.01 | F001 | 306 | 273 | 17 / 16 |
+| v 0.02 | F002 | 2283 | 2173 | 21 / 21 |
+| v 0.03 | F003 | 3818 | 3642 | 32 / 30 |
+| v 0.04 | F004 | 5327 | 5035 | 43 / 41 |
+| w +0.05 | F000/+005 | -4 | 11 | 0 / 2 (does not turn) |
+| w -0.05 | F000/-005 | 9 | -35 | 1 / -6 (does not turn) |
+| w +0.10 | F000/+010 | -1375 | 1267 | -19 / 17 |
+| w -0.10 | F000/-010 | 1525 | -1247 | 19 / -17 |
+| w +-0.15 | | -2514/2634 | 2302/-2350 | 23 |
+
+Forward the wheels move from 0.01 m/s (slow to start: 306 counts in 1.5 s). On the spot they do
+not turn at 0.05 rad/s (7 mm/s per wheel, PWM about 25 %) and turn at 0.10 rad/s. The Pi wheel
+watch (STALL_V 0.03 m/s, STALL_W 0.15 rad/s) is above both, so it should not raise false alarms;
+the firmware fault needs PWM above 30 %, which the 0.05 rad/s stall did not reach. The brain
+commanding turns between about 0.05 and 0.10 rad/s on the spot will not move. Total motion of the
+sweep: 0.21 m forward by odometry, small turns both ways.
+
+## Top speed on the floor is a hardware limit, 2026-11-15 about 02:20
+
+First the robot backed 0.26 m along the path it had just driven (rear checked with the LiDAR
+every cycle) and turned -51 deg on the spot toward the clearest heading (3.52 m free; the camera
+showed a clear floor). Then, under safe_run, firmware `Kvmax=0.20#` (RAM only, set back to 0.12
+afterwards; the reply confirmed both) and `F020|+000#` for 3.1 s, with a LiDAR stop at 0.9 m:
+
+- PWM reached 100 % on both wheels by 0.55 s and stayed there.
+- Speed at 100 % PWM: left 117 to 119 mm/s, right 118 to 121 mm/s (mean after 1.2 s: 118 / 120).
+- Odometry 0.392 m in 3.1 s.
+
+So the wheels cannot go faster than about 0.12 m/s on this floor with this supply and driver,
+whatever the firmware allows: `max_speed` 0.12 in params.json is the real top. Not measured: the
+motor voltage under load (the L298N's datasheet drop is 1.8 to 4.9 V, so the motors may see only
+about 9 to 10 V of the converter's 12 V) and the motors' rated voltage (label not read yet).
+
+## Arm on the floor bag: shared arm, 2026-11-15 04:00 to 04:45
+
+- Hover test (`floor_pick.py --pick 0.32 -0.13 --z 0.30 --hover-only`): our trajectory was ended after
+  12.8 s with "stopped / replaced by another command". Cause, from the arm team's logs
+  (`~/.ros/log/python3_39772_*.log`, `python3_39769_*.log`): their pick_place node's auto rest
+  (`rest_after_s` 120) fired at 1794690960.59 because the arm had left the rest pose and their last task
+  was over 120 s old, and its MoveIt trajectory replaced ours. Our failure path then called `/arm/stop`,
+  which stopped their rest move ("แขนไปไม่ถึง"). Their node then holds still (`hold_still`) until the
+  next command. So: run `/arm/home` (an API task) first, which restarts their idle timer.
+- Deck seen from the gripper camera at robot (0.05, +0.25, 0.40) and (0.05, -0.22, 0.40), pitch -75:
+  left side, a white bar (likely the power strip) and a black cable along the deck edge; right side,
+  the Jetson board with its fan. Their planner keeps a carried bag off the deck footprint by 8 cm, or
+  20 cm above the deck when it passes over (`BAG_OVER_DECK`, "computer, power strip").
+- 04:33 to 04:34 another program moved the arm: `gcam.py look ...` from `~/so100_ws` (the arm team's,
+  started over ssh from 100.97.129.20), 10 views saved to `~/so100_ws/rig/`. Our self-calibration's first
+  move was replaced by theirs, and our failure path called `/arm/stop` once during their run
+  (their `rig/4.q` was empty at that moment). Since then `floor_pick.py` refuses to move while the
+  joints moved in the last 1.5 s without a goal of ours, and does not call `/arm/stop` when another
+  program replaced its move.
+- About 04:36 the gripper camera showed a person's bare foot in front of the robot, and at 04:42 the
+  LiDAR showed two new 9 to 15 cm clusters 0.45 to 0.6 m ahead-left. No arm or base motion until clear.
+- LiDAR at the bag (one scan, 04:22, base frame): points x 0.247 to 0.311, y -0.165 to -0.073, plus
+  x 0.375 to 0.422 at y -0.105 to -0.113.

@@ -21,6 +21,7 @@
   "camera_pitch_deg": 12.3,
   "camera_hfov_deg": 58.59,
   "follow_gap": 0.6,
+  "stop_clearance": 0.10,
   "jetson_host": "10.0.0.2",
   "jetson_hosts_backup": ["192.168.31.137", "100.108.202.48"],
   "pi_host": "10.0.0.1",

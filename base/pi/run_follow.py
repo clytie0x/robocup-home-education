@@ -14,6 +14,16 @@ IDLE (wheels stopped, senses running, enrol allowed); follow, wait, resume, retu
 over TCP, a status line goes back at most 5 Hz, and 2 s without a command line holds the robot
 still until resume, follow or return. The way back starts where follow came.
 
+BAG (--remote): the client's "bag" while it holds the robot with wait in FOLLOW (at the car) finds the bag the
+operator points at and drives up to it until the arm reaches it (bag.py); "bag_again" measures and approaches
+the last bag once more. The status line carries "bag": its id, state, the chosen bag and the result; the
+record "bag" is the chosen bag in the odometry frame (the PC's virtual operator app shows it). Wait, resume,
+follow or return cancel it; the drive counts as path for the way back. Then FOLLOW, still waiting.
+
+The dashboard's task buttons (Follow, Wait, Resume, Go back) work when voice or the Jetson is down:
+with --remote they are taken as the client's commands, without it Go back is Enter and Wait holds
+still until Resume. With no console (nohup) the run waits for Follow on the page instead of Enter.
+
 One cycle per LiDAR revolution (10 Hz): read the sensors, let the brain decide, check the
 safety stop, send the wheel command, log the cycle. Logs go to logs/<start time>/ next to
 this file: log.jsonl (one JSON record per cycle) and every 10th scan with its camera frame.
@@ -43,20 +53,25 @@ from hmc.route import Returner, Route
 from hmc.task import STAND_STILL, STANDING_FORGET
 from hmc.world import Circle
 
+import bag as bag_module
+import cable as cable_module
 import calib
 import camera
 import command_server
 import dashboard as dashboard_module
 import depth_obstacles
+import escape as escape_module
 import geometry
 import keyframes as keyframes_module
 import lidar
 import link as link_module
+import live_feed
 import motion as motion_module
 import params
 import remote_plan
 import safety
 import velocity
+import virtual_operator as virtual_module
 import wheels as wheels_module
 from body import Body
 from senses import LEARNED, LOOK_MATCH, RealSenses
@@ -66,6 +81,12 @@ from senses import LEARNED, LOOK_MATCH, RealSenses
 # stayed, until no path was left (2026-11-13, second drive: no path from 21 s on). Forget them
 # after MEMORY_KEEP like everything else; the camera turns toward where the robot will drive.
 hmc_follower.KEEP_NEAR = 0.0
+# The brain's own memory (MEMORY_KEEP, 10 s) came on top of RealSenses' depth memory (shapes.DEPTH_KEEP,
+# 10 s): one stray circle stayed 20 s, and such circles on open floor left no way to the operator 2.5 m
+# away (2026-11-15: 73 of 81 failed plans had a way with the current LiDAR circles alone). The LiDAR
+# sees all round every scan and RealSenses keeps the depth points: the brain only bridges a second
+# (a LiDAR circle hidden for a moment behind a walking person).
+hmc_follower.MEMORY_KEEP = 1.0
 
 # Diagnostic (2026-11-13): while following, the planner often found no way to the operator
 # though a replay of the saved scans did. Keep the inputs of the last failed plan for the log.
@@ -80,7 +101,17 @@ REMOTE = None
 PLANNER = {"remote": 0, "local": 0}  # plans of each kind since the last log record
 
 
+LAY = {"lay": None}  # the running cycle's cable.Lay: plans keep off the cable when they can (owner, 2026-11-15)
+
+
 def _plan_path_logged(start, goal, shapes, near_side=False, heading=None):
+    if LAY["lay"] is not None:
+        return LAY["lay"].plan(_plan_once, start, goal, shapes, near_side, heading,
+                               waiting=lambda: REMOTE is not None and REMOTE.waiting())
+    return _plan_once(start, goal, shapes, near_side, heading)
+
+
+def _plan_once(start, goal, shapes, near_side=False, heading=None):
     if REMOTE is not None:
         REMOTE.close_plan = hmc_navigation.CLOSE_PLAN  # the page's switch goes with each request
     if REMOTE is not None and REMOTE.alive():
@@ -117,12 +148,26 @@ STILL = (0.0, 0.0, 0.0)  # the dry run's pose: zero motion
 LOG_ROOT = Path(__file__).resolve().parent / "logs"  # on the Pi: ~/hmc-base/logs
 FOLLOW, RETURN, DONE = "follow", "return", "done"  # the phases of a run
 IDLE = "idle"  # --remote only: before the client's follow; the wheels stay stopped
+BAG = "bag"  # --remote only: from FOLLOW held by the client's wait, up to the pointed bag (bag.py), then FOLLOW again
+BAG_COMMANDS = {"bag": "point", "bag_again": "again"}  # command -> bag.BagTask mode
 STATUS_EVERY = 0.2  # s; --remote status lines at most 5 Hz (and after each command)
 REMOTE_SILENCE = 2.0  # s without a command line from the --remote client: hold still until resume, follow or return
 REFUSED_IDLE = {"return": "not following yet", "stop": "idle: nothing to stop"}  # --remote commands IDLE answers with an error
 # m; a larger pose correction leaves the brain's remembered obstacles in the wrong place (Review Focus 2)
 CORRECTED = 0.1
 TURN_REACH = 2.0  # m; a turn correction counts by how far it moves a point this far away
+# Wheels that do not turn (2026-11-14: the motor supply died and the run commanded 0.114 m/s for 60 s, its status
+# saying nothing). Found by the Pi (wheels.StallWatch) or by the firmware's encoder-fault flags (E#); each time
+# the robot stops, sends S# (which clears the fault), says so and holds, latched like the silence hold, until an
+# explicit resume or follow (client or page): someone plugging the battery in must not see it drive off by itself.
+# The WHEELS_EPISODES-th time ends the run.
+WHEELS_EPISODES = 3
+WHEELS_POLL = 0.5  # s between E# reads: the port already carries an O# every cycle
+WHEELS_MISSES = 3  # unreadable E# answers in a row: the old firmware (no E#), not asked again this run
+WHEELS_TEXT = "My wheels are not turning. Please check the motor power."
+# Good motion since the last time forgets the count, so short false alarms minutes apart do not end the run.
+WHEELS_FORGET_M = 0.3  # m driven
+WHEELS_FORGET_S = 10.0  # s of a watched command with the wheels turning
 
 
 class Log:
@@ -170,7 +215,7 @@ class State:
     """
 
     def __init__(self, p, wheels, lidar, camera, link, log, max_speed=None, encode=_no_jpeg, clock=time.monotonic,
-                 velocity_loop=False, return_after=None, remote=None):
+                 velocity_loop=False, return_after=None, remote=None, cable_path=None):
         self.p = p
         self.wheels, self.lidar, self.camera, self.link, self.log = wheels, lidar, camera, link, log
         self.max_speed = p["max_speed"] if max_speed is None else max_speed
@@ -187,6 +232,8 @@ class State:
         self.phase = FOLLOW if remote is None else IDLE
         self.waiting = False  # --remote "wait": hold still, the senses and the brain keep running
         self.silent = False  # --remote: nothing heard from the client for REMOTE_SILENCE
+        self.page_leads = False  # --remote: a task button came after the client's last line: while the page polls, its silence holds nothing
+        self.page_wait = False  # Wait on the page: held ("page") until the page's resume, follow or return (or Enter)
         self.ack = None  # the client's last command (a ping is not one)
         self.status_at = -math.inf  # when the last status line went to the client
         self.last_record = None  # the last cycle record, for a status sent with an end record
@@ -212,12 +259,27 @@ class State:
         self.last_now = None
         self.n = 0  # cycles so far
         self.enrol_said = None
-        self.controls = dashboard_module.Controls(self.max_speed)  # the page's switches (dashboard.py)
+        self.controls = dashboard_module.Controls(self.max_speed, clock=clock)  # the page's switches (dashboard.py)
         self.motion = motion_module.MotionEstimator(p)  # measured motion: odometry checked by scan matching (M1)
         self.estimates = calib.BaseEstimates(p)  # how the base really drives, measured while it drives (M2)
         self.velocity = velocity.VelocityLoop(p, self.estimates) if velocity_loop else None  # M3, --velocity-loop
         self.measured = None  # the newest motion.MotionState
         self.dashboard = None  # the page's server, when main started one
+        self.stall = wheels_module.StallWatch()  # the Pi's own check that the wheels turn
+        self.wheels_alarm = None  # "not turning" or "fault 03" while held for it, else None
+        self.wheels_held = False  # latched for wheels that did not turn, until resume or follow
+        self.wheels_episodes = 0
+        self.wheels_good = [0.0, 0.0]  # m and s of good motion since the last time (WHEELS_FORGET_M, WHEELS_FORGET_S)
+        self.wheels_last = None  # (time, pose) of the previous watched cycle
+        self.firmware = None  # the newest E# answer (wheels.parse_status), None until one is read
+        self.firmware_at = -math.inf  # when E# was last asked
+        self.firmware_misses = 0  # unreadable E# answers in a row
+        self.cable = cable_module.Cable(p, cable_path, self.speech)  # the power cable's net turn; path None: not saved
+        self.escape = escape_module.Escape(p, self.speech, self.body.robot, lambda: _replan(self))  # out of corners
+        self.virtual = None  # virtual_operator.VirtualOperator (--virtual-operator): a simulated person, or None
+        self.bag = None  # bag.BagTask: the running one in BAG, then the last one (its result stays on the status)
+        self.bag_seq = 0  # bag tasks so far this run
+        self.bag_odom = None  # odometry (x, y) of the last chosen bag (record "bag", and what bag_again looks for)
 
 
 def scan_points(scan, p):
@@ -244,30 +306,132 @@ def _end(state, now, reason, detail):
     return record
 
 
+def _poll_firmware(state, now):
+    """E# at most every WHEELS_POLL: the firmware's own encoder-fault flags. After WHEELS_MISSES unreadable
+    answers in a row (the old firmware has no E#) it is not asked again this run; the Pi's check stays."""
+    if state.firmware_misses >= WHEELS_MISSES or now - state.firmware_at < WHEELS_POLL - 1e-6:
+        return
+    state.firmware_at = now
+    try:
+        state.firmware = state.wheels.read_status()
+    except (ValueError, OSError):  # a dead port also fails the odometry read, which ends the run
+        state.firmware_misses += 1
+        if state.firmware_misses == WHEELS_MISSES:
+            state.log.write({"time": now, "wheels": "no E# answer from the firmware: its fault flags are not read this run"})
+        return
+    state.firmware_misses = 0
+
+
+def _watch_wheels(state, now, pose):
+    """FOLLOW, RETURN and BAG with real wheels: stop and hold when the wheels do not turn. Returns the end record
+    at the WHEELS_EPISODES-th time, else None."""
+    if state.wheels is None:
+        return None
+    if state.wheels_held:
+        return None
+    _poll_firmware(state, now)
+    stalled = state.stall.update(now, state.sent, pose)
+    if state.phase not in (FOLLOW, RETURN, BAG):
+        return None
+    flags = 0 if state.firmware is None else state.firmware["flags"]
+    if flags & (wheels_module.FAULT_LEFT | wheels_module.FAULT_RIGHT):
+        state.wheels_alarm = "fault %02x" % flags
+    elif stalled:
+        state.wheels_alarm = "not turning"
+    else:
+        _good_motion(state, now, pose)
+        return None
+    state.wheels_episodes += 1
+    state.wheels_good = [0.0, 0.0]
+    state.log.write({"time": now, "wheels": state.wheels_alarm, "episode": state.wheels_episodes, "firmware": state.firmware})
+    state.speech.say(now, WHEELS_TEXT)
+    if state.wheels_episodes >= WHEELS_EPISODES:
+        return _end(state, now, "wheels not turning", "%s, %d times: is the motor power on?"
+                    % (state.wheels_alarm, state.wheels_episodes))
+    _stop_wheels(state)  # S# now: it also clears the firmware's encoder fault
+    state.wheels_held = True
+    return None
+
+
+def _release_wheels(state, now, cmd):
+    """resume or follow (client or page) after a wheel stop: motion allowed again, watched afresh."""
+    if not state.wheels_held:
+        return
+    state.log.write({"time": now, "wheels": "hold released by %s" % cmd})
+    state.wheels_held = False
+    state.wheels_alarm = state.firmware = state.wheels_last = None  # a fault flag read before the S# is gone
+    state.stall.reset()
+
+
+def _good_motion(state, now, pose):
+    """Count the motion of a cycle without an alarm; enough of it forgets the times so far."""
+    last, state.wheels_last = state.wheels_last, (now, pose)
+    if not state.wheels_episodes or last is None:
+        return
+    state.wheels_good[0] += math.dist(pose[:2], last[1][:2])
+    if abs(state.sent[0]) >= wheels_module.STALL_V or abs(state.sent[1]) >= wheels_module.STALL_W:
+        state.wheels_good[1] += now - last[0]
+    if state.wheels_good[0] >= WHEELS_FORGET_M or state.wheels_good[1] >= WHEELS_FORGET_S:
+        state.log.write({"time": now, "wheels": "%d times forgotten after %.2f m, %.1f s of good motion"
+                         % (state.wheels_episodes, state.wheels_good[0], state.wheels_good[1])})
+        state.wheels_episodes, state.wheels_good = 0, [0.0, 0.0]
+
+
+def _page_command(state, cmd):
+    """The page's own hold: its Wait holds until its resume, follow or return, whatever the client sends."""
+    if cmd == "wait":
+        state.page_wait = True
+    elif cmd in ("resume", "follow", "return"):
+        state.page_wait = False
+
+
 def _remote_commands(state, now):
     """--remote: take the client's commands that arrived since the last cycle. Returns the names of
     those taken (a refused one is answered with an error and changes nothing)."""
     remote = state.remote
     quiet = remote.silent(now)  # how long the client had been silent before this cycle's lines
     commands = remote.poll(now)
+    page = state.controls.take_commands()  # the page's task buttons, taken as if the client had sent them
     for event in remote.events:
         state.log.write({"time": now, "remote": event})
     remote.events.clear()
-    if quiet > REMOTE_SILENCE and not state.silent:
+    # No Jetson: the operator drives the task from the page, but only while the page polls (its heartbeat);
+    # a phone that lost the Wi-Fi leads nothing, and the silence hold is back.
+    leading = (state.page_leads or bool(page)) and state.controls.page_alive(now)
+    if commands:
+        state.page_leads = False  # the client is heard again: its silence holds again, from now on
+    elif page:
+        state.page_leads = True
+    if quiet > REMOTE_SILENCE and not state.silent and not leading:
         state.silent = True  # latched: only resume, follow or return releases it, not a ping
         state.log.write({"time": now, "remote": "silent %.1f s: held until resume, follow or return" % quiet})
     taken = []
-    for cmd in commands:
+    for i, cmd in enumerate(commands + page):
+        by_page = i >= len(commands)
         refused = REFUSED_IDLE.get(cmd) if state.phase == IDLE else None
+        if refused is None and cmd in BAG_COMMANDS:
+            refused = _bag_refused(state)
         if refused is not None:
-            remote.send({"error": refused})
-            state.log.write({"time": now, "remote_refused": cmd, "why": refused})
+            if not by_page:
+                remote.send(dict({"error": refused}, **({"refused": cmd} if cmd in BAG_COMMANDS else {})))
+            state.log.write({"time": now, "remote_refused": cmd, "why": refused, "by": "page" if by_page else "client"})
             continue
         taken.append(cmd)
         if cmd == "ping":
             continue
-        state.ack = cmd
-        state.log.write({"time": now, "remote_cmd": cmd})
+        if not by_page:
+            state.ack = cmd  # the client's own last command: the bridge must not take a page press for its own
+        state.log.write({"time": now, "page_cmd" if by_page else "remote_cmd": cmd})
+        if by_page:
+            _page_command(state, cmd)
+        if state.phase == BAG and cmd in ("wait", "resume", "follow", "return"):
+            _end_bag(state, now, cmd)  # cancelled: FOLLOW again, then the command as always
+        if cmd in BAG_COMMANDS:
+            if by_page:
+                state.page_wait = False  # the page asks the robot to move to the bag: its own Wait is over
+            _start_bag(state, now, cmd)
+        if cmd in ("resume", "follow"):
+            _release_wheels(state, now, cmd)
         if cmd == "follow" and state.phase == IDLE:
             # The way back starts where follow came, not where the program started (the robot may
             # have been carried to the start line): the first-cycle setup runs again this cycle.
@@ -283,9 +447,82 @@ def _remote_commands(state, now):
     return taken
 
 
+def _bag_refused(state):
+    """Why a bag command cannot start now, or None: only at the car, in FOLLOW held by the client's wait."""
+    if state.phase == BAG:
+        return "bag: a bag task is running"
+    if state.phase != FOLLOW or not state.waiting:
+        return "bag: only while waiting at the car (FOLLOW after wait), not in %s" % state.phase.upper()
+    if state.wheels_held:
+        return "bag: held for the wheels"
+    return None
+
+
+def _start_bag(state, now, cmd):
+    state.bag_seq += 1
+    state.bag = bag_module.BagTask(state.p, now, state.bag_seq, BAG_COMMANDS[cmd], last=state.bag_odom)
+    state.phase = BAG
+    state.log.write({"time": now, "bag": "start", "mode": state.bag.mode, "seq": state.bag_seq})
+
+
+def _end_bag(state, now, by=None):
+    """Back to FOLLOW, held by the wait the bag came in (a command that cancelled it then does what it does)."""
+    if by is not None:
+        state.bag.cancel(now, by)
+    state.phase = FOLLOW
+    state.body.robot.speed = state.body.robot.turn_speed = 0.0  # the brain ramps up from standstill
+    _replan(state)
+    state.log.write({"time": now, "bag": "end", "status": state.bag.status()})
+
+
+def _bag_step(state, now, pose, believed, seen, sensed, answer, frame, points):
+    """BAG: this cycle's (v, w, turn error) from the bag task, with its view of the cycle."""
+    p = state.p
+    operator = None if seen.operator is None else geometry.odom_to_base(seen.operator, believed)
+    found = virtual_bags = None
+    report = state.virtual.report if state.virtual is not None else None
+    if report is not None and report.get("person") is not None:  # --virtual-operator: the PC's person and spot
+        operator = geometry.odom_to_base(report["person"][:2], pose)
+        if report.get("pointing") is not None:
+            found = bag_module.virtual_pointing(geometry.odom_to_base(report["pointing"], pose), operator)
+        virtual_bags = [geometry.odom_to_base(b, pose) for b in report.get("bags") or []]
+    elif state.bag.wants_pose:
+        found = bag_module.camera_pointing(answer, operator, (getattr(frame, "width", 320), getattr(frame, "height", 240)), p)
+    boxes = [] if answer is None else [o.box for o in getattr(answer, "objects", [])]
+    view = bag_module.View(
+        now, pose, seen=scan_points(sensed, p), clusters=bag_module.lidar_clusters(sensed, p), operator=operator,
+        found=found, boxes=boxes, frame=(getattr(frame, "width", 320), getattr(frame, "height", 240)),
+        virtual_bags=virtual_bags or (), lay=[geometry.odom_to_base((c.x, c.y), believed) for c in state.cable.lay.shapes],
+        speed_cap=state.body.robot.max_speed, cable_holding=state.cable.holding, real=points)
+    return state.bag.step(view)
+
+
+def _page_commands(state, now):
+    """Without --remote: the page's task buttons. Go back does what Enter does; Wait holds still until
+    Resume, Follow or Go back. Returns the names taken."""
+    taken = state.controls.take_commands()
+    for cmd in taken:
+        state.log.write({"time": now, "page_cmd": cmd})
+        if cmd == "return":
+            state.go_back.set()
+        _page_command(state, cmd)
+        if cmd in ("resume", "follow"):
+            _release_wheels(state, now, cmd)
+    return taken
+
+
 def _held(state):
-    """--remote: why the client's side holds the robot still ("wait" or "silent"), or None."""
-    return "wait" if state.waiting else "silent" if state.silent else None
+    """Why the page's Wait ("page"), wheels that did not turn ("wheels") or the client's side (--remote: "wait",
+    "silent") hold the robot still, or None."""
+    if state.page_wait:
+        return "page"
+    return "wheels" if state.wheels_held else "wait" if state.waiting else "silent" if state.silent else None
+
+
+def _held_now(state):
+    """_held, except that in BAG the client's wait (the one the bag came in) does not hold: the bag task moves."""
+    held = _held(state)
+    return None if state.phase == BAG and held == "wait" else held
 
 
 def _report(state, now, record, force=False):
@@ -304,7 +541,7 @@ def _report(state, now, record, force=False):
         "t": now,
         "phase": DONE.upper() if "end" in record else state.phase.upper(),
         "waiting": state.waiting,
-        "held": _held(state),
+        "held": _held_now(state),
         "locked": bool(last.get("locked", False)),
         "operator_m": None if operator is None or believed is None else round(math.dist(operator, believed[:2]), 3),
         "breadcrumbs": last.get("breadcrumbs", 0),
@@ -312,6 +549,10 @@ def _report(state, now, record, force=False):
         "at_start": state.returner is not None and state.returner.done,
         "stop": record.get("stop"),
         "ack": state.ack,
+        "ack_by": None if state.ack is None else "client",  # a page press is never the ack (base_bridge reads it)
+        "wheels": state.wheels_alarm,  # "not turning" or "fault 03" while held for wheels that did not turn
+        "cable_deg": round(state.cable.net_deg, 1),  # the power cable's net turn since it was straightened
+        "bag": None if state.bag is None else state.bag.status(),  # the running or last bag task (bag.py)
     })
     state.status_at = now
 
@@ -482,7 +723,7 @@ def cycle(state, now):
     if switches["end"]:
         return _end(state, now, "dashboard", "STOP pressed on the page")
     hmc_navigation.CLOSE_PLAN = switches["close_plan"]
-    commands = _remote_commands(state, now) if state.remote is not None else []
+    commands = _remote_commands(state, now) if state.remote is not None else _page_commands(state, now)
     if "stop" in commands:
         state.phase = DONE
         return _end(state, now, "remote stop", "stop from the client")
@@ -492,10 +733,15 @@ def cycle(state, now):
         pose = state.wheels.read_odom() if state.wheels is not None else STILL
     except (ValueError, OSError) as error:  # pyserial's SerialException is an OSError
         return _end(state, now, "odometry", error)
+    if state.wheels is not None:
+        state.cable.update(pose[2], now, pose)  # the odometry pose, never the keyframe-corrected one
     scan = state.lidar.latest()
     frame = state.camera.latest()
     answer = state.link.latest() if state.link is not None else None
     link_alive = state.link is not None and state.link.alive(now, p["jetson_silence"])
+    sensed = scan  # what the senses read; the safety stop, the motion, the keyframes and the logs keep the real scan
+    if state.virtual is not None:  # --virtual-operator: the simulated person in the scan and the camera answer
+        sensed, answer, link_alive = state.virtual.apply(now, pose, scan, answer, link_alive)
 
     if state.wheels is not None:  # a dry run has no motion to measure
         state.measured = state.motion.update(now, pose, scan, state.sent)
@@ -503,6 +749,9 @@ def cycle(state, now):
         state.estimates.observe(state.measured, state.sent, sent_at)
         world_decel, world_delay = state.estimates.safe_braking()  # never better than params.json
         hmc_world.MAX_DECEL, hmc_world.STOP_DELAY = world_decel, world_delay
+    end = _watch_wheels(state, now, pose)
+    if end is not None:
+        return end
     t_read = state.clock() - now
     follower = state.follower
     # The brain's frame: the odometry, moved by the keyframe corrections of the way back.
@@ -514,6 +763,7 @@ def cycle(state, now):
         state.keyframes.add(believed, scan)
     if state.phase == FOLLOW and state.enter is not None and state.enter():
         state.go_back.set()
+        state.waiting = state.page_wait = False  # Enter is the operator's own go: it ends a Wait
     if state.phase == FOLLOW and (state.go_back.is_set() or (
             state.return_after is not None and now - state.started >= state.return_after)):
         state.phase = RETURN
@@ -526,7 +776,10 @@ def cycle(state, now):
     depth_points = None
     if frame is not None and params.depth_gates_open(p):
         depth_points = depth_obstacles.points(frame.depth, p)
-    state.body.limit(min(state.max_speed, switches["max_speed"], safety.speed_cap(depth_points, p)))
+    state.cable.lay.refresh(pose, lambda q: _moved(state.fix, q), now)  # the cable's lay for this cycle's plans
+    LAY["lay"] = state.cable.lay
+    state.body.limit(min(state.max_speed, switches["max_speed"], safety.speed_cap(depth_points, p),
+                         state.cable.lay.cap(believed[:2])))  # slow over the cable when planned across it
     # The base acts on a command command_latency after it is sent: the brain plans from where the
     # commands already on their way will have taken it, not from where it is now (Task 5).
     state.body.sync(ahead(believed, state.history, now, p["command_latency"]))
@@ -539,7 +792,7 @@ def cycle(state, now):
         # The first enrol takes the one person in view; once a look is learned, a re-enrol
         # must look like the operator, or a stranger who steps in would be learned too.
         accept = (lambda look: follower.score(look) >= LOOK_MATCH) if senses.learned else None
-        result = senses.enrol(now, scan, answer, accept)
+        result = senses.enrol(now, sensed, answer, accept)
         enrol = result if isinstance(result, str) else "locked"
         if enrol != state.enrol_said:
             print("enrol: %s" % enrol)
@@ -548,7 +801,7 @@ def cycle(state, now):
     v_was, w_was = state.sent
     # The senses keep their state in the odometry frame (it never jumps): what moved and what is
     # furniture, the yaw history for old camera answers. Only their output goes to the believed frame.
-    seen = _to_believed(state.fix, senses.read(now, pose, v_was, w_was, dt, scan, depth_points, answer, link_alive,
+    seen = _to_believed(state.fix, senses.read(now, pose, v_was, w_was, dt, sensed, depth_points, answer, link_alive,
                                                follower.score))
     t_senses = state.clock() - now
     if REMOTE is not None and REMOTE.waiting():
@@ -562,40 +815,68 @@ def cycle(state, now):
             state.keyframes.add(believed, scan)
     elif state.phase == RETURN:
         _return(state, seen, now, dt)
+    elif state.phase == BAG:  # the drive up to the bag is path too: the way back drives it again
+        crumbs = len(follower.route.points)
+        follower.route.add(believed[:2])
+        if len(follower.route.points) > crumbs:
+            state.keyframes.add(believed, scan)
+    LAY["lay"] = None  # plans outside a cycle (tools, other tests) never get this run's cable
     t_brain = state.clock() - now
 
     # 4. The command, and the stops that override the brain.
     stop = None
-    if senses.ambiguous and state.phase == FOLLOW:
+    if state.wheels_held:
+        stop = "wheels"  # held for wheels that did not turn (_watch_wheels), until resume or follow
+    if stop is None and senses.ambiguous and state.phase == FOLLOW:
         stop = "ambiguous"  # someone is right at the operator: wait, never guess who is who
-    points = scan_points(scan, p)
+    points = lidar_points = scan_points(scan, p)
     if depth_points is not None:
         points = numpy.vstack([points, depth_points])
     v, w = state.body.command()
     if state.phase == DONE:
         v = w = 0.0
+    turn_error = state.body.robot.turn_error
+    if state.phase == BAG:  # the bag task drives, not the brain (it does not step in BAG)
+        v, w, turn_error = _bag_step(state, now, pose, believed, seen, sensed, answer, frame, points)
     search = _search(state, follower, pose, answer, link_alive, now) if state.phase == FOLLOW else None
     if search is not None:
         v, w = search
-    if state.velocity is not None and state.measured is not None:
+    # Out of a corner (escape.py), never while held; the obstacle stop below still checks its command.
+    held = (stop or ("paused" if switches["paused"] else None) or _held(state) or ("cable" if state.cable.holding else None)
+            or (None if state.phase in (FOLLOW, RETURN) else state.phase))
+    escaped = state.escape.command(now, pose, escape_module.goal(state, believed), held, lidar_points, points, state.cable)
+    if escaped is not None:
+        v, w = escaped
+    w = state.cable.steer(v, w, None if search is not None else turn_error, now, planned=escaped is not None)
+    if state.velocity is not None and state.measured is not None and escaped is None and state.phase != BAG:
         v, w = state.velocity.command(v, w, state.measured, state.body.robot.max_speed)  # 0 stays 0
-    # SLOW_CYCLE: the next cycle may come that late (a later one ends the run), so the command runs that long
-    if stop is None and any(safety.must_stop(points, mv, mw, p, cycle=SLOW_CYCLE) for mv, mw in state.coast.motions(v, w, now)):
+    # SLOW_CYCLE: the next cycle may come that late (a later one ends the run), so the command runs that long.
+    # BAG creeping: the locked bag's own points are left out, only they may come closer than the clearance.
+    checked = state.bag.safety_points(points) if state.phase == BAG else points
+    if stop is None and any(safety.must_stop(checked, mv, mw, p, cycle=SLOW_CYCLE) for mv, mw in state.coast.motions(v, w, now)):
         stop = "obstacle"
+    if stop is None and v < 0 and not safety.rear_clear(points, -v, p, -v * SLOW_CYCLE):
+        stop = "obstacle"  # backing (an escape): the rear's sweep is its obstacle stop
     if stop is None and not scan:
         stop = "no scan"  # the LiDAR went quiet: blind, so do not move
     if stop is None and switches["paused"]:
         stop = "paused"  # from the page: hold still, the senses and the brain keep running
-    if stop is None and state.remote is not None:  # the same hold, from the client or its silence
-        if state.phase == IDLE:
+    if stop is None:  # the same hold, from the client, its silence or the page's Wait
+        if state.phase == IDLE:  # --remote only
             stop = "idle"
         elif state.phase != DONE:
-            stop = _held(state)
+            stop = _held_now(state)
     if stop is not None:
         v = w = 0.0
         if state.velocity is not None:
             state.velocity.reset(now)  # nothing was driven: the integral must not grow while held
         state.body.robot.speed = state.body.robot.turn_speed = 0.0  # the brain ramps up again from standstill
+    if state.phase == BAG:
+        state.bag.after(now, stop, (v, w))
+        if state.bag.bag is not None:
+            state.bag_odom = tuple(state.bag.bag)
+        if state.bag.done:
+            _end_bag(state, now)
 
     # 5. Wheels, Jetson, log. A command computed from sensors read too long ago is stale: stop instead.
     cycle_time = state.clock() - now  # compute time, cycle start to send
@@ -603,14 +884,17 @@ def cycle(state, now):
         return _end(state, now, "slow cycle", "%.2f s from cycle start to send" % cycle_time)
     if state.wheels is not None:
         try:
-            state.wheels.send(v, w)
+            state.wheels.send_reverse(-v, w) if v < 0 else state.wheels.send(v, w)  # backward only in an escape
         except (ValueError, OSError) as error:
-            return _end(state, now, "wheels", error)
+            return _end(state, now, "wheels port", error)
         state.sent = (v, w)
         state.history = [h for h in state.history if h[0] > now - HISTORY] + [(now, v, w)]  # only what reached the wheels
     state.coast.sent(v, w, now)
     if frame is not None and state.link is not None:
-        state.link.send(frame)
+        if state.phase == BAG and state.bag.wants_pose:
+            state.link.send(frame, pose=True)  # keypoints only while the bag task looks for the pointing
+        else:
+            state.link.send(frame)
     if state.n % SAVE_EVERY == 0:
         state.log.save_scan(state.n, scan, state.encode(frame) if frame is not None else None)
     state.n += 1
@@ -625,6 +909,7 @@ def cycle(state, now):
         "locked": senses.locked,
         "learned": follower.operator_look.count,
         "link": link_alive,
+        "link_host": getattr(state.link, "host", None),  # which path to the Jetson is in use (cable or a backup)
         "operator": None if seen.operator is None else list(seen.operator),
         "operator_kept": None if operator is None else list(operator),  # the brain's smoothed operator
         "people": [list(pt) for pt in seen.people.values()],
@@ -652,9 +937,21 @@ def cycle(state, now):
         "target": None if state.returner is None or state.returner.target is None else list(state.returner.target),
         "keyframe": report,  # the match against the nearest keyframe (RETURN), or None
         "queue": state.queue.last_tail[1] if state.joined and state.queue.last_tail else None,  # tail's id
+        "wheels": state.wheels_alarm,  # "not turning" or "fault 03" while held for it (_watch_wheels), else None
+        "cable_deg": round(state.cable.net_deg, 1),  # the power cable's net turn (cable.py)
+        "cable": state.cable.why,  # what the cable rules did to this cycle's turn, or None
+        "cable_lay_m": round(state.cable.lay.length_m(), 2),  # m of cable on the floor by the estimate
+        "cable_cross": state.cable.lay.crossing,  # {"since"} while planned over the cable (no way beside it)
+        # the last chosen bag, odometry frame (the PC's virtual operator app reads it), and the bag task
+        "bag": None if state.bag_odom is None else [round(state.bag_odom[0], 3), round(state.bag_odom[1], 3)],
+        "bag_task": None if state.bag is None else dict(state.bag.status(), why=state.bag.why),
     }
+    state.escape.note(record)  # "escape": what it started or ended this cycle and why, or None
+    if state.virtual is not None:
+        record["virtual"] = state.virtual.report  # where the simulated person was and what the senses got
+        record["virtual_pointing"] = state.virtual.report.get("pointing")  # [x, y] in place of the camera's pointing
     if state.remote is not None:
-        record["remote"] = {"waiting": state.waiting, "held": _held(state), "silent_s": round(state.remote.silent(now), 2),
+        record["remote"] = {"waiting": state.waiting, "held": _held_now(state), "silent_s": round(state.remote.silent(now), 2),
                             "last_cmd": state.ack}
     if state.phase == DONE:
         _stop_wheels(state)
@@ -662,6 +959,10 @@ def cycle(state, now):
     state.log.write(record)
     if state.dashboard is not None:
         state.dashboard.latest = record
+        try:  # references only, for the console's Live tab (live_feed.py): never let it stop a cycle
+            state.dashboard.feed.put(frame, lidar_points, record, now)
+        except Exception:
+            pass
     PLANNER.update(remote=0, local=0)
     if NO_PATH and state.n % 20 == 0:  # at most one dump every 2 s
         state.log.write({"time": now, "no_path": dict(NO_PATH)})
@@ -697,8 +998,28 @@ def open_console(stream):
 
 
 def enter_pressed(console):
-    """True when a line (Enter) is waiting on the console; never waits. The end of input is not Enter."""
-    return bool(select.select([console], [], [], 0)[0]) and console.readline().endswith(b"\n")
+    """True when a line (Enter) is waiting on the console; never waits. The end of input is not Enter,
+    nor is a console that went away (a closed stream, a hung-up terminal): that must not end the cycle."""
+    try:
+        return bool(select.select([console], [], [], 0)[0]) and console.readline().endswith(b"\n")
+    except (OSError, ValueError):
+        return False
+
+
+def console_is_tty(stream):
+    """True when stream is a terminal someone can press Enter on. Under nohup or a service stdin is
+    /dev/null, a pipe or missing, and input() raises EOFError (2026-11-14: a run died of it)."""
+    try:
+        return stream is not None and stream.isatty()
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def wait_for_follow(controls, sleep=time.sleep):
+    """No console: Follow on the page starts the run instead of Enter. STOP on the page also ends the
+    wait (the first cycle then ends the run); other buttons pressed before Follow are dropped."""
+    while not (controls.snapshot()["end"] or "follow" in controls.take_commands()):
+        sleep(PERIOD)
 
 
 def discard_typed(console):
@@ -760,9 +1081,22 @@ def main(argv=None):
                         help="start the way back by itself after N s of following (a test aid; Enter does it too)")
     parser.add_argument("--dashboard", type=int, default=dashboard_module.PORT, metavar="PORT",
                         help="serve the status page on this port (0: no page)")
+    parser.add_argument("--dashboard-host", default="127.0.0.1", metavar="ADDRESS",
+                        help="the address the page listens on (default 127.0.0.1: only the console, which checks"
+                             " its PIN, reaches the switches; 0.0.0.0 opens it to the whole network on purpose)")
     parser.add_argument("--remote", type=int, nargs="?", const=command_server.PORT, metavar="PORT",
-                        help="take follow, wait, resume, return and stop from a TCP client (the Jetson) on this port"
+                        help="take follow, wait, resume, return, stop and bag from a TCP client (the Jetson) on this port"
                              " (default %d) instead of Enter; the run starts standing still" % command_server.PORT)
+    parser.add_argument("--remote-allow", metavar="ADDRESSES",
+                        help="comma list of the addresses --remote takes commands from (default: the Jetson's"
+                             " jetson_host and jetson_hosts_backup, and 127.0.0.1)")
+    parser.add_argument("--virtual-operator", type=int, metavar="PORT",
+                        help="follow a simulated person sent from the owner's PC (UDP on this port, virtual_operator.py)"
+                             " instead of the camera's people; needs --remote")
+    parser.add_argument("--virtual-allow", metavar="ADDRESSES",
+                        help="comma list of the PC addresses --virtual-operator takes (127.0.0.1 and Tailscale always)")
+    parser.add_argument("--cable", type=Path, default=cable_module.PATH, metavar="FILE",
+                        help="the power cable's net turn, kept across runs (default %s)" % cable_module.PATH)
     args = parser.parse_args(argv)
     p = params.load()
     why = refusal(args.drive, args.max_speed, p)
@@ -770,12 +1104,21 @@ def main(argv=None):
         sys.exit("REFUSED: " + why)
     if args.drive and not wheels_module.under_safe_run():
         sys.exit("REFUSED: --drive: " + wheels_module.NOT_SAFE_RUN)
+    tty = console_is_tty(sys.stdin)
+    if args.remote is None and not args.dashboard and not tty:
+        sys.exit("REFUSED: no console, no --remote and no --dashboard: nothing could start the run")
+    if args.virtual_operator is not None and args.remote is None:
+        sys.exit("REFUSED: --virtual-operator needs --remote (the console's runs)")
+    try:
+        virtual_allowed = virtual_module.parse_allow(args.virtual_allow)
+    except ValueError as error:
+        sys.exit("REFUSED: --virtual-allow: %s" % error)
 
     for sig in STOP_SIGNALS[1:]:  # SIGINT already raises KeyboardInterrupt
         signal.signal(sig, _interrupt)
     log = Log(LOG_ROOT / time.strftime("%Y%m%d-%H%M%S"))
     print("logging to", log.folder)
-    session = cam = link = wheels = server = page = remote = None
+    session = cam = link = wheels = server = page = remote = state = None
     global REMOTE
     try:
         if args.planner == "pi":
@@ -789,29 +1132,47 @@ def main(argv=None):
         cam = camera.Camera()
         cam.start()
         if not args.no_jetson:
-            link = link_module.JetsonLink(p["jetson_host"], p["jetson_port"], p["camera_hfov_deg"])
+            link = link_module.JetsonLink(link_module.hosts(p), p["jetson_port"], p["camera_hfov_deg"])  # cable first, then Wi-Fi
             link.start()
         wheels = open_wheels(args.drive, p)
         if args.remote is not None:
-            remote = command_server.CommandServer(port=args.remote)
+            # only the Jetson (cable, Wi-Fi, Tailscale) and this computer: anyone else on the LAN could drive
+            allow = ([a.strip() for a in args.remote_allow.split(",") if a.strip()] if args.remote_allow
+                     else link_module.hosts(p) + ["127.0.0.1"])
+            remote = command_server.CommandServer(port=args.remote, allow=allow)
             remote.start()
         state = State(p, wheels, session, cam, link, log, args.max_speed, encode=link_module._encode_jpeg,
-                      velocity_loop=args.velocity_loop, return_after=args.return_after, remote=remote)
+                      velocity_loop=args.velocity_loop, return_after=args.return_after, remote=remote,
+                      cable_path=args.cable)
+        if args.virtual_operator is not None:
+            state.virtual = virtual_module.VirtualOperator(p, args.virtual_operator, allow=virtual_allowed,
+                                                           controls=state.controls)
+            state.virtual.start()
+            print("virtual operator: UDP port %d from 127.0.0.1, Tailscale%s"
+                  % (state.virtual.port, "".join(", " + a for a in virtual_allowed)))
         if REMOTE is not None:
             hmc_navigation.REPLAN_ON_NEW_SHAPES = True  # a plan is only a message now: ask every cycle
         if args.dashboard:
             state.dashboard = page = dashboard_module.Dashboard(state.controls, {"drive": args.drive, "seconds": args.seconds},
-                                                                 port=args.dashboard)
+                                                                 port=args.dashboard, remote=args.remote is not None,
+                                                                 host=args.dashboard_host)
+            page.feed = live_feed.LiveFeed()  # the camera and the LiDAR on the page's /stream and /scan
             page.start()
-            print("dashboard: http://%s:%d/" % (socket.gethostname(), args.dashboard))
+            print("dashboard: http://%s:%d/" % (socket.gethostname() if args.dashboard_host == "0.0.0.0"
+                                                else args.dashboard_host, args.dashboard))
         if remote is not None:
             print("%s. Remote: commands on port %d (follow, wait, resume, return, stop); standing still until follow."
                   % ("DRIVE" if args.drive else "DRY RUN, the wheels stay off", remote.port))
+        elif not tty:
+            print("%s. No console: press Follow on the dashboard to start, Go back there to send the robot back."
+                  % ("DRIVE" if args.drive else "DRY RUN, the wheels stay off"))
+            wait_for_follow(state.controls)
         else:
             print("%s. Operator: stand alone within 2.5 m in front of the robot, then press Enter."
                   " Press Enter again to send the robot back to the start."
                   % ("DRIVE" if args.drive else "DRY RUN, the wheels stay off"))
             input()
+            state.controls.take_commands()  # buttons pressed while Enter was awaited do not count
             console = open_console(sys.stdin)
             if console is None:
                 print("Enter cannot be read on this console: only --return-after starts the way back.")
@@ -830,9 +1191,14 @@ def main(argv=None):
         with signals_ignored():
             if wheels is not None:
                 wheels.close()  # S# again, before anything else is shut down
+            if state is not None and wheels is not None:
+                with contextlib.suppress(OSError):
+                    state.cable.save()  # the last turns of the run
             for device in (link, cam, REMOTE, page, remote):
                 if device is not None:
                     device.stop()
+            if state is not None and state.virtual is not None:
+                state.virtual.stop()
             REMOTE = None  # a later main() (a test) must not plan through the stopped one
             if server is not None:
                 server.terminate()

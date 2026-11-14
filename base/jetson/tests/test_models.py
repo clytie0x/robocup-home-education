@@ -61,6 +61,23 @@ class DecodeTests(unittest.TestCase):
         x, _ = detector.letterbox(bgr, 256, 320, yolox=True)
         self.assertEqual(float(x[0, 0, 0, 0]), 10.0)  # BGR, not scaled
 
+    def test_bags_handbag_backpack_suitcase_from_their_own_scores(self):
+        out = np.zeros((1, 84, 5), np.float32)
+        out[0, :4, 0], out[0, 4 + 26, 0] = (100, 200, 30, 30), 0.6  # handbag
+        out[0, :4, 1], out[0, 4 + 24, 1] = (200, 200, 40, 50), 0.3  # backpack, above 0.25
+        out[0, :4, 2], out[0, 4 + 28, 2] = (260, 190, 50, 60), 0.2  # suitcase below 0.25
+        out[0, :4, 3], out[0, 4 + 0, 3] = (150, 120, 40, 200), 0.9  # a person is not a bag
+        out[0, :4, 4], out[0, 4 + 24, 4] = (101, 201, 30, 30), 0.5  # the handbag again, as a backpack
+        bags = detector.decode_objects(out, 1.0, 320, 240)
+        self.assertEqual([(b[5], round(b[4], 2)) for b in bags], [("handbag", 0.6), ("backpack", 0.3)])
+        self.assertEqual([round(v, 3) for v in bags[0][:4]], [85.0, 185.0, 115.0, 215.0])
+        self.assertEqual(len(detector.decode(out, 1.0, 320, 240)), 1)  # people unchanged
+
+    def test_bags_from_yolox_output(self):
+        out = np.zeros((1, 1, 85), np.float32)
+        out[0, 0, :5], out[0, 0, 5 + 28] = (100, 100, 40, 60, 0.8), 0.5  # 0.4
+        self.assertEqual([b[5] for b in detector.decode_objects(out, 1.0, 320, 240)], ["suitcase"])
+
     def test_nms_keeps_separate_boxes(self):
         boxes = np.array([[0, 0, 10, 10], [20, 20, 30, 30], [1, 1, 10, 10]], np.float32)
         self.assertEqual(detector.nms(boxes, np.array([0.5, 0.9, 0.6], np.float32)), [1, 2])

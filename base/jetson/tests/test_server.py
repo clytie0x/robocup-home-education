@@ -118,5 +118,103 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(server.people_in(b"not a jpeg", det, ReId()), [])
 
 
+def jpeg_320x240():
+    import cv2
+    import numpy as np
+
+    return cv2.imencode(".jpg", np.zeros((240, 320, 3), np.uint8))[1].tobytes()
+
+
+class FakeDetector:
+    def detect_all(self, bgr):
+        return [(10.0, 20.0, 60.0, 200.0, 0.8), (200.0, 30.0, 260.0, 230.0, 0.7)], [(100.0, 200.0, 130.0, 230.0, 0.6, "handbag")]
+
+
+class FakeReId:
+    def looks(self, bgr, boxes):
+        return [(0.6, 0.8) for _ in boxes]
+
+
+def skeleton(x, y):
+    return [[x + i, y + 2 * i, 0.9] for i in range(17)]
+
+
+class PoseAndBagTests(unittest.TestCase):
+    def test_bags_come_from_the_same_detector_run_and_people_are_unchanged(self):
+        seen = server.seen_in(jpeg_320x240(), FakeDetector(), FakeReId())
+        self.assertEqual(seen["objects"], [{"cls": "handbag", "box": [100.0, 200.0, 130.0, 230.0], "conf": 0.6}])
+        self.assertEqual(seen["people"][0], {"box": [10.0, 20.0, 60.0, 200.0], "conf": 0.8, "look": [0.6, 0.8]})
+        self.assertNotIn("kp", seen["people"][0])  # no pose asked
+        self.assertEqual(server.seen_in(b"broken", FakeDetector(), FakeReId()), {"people": [], "objects": []})
+
+    def test_keypoints_go_to_the_person_box_they_overlap(self):
+        class Pose:
+            def poses(self, bgr):
+                return [((198.0, 32.0, 258.0, 228.0), 0.9, skeleton(220, 40)),
+                        ((90.0, 10.0, 120.0, 60.0), 0.5, skeleton(95, 12))]  # overlaps nobody
+
+        people = server.seen_in(jpeg_320x240(), FakeDetector(), FakeReId(), Pose())["people"]
+        self.assertNotIn("kp", people[0])
+        self.assertEqual(people[1]["kp"], skeleton(220, 40))
+
+    def test_attach_matches_by_best_iou_one_pose_each(self):
+        people = [{"box": [0, 0, 100, 200]}, {"box": [90, 0, 190, 200]}]
+        poses = [((88, 0, 188, 200), 0.9, skeleton(1, 1)), ((2, 0, 102, 200), 0.9, skeleton(2, 2))]
+        server.attach_keypoints(people, poses)
+        self.assertEqual([p["kp"][0][0] for p in people], [2, 1])
+
+    def test_decode_pose_rows(self):
+        import numpy as np
+
+        out = np.zeros((1, 56, 3), np.float32)
+        out[0, :5, 0] = (160, 120, 60, 200, 0.9)
+        out[0, 5:, 0] = np.tile([150.0, 50.0, 0.8], 17)
+        out[0, :5, 1] = (161, 121, 60, 200, 0.7)  # the same person again
+        out[0, :5, 2] = (40, 120, 30, 100, 0.2)  # too weak
+        found = server.decode_pose(out, 0.5, 640, 480)
+        self.assertEqual(len(found), 1)
+        box, conf, kp = found[0]
+        self.assertEqual([round(v) for v in box], [260, 40, 380, 440])
+        self.assertAlmostEqual(conf, 0.9, places=5)
+        self.assertEqual(len(kp), 17)
+        self.assertEqual([round(v, 3) for v in kp[0]], [300.0, 100.0, 0.8])
+
+    def test_fake_server_gives_keypoints_only_when_asked(self):
+        self.assertNotIn("kp", server.fake_people(b"", 320, 240)[0])
+        self.assertEqual(len(server.fake_people(b"", 320, 240, pose=True)[0]["kp"]), 17)
+
+
+class PoseRequestTests(unittest.TestCase):
+    def serve(self, **kw):
+        calls = []
+
+        def detect(jpeg, width, height, **extra):
+            calls.append(extra.get("pose", False))
+            return {"people": [], "objects": [{"cls": "suitcase", "box": [1, 2, 3, 4], "conf": 0.5}]}
+
+        srv = server.Server(detect, "127.0.0.1", 0, **kw)
+        srv.start()
+        self.addCleanup(srv.stop)
+        return srv, calls
+
+    def test_pose_only_when_the_header_asks(self):
+        srv, calls = self.serve()
+        base = {"t": 0.0, "width": 10, "height": 10, "jpeg": 0}
+        reply = ask(srv.port, dict(base, seq=1), b"")
+        self.assertEqual(reply["objects"][0]["cls"], "suitcase")
+        self.assertEqual(reply["people"], [])
+        ask(srv.port, dict(base, seq=2, pose=True), b"")
+        self.assertEqual(calls, [False, True])
+
+    def test_pose_every_nth_frame_when_configured(self):
+        srv, calls = self.serve(pose_every=3)
+        with socket.create_connection(("127.0.0.1", srv.port), timeout=2) as sock:
+            for seq in range(1, 7):
+                head = json.dumps({"seq": seq, "t": 0.0, "width": 10, "height": 10, "jpeg": 0}).encode()
+                sock.sendall(struct.pack(">I", len(head)) + head)
+                size = struct.unpack(">I", sock.recv(4))[0]
+                sock.recv(size)
+        self.assertEqual(calls, [False, False, True, False, False, True])
+
 if __name__ == "__main__":
     unittest.main()
