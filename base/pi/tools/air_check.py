@@ -7,7 +7,8 @@ Part 1 sends raw packets F008 to F037 and a turn for 4 s each (past params.json'
 on purpose) and reads the firmware odometry at 20 Hz. If F037 spins faster than F015 in the
 air, the cap comes from the load or the supply, not a firmware clamp.
 Part 2 sends one F008 packet and then nothing for 1.5 s. If the wheels still turn, the
-firmware has no command timeout and only the Pi's watchdog stops the base.
+firmware has no command timeout and only the Pi's watchdog stops the base (true of the old
+firmware; the new one, 2026-11-14, stops 0.3 s after the last drive command).
 S# is sent after every step and on any exit. The report goes to logs/air-check/.
 """
 

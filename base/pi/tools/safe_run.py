@@ -3,10 +3,10 @@
   python tools/safe_run.py .venv/bin/python run_follow.py --drive --seconds 60
   python tools/safe_run.py .venv/bin/python tools/base_check.py --line 0.08 --yes-owner-at-robot
 
-The firmware has no command timeout (measured 2026-11-13: still driving 1.5 s after the last
-packet), so a drive program that dies before its own S# leaves the base on its last command.
-This parent outlives the child and stops the base. It cannot help when the Pi loses power or
-the USB cable comes out: keep a hand near the motor cut-off button.
+The old firmware had no command timeout (measured 2026-11-13: still driving 1.5 s after the last
+packet). The new firmware (0c020e4, flashed 2026-11-14) stops by itself 0.3 s after the last
+drive command, so it also stops when the Pi loses power or the USB cable comes out. This parent
+still sends S# at once when a drive program dies, rather than after the firmware's 0.3 s.
 """
 import os
 import signal
