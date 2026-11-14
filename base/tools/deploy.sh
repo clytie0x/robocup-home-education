@@ -130,7 +130,7 @@ ssh "$PI" 'bash -s' <<'REMOTE'
 set -euo pipefail
 cd ~/hmc-base
 [ -d .venv ] || python3 -m venv --system-site-packages .venv
-for pair in numpy:numpy cv2:opencv-python-headless serial:pyserial; do
+for pair in numpy:numpy cv2:opencv-python-headless serial:pyserial pytest:pytest; do  # pytest: run the suite on the robot
   .venv/bin/python -c "import ${pair%%:*}" 2>/dev/null || .venv/bin/pip install "${pair##*:}"
 done
 REMOTE
