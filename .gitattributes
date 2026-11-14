@@ -1,0 +1,17 @@
+# Text files are stored and checked out with LF on every OS: the code runs on Linux (Pi, Jetson), and a CRLF
+# copy made on Windows breaks shell scripts (#!/bin/sh\r) and makes md5 checks against the robot fail.
+# Folders with their own .gitattributes (hmc/docs/evidence/*: byte for byte) keep their rules.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.stl binary
+*.onnx binary
+*.engine binary
+*.pt binary
+*.pth binary
+*.db binary
