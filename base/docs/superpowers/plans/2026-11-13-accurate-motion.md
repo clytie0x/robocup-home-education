@@ -10,6 +10,21 @@
 
 **Spec:** `base/docs/superpowers/specs/2026-11-13-accurate-motion-design.md`
 
+## Status 2026-11-14 (checked against commits; the step boxes below were not ticked)
+
+| Task | State | Evidence |
+|---|---|---|
+| M1 motion estimator | done, field-checked by replay | 744e5d8, ee21ca2, 4a917c5, 683d123, a4d5c49 (thinning fix, 0.5 s baseline, 4 m range) |
+| M2 online estimates | done | 1ae83c6, 335dd30, 53778b6 |
+| M3 velocity loop | done; on the new firmware one clean 2 m line: +0.28 deg/m | 65921b7, fb1fe45, c3c73f2; hardware assessment 2026-11-14 |
+| 1-7 outline planning, last-resort stop, braking, deadband, latency, furniture, search | done, field drives 2026-11-14 02:15-03:00 | 199ca53, 8ff7166, d5d2491, 4dec578 |
+| 8 field check of group B | step 1 done (lap_check, 5d3efc5; backward escapes removed e022474); steps 2-3 not run | |
+| 9 drift with the loop | 1 of 6 runs | the old firmware could not turn while driving (4db26a9); new firmware flashed |
+| 10 new firmware and IMU | firmware written, reviewed, flashed (0c020e4, branch claude/base-firmware-e54d4f); IMU not bought | 9c92628 |
+| 11 SLAM stream | done (merged 6fc296c) | |
+| 12 slam_toolbox on the Jetson | steps 1-2 done (robot still); steps 3-5 not run | |
+| 13 re-measure | not run | |
+
 ## Global Constraints
 
 - Branch `sim/robustness-ladder`. Commit locally, never push or open a PR without asking.

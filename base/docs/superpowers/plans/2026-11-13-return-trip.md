@@ -11,6 +11,18 @@
 **Spec:** `base/docs/superpowers/specs/2026-11-13-return-trip-design.md`
 **Depends on:** `base/docs/superpowers/plans/2026-11-13-person-follow.md`, Tasks 0 to 12 finished. This plan uses `hmc.follower.Follower` and `Senses`, `base/pi/body.py`, `senses.py`, `shapes.py`, `safety.py`, `run_follow.py`, `replay.py` and the scan matcher from that plan's Task 2.
 
+## Status 2026-11-14 (checked against commits; the step boxes below were not ticked)
+
+| Task | State | Evidence |
+|---|---|---|
+| 0 baseline | steps 2-3 done by the implementer (scratch output, not committed) | |
+| 1 queue behind an interface | done, six-map output byte-identical | 01d35f3 |
+| 2 breadcrumbs and the drive back | done, 1115 on 18 of 18 | 01d35f3 |
+| 3 scan_match and keyframes | steps 1-2 done; step 3 (owner places the robot) not run | a12dc95, 12bcd82 |
+| 4 looks for every person | done, Fable review | a12dc95 |
+| 5 phases in run_follow | done, Fable review, deployed; not run on the Pi with wheels | 066a15c, 12bcd82 |
+| 6, 7 returns on the floor | not run; the lab power cable lies on the route back (tether.py), so run on battery or with someone holding the cable | |
+
 ## Global Constraints
 
 - Every Global Constraint of the person-follow plan applies unchanged: branch `feature/person-follow` (or a branch cut from it), local commits only, English in the repository, Thai to the owner, `hmc/` simulation only and standard library only, nothing outside `~/hmc-base` on the Pi and `~/hmc-follow` on the Jetson, never backward, and **the wheels turn only when the owner has said in chat, for that run, that they are at the robot**.
