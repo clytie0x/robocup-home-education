@@ -8,7 +8,13 @@
 </head>
 <body>
   <header>
-    <h1>Robot view</h1>
+    <div class="brand">
+      <div class="mark"></div>
+      <div>
+        <h1>Robot view</h1>
+        <p>Help Me Carry base, live from the Pi</p>
+      </div>
+    </div>
     <nav>
       <a href="/" class="here">Home</a>
       <a href="/camera">Camera</a>
@@ -16,16 +22,27 @@
     </nav>
   </header>
   <main>
+    <div class="stats">
+      <div class="stat" id="stat-near"><div class="label">Nearest obstacle</div><div class="value">-</div></div>
+      <div class="stat" id="stat-points"><div class="label">LiDAR points</div><div class="value">-</div></div>
+      <div class="stat" id="stat-age"><div class="label">Scan age</div><div class="value">-</div></div>
+    </div>
     <div class="grid">
       <section class="card">
-        <h2><a href="/camera">Camera</a></h2>
-        <img class="camera" src="/stream" alt="Robot camera">
-        <p class="info">Xtion colour camera, 320x240, up to 30 frames a second</p>
+        <div class="card-head">
+          <h2><a href="/camera">Camera</a><span>Xtion colour</span></h2>
+          <span class="badge camera-badge">Connecting</span>
+        </div>
+        <div class="card-body"><img class="camera" src="/stream" alt="Robot camera"></div>
+        <div class="card-foot">320x240, up to 30 frames a second</div>
       </section>
       <section class="card">
-        <h2><a href="/lidar">LiDAR</a></h2>
-        <canvas class="scan" width="480" height="480" data-info="home-scan-info"></canvas>
-        <p class="info scan-info" id="home-scan-info">waiting for the LiDAR</p>
+        <div class="card-head">
+          <h2><a href="/lidar">LiDAR</a><span>from above</span></h2>
+          <span class="badge lidar-badge">Connecting</span>
+        </div>
+        <div class="card-body"><canvas class="scan"></canvas></div>
+        <div class="card-foot scan-info">waiting for the LiDAR</div>
       </section>
     </div>
   </main>

@@ -8,7 +8,13 @@
 </head>
 <body>
   <header>
-    <h1>Robot view</h1>
+    <div class="brand">
+      <div class="mark"></div>
+      <div>
+        <h1>Robot view</h1>
+        <p>Help Me Carry base, live from the Pi</p>
+      </div>
+    </div>
     <nav>
       <a href="/">Home</a>
       <a href="/camera" class="here">Camera</a>
@@ -17,9 +23,14 @@
   </header>
   <main>
     <section class="card single">
-      <img class="camera" src="/stream" alt="Robot camera">
-      <p class="info">Xtion colour camera, 320x240, up to 30 frames a second, shown as a person sees the scene</p>
+      <div class="card-head">
+        <h2>Camera<span>Xtion colour</span></h2>
+        <span class="badge camera-badge">Connecting</span>
+      </div>
+      <div class="card-body"><img class="camera" src="/stream" alt="Robot camera"></div>
+      <div class="card-foot">320x240, up to 30 frames a second, shown as a person sees the scene</div>
     </section>
   </main>
+  <script src="/lidar.js"></script>
 </body>
 </html>

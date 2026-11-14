@@ -8,7 +8,13 @@
 </head>
 <body>
   <header>
-    <h1>Robot view</h1>
+    <div class="brand">
+      <div class="mark"></div>
+      <div>
+        <h1>Robot view</h1>
+        <p>Help Me Carry base, live from the Pi</p>
+      </div>
+    </div>
     <nav>
       <a href="/">Home</a>
       <a href="/camera">Camera</a>
@@ -16,12 +22,28 @@
     </nav>
   </header>
   <main>
-    <section class="card single" style="max-width: 720px">
-      <canvas class="scan" width="720" height="720" data-info="scan-info"></canvas>
-      <p class="info scan-info" id="scan-info">waiting for the LiDAR</p>
-      <p class="info">From above: forward is up, a ring every 1 m out to 4 m, the robot outline in the
-        centre. The newest revolution is bright, the four before it fainter (10 per second).</p>
+    <div class="single square">
+    <div class="stats">
+      <div class="stat" id="stat-near"><div class="label">Nearest obstacle</div><div class="value">-</div></div>
+      <div class="stat" id="stat-points"><div class="label">LiDAR points</div><div class="value">-</div></div>
+      <div class="stat" id="stat-age"><div class="label">Scan age</div><div class="value">-</div></div>
+    </div>
+    <section class="card">
+      <div class="card-head">
+        <h2>LiDAR<span>from above, forward is up</span></h2>
+        <span class="badge lidar-badge">Connecting</span>
+      </div>
+      <div class="card-body"><canvas class="scan"></canvas></div>
+      <div class="card-foot">
+        <ul class="legend">
+          <li><i style="background:#d92d20"></i>newest revolution</li>
+          <li><i style="background:#f4a59e"></i>four before it</li>
+          <li><i style="background:#2563eb"></i>robot</li>
+          <li>a ring every 1 m out to 4 m, 10 revolutions a second</li>
+        </ul>
+      </div>
     </section>
+    </div>
   </main>
   <script src="/lidar.js"></script>
 </body>
