@@ -99,12 +99,18 @@ async function tick() {
   setTimeout(tick, 100);
 }
 
-// The MJPEG stream has no per-frame event, so the badge says Live once a frame
-// has arrived and Offline if the stream fails.
+// The MJPEG stream has no per-frame event, so each camera's badge says Live once a
+// frame has arrived and Offline if the stream fails (then it retries every 5 s).
 for (const img of document.querySelectorAll("img.camera")) {
-  img.addEventListener("error", () => setBadge(".camera-badge", "off", "Offline"));
+  const badge = img.closest(".card").querySelector(".camera-badge");
+  const mark = (state, text) => { badge.className = `badge camera-badge ${state}`; badge.textContent = text; };
+  const src = img.getAttribute("src");
+  img.addEventListener("error", () => {
+    mark("off", "Offline");
+    setTimeout(() => { img.src = `${src}?t=${Date.now()}`; check(); }, 5000);
+  });
   const check = () => {
-    if (img.naturalWidth > 0) setBadge(".camera-badge", "live", "Live");
+    if (img.naturalWidth > 0) mark("live", "Live");
     else setTimeout(check, 500);
   };
   check();

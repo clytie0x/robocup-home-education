@@ -749,3 +749,29 @@ Open for the owner:
 - tether_run's survey covers only ±60 deg: tether.py's model blocks larger on-the-spot turns over its
   own assumed lay
 - the camera-height parameter in params.json (0.07) should be about 0.105
+
+## Pi to Jetson over a LAN cable, 2026-11-14 22:30
+
+The owner plugged a cable between the Pi's eth0 and the Jetson's enP8p1s0 (Jetson side links at
+1000 Mbit/s) and added one NetworkManager connection on each machine with sudo. No existing
+connection was changed: the Pi's `netplan-eth0` (DHCP) and the Jetson's `pi-link` (link-local,
+from 2026-11-04) are still there with a lower autoconnect priority. To undo, delete the new ones.
+
+- Pi: `jetson-link` on eth0, 10.0.0.1/24, never-default, autoconnect-priority 10
+- Jetson: `pi-link-static` on enP8p1s0, 10.0.0.2/24, never-default, autoconnect-priority 10
+- params.json: `jetson_host` 10.0.0.2 (was 192.168.31.137), new `pi_host` 10.0.0.1 for base_bridge
+
+Measured from the Pi with a one-off bench (JetsonLink wire format, a 60071-byte 320x240 JPEG, one
+frame in flight, paced at 30 a second, 60 s each) against `server.py --fake` on the Jetson:
+
+| path | answers | median | p95 | p99 | max | errors | ping (100 at 0.2 s) |
+|---|---|---|---|---|---|---|---|
+| Wi-Fi 192.168.31.137 | 1790 (29.8/s) | 8.8 ms | 13.3 ms | 15.5 ms | 20.8 ms | 0 | avg 4.8 ms, max 102 ms, 1% lost |
+| LAN 10.0.0.2 | 1791 (29.9/s) | 1.2 ms | 1.6 ms | 1.8 ms | 4.7 ms | 0 | avg 0.23 ms, max 0.47 ms, 0 lost |
+
+The lab Wi-Fi was quiet at the time; a crowded venue would widen the gap.
+
+At 22:25:12, while the cable went in, the Jetson's kernel log shows the USB 2 side of its Realtek
+USB 3 hub (port 1-2) disconnecting, and with it the AX1080P USB camera (1-2.4, plugged at 22:15),
+the MP-710 (1-2.1) and a CH343 "USB Single Serial" adapter (1-2.3). The hub's USB 3 side (2-1)
+stayed. They were still missing at 22:40.

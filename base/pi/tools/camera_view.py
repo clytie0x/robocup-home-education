@@ -2,7 +2,8 @@
 
   .venv/bin/python tools/camera_view.py [--port 8081] [--fps 30] [--no-lidar]
   then open http://<pi address>:8081/ on any device on the same network: the home page shows
-  both; /camera and /lidar show one each. The pages are plain files in tools/viewer/.
+  everything; /camera and /lidar show one each. The pages are plain files in tools/viewer/.
+  The Jetson's USB camera (jetson/usb_camera_view.py) is relayed over the LAN as /usb-stream.
 
 Read-only: it never opens the wheel port. The camera and the LiDAR can each be open in one
 program at a time, so stop this before starting run_follow or any drive tool (and the other way
@@ -91,7 +92,30 @@ class Latest:
             return self.jpeg, self.n
 
 
-def handler_for(latest, fps, scan=None):
+def relay(handler, url):
+    """Copy the Jetson's USB camera stream to one viewer, byte for byte (no decoding on the Pi)."""
+    import urllib.request
+    try:
+        upstream = urllib.request.urlopen(url, timeout=3)
+    except OSError:
+        handler.send_error(502, "USB camera not reachable")
+        return
+    with upstream:
+        handler.send_response(200)
+        handler.send_header("Content-Type", upstream.headers.get("Content-Type", "application/octet-stream"))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        try:
+            while True:
+                chunk = upstream.read1(65536)
+                if not chunk:
+                    return
+                handler.wfile.write(chunk)
+        except (OSError, BrokenPipeError, ConnectionResetError):
+            return
+
+
+def handler_for(latest, fps, scan=None, usb_url=None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -127,6 +151,8 @@ def handler_for(latest, fps, scan=None):
                         time.sleep(1.0 / fps)
                 except (BrokenPipeError, ConnectionResetError):
                     return
+            elif self.path.split("?")[0] == "/usb-stream" and usb_url:  # ?t= forces a fresh retry
+                relay(self, usb_url)
             else:
                 self.send_error(404)
     return Handler
@@ -137,7 +163,11 @@ def main():
     ap.add_argument("--port", type=int, default=8081)
     ap.add_argument("--fps", type=float, default=30.0, help="frames a second to each viewer (the Xtion gives 30)")
     ap.add_argument("--no-lidar", action="store_true", help="camera only (the LiDAR is in use elsewhere)")
+    ap.add_argument("--usb-port", type=int, default=8083,
+                    help="port of jetson/usb_camera_view.py on jetson_host, relayed as /usb-stream")
     args = ap.parse_args()
+    import params
+    usb_url = "http://%s:%d/stream" % (params.load()["jetson_host"], args.usb_port)
     # a background job ignores SIGINT: let `kill` (SIGTERM) close the camera and LiDAR cleanly too
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     latest, scan = Latest(), Scan()
@@ -146,7 +176,6 @@ def main():
     session = None
     if not args.no_lidar:
         import lidar
-        import params
         import run_follow
         p = params.load()
         session = lidar.LidarSession()
@@ -160,7 +189,7 @@ def main():
                     last = s
                 time.sleep(0.02)
         threading.Thread(target=read_scans, daemon=True).start()
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), handler_for(latest, args.fps, scan))
+    server = ThreadingHTTPServer(("0.0.0.0", args.port), handler_for(latest, args.fps, scan, usb_url))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print("camera view on port %d" % args.port, flush=True)
     try:

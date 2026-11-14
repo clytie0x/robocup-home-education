@@ -172,6 +172,7 @@ img.camera, canvas.scan {
   border-radius: 10px;
 }
 img.camera { background: #e9edf3; aspect-ratio: 4 / 3; object-fit: contain; }
+img.camera.wide { aspect-ratio: 16 / 9; }
 canvas.scan { aspect-ratio: 1; background: #fbfcfe; border: 1px solid var(--line); }
 
 .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; padding: 0; list-style: none; }
