@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import camera  # noqa: E402
 
 SCAN_RANGE = 4.0  # m drawn from the centre
+KEEP_SCANS = 5  # revolutions drawn together (0.5 s at 10 Hz), the older ones fainter
 
 PAGE = b"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Robot camera</title><style>body{margin:0;background:#111;color:#ccc;font:14px sans-serif;text-align:center}
@@ -43,10 +44,14 @@ async function tick() {
     g.strokeStyle = "#4af"; g.beginPath(); const o = [[0.2,0.16],[0.16,0.2],[-0.16,0.2],[-0.2,0.16],[-0.2,-0.16],[-0.16,-0.2],[0.16,-0.2],[0.2,-0.16]];
     o.forEach((p, i) => { const q = px(p[0], p[1]); i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.closePath(); g.stroke();
     const f = px(0.35, 0); g.beginPath(); g.moveTo(c.width/2, c.height/2); g.lineTo(f[0], f[1]); g.stroke();
+    (d.older || []).slice().reverse().forEach((pts, i, all) => {
+      g.fillStyle = "rgba(255,68,68," + (0.15 + 0.5 * (i + 1) / (all.length + 1)).toFixed(2) + ")";
+      for (const p of pts) { const q = px(p[0], p[1]); g.fillRect(q[0]-1, q[1]-1, 2, 2); }
+    });
     g.fillStyle = "#f44"; for (const p of d.points) { const q = px(p[0], p[1]); g.fillRect(q[0]-1, q[1]-1, 3, 3); }
     document.getElementById("info").textContent = d.points.length + " points, nearest " + (d.nearest == null ? "-" : d.nearest.toFixed(2) + " m") + (d.age == null ? "" : ", " + d.age.toFixed(1) + " s old");
   } catch (e) {}
-  setTimeout(tick, 200);
+  setTimeout(tick, 100);
 }
 tick();
 </script>
@@ -72,20 +77,25 @@ class Scan:
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.points, self.at = [], None
+        self.points, self.at, self.older = [], None, []
 
     def put(self, points, now):
         with self.lock:
+            if self.at is not None:
+                self.older = ([self.points] + self.older)[:KEEP_SCANS - 1]
             self.points, self.at = points, now
 
     def json(self, now):
         import json
         import math
+        def keep(points):
+            return [[round(x, 3), round(y, 3)] for x, y in points if math.hypot(x, y) <= SCAN_RANGE]
         with self.lock:
-            pts = [[round(x, 3), round(y, 3)] for x, y in self.points if math.hypot(x, y) <= SCAN_RANGE]
-            at = self.at
+            pts, at = keep(self.points), self.at
+            older = [keep(o) for o in self.older]
         near = min((math.hypot(x, y) for x, y in pts), default=None)
-        return json.dumps({"points": pts, "nearest": near, "age": None if at is None else now - at}).encode()
+        return json.dumps({"points": pts, "older": older, "nearest": near,
+                           "age": None if at is None else now - at}).encode()
 
 
 class Latest:
@@ -175,7 +185,7 @@ def main():
                 if s and s is not last:
                     scan.put([tuple(q) for q in run_follow.scan_points(s, p)], time.monotonic())
                     last = s
-                time.sleep(0.1)
+                time.sleep(0.02)
         threading.Thread(target=read_scans, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", args.port), handler_for(latest, args.fps, scan))
     threading.Thread(target=server.serve_forever, daemon=True).start()
