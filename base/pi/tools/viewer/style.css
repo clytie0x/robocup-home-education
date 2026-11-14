@@ -1,0 +1,65 @@
+:root {
+  --bg: #111;
+  --panel: #1b1b1b;
+  --text: #ddd;
+  --muted: #888;
+  --accent: #4af;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.4 system-ui, sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid #2a2a2a;
+}
+
+header h1 { margin: 0; font-size: 17px; font-weight: 600; }
+
+nav { display: flex; gap: 12px; }
+nav a { color: var(--muted); text-decoration: none; }
+nav a:hover, nav a.here { color: var(--accent); }
+
+main { padding: 16px; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.card h2 { margin: 0 0 8px; font-size: 15px; font-weight: 600; }
+.card h2 a { color: var(--text); text-decoration: none; }
+.card h2 a:hover { color: var(--accent); }
+
+.single { max-width: 960px; margin: 0 auto; }
+
+img.camera, canvas.scan {
+  display: block;
+  width: 100%;
+  background: #000;
+  border-radius: 4px;
+}
+
+canvas.scan { aspect-ratio: 1; }
+
+.info { margin: 8px 0 0; color: var(--muted); font-size: 13px; }

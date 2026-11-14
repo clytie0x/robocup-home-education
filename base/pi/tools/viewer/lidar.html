@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Robot LiDAR</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>Robot view</h1>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/camera">Camera</a>
+      <a href="/lidar" class="here">LiDAR</a>
+    </nav>
+  </header>
+  <main>
+    <section class="card single" style="max-width: 720px">
+      <canvas class="scan" width="720" height="720" data-info="scan-info"></canvas>
+      <p class="info scan-info" id="scan-info">waiting for the LiDAR</p>
+      <p class="info">From above: forward is up, a ring every 1 m out to 4 m, the robot outline in the
+        centre. The newest revolution is bright, the four before it fainter (10 per second).</p>
+    </section>
+  </main>
+  <script src="/lidar.js"></script>
+</body>
+</html>

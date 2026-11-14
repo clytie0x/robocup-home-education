@@ -1,8 +1,8 @@
 """Live view of the robot's camera and LiDAR scan in a browser, for people watching the robot.
 
   .venv/bin/python tools/camera_view.py [--port 8081] [--fps 5] [--no-lidar]
-  then open http://<pi address>:8081/ (camera) or http://<pi address>:8081/lidar (scan) on any
-  device on the same network.
+  then open http://<pi address>:8081/ on any device on the same network: the home page shows
+  both; /camera and /lidar show one each. The pages are plain files in tools/viewer/.
 
 Read-only: it never opens the wheel port. The camera and the LiDAR can each be open in one
 program at a time, so stop this before starting run_follow or any drive tool (and the other way
@@ -23,39 +23,14 @@ import camera  # noqa: E402
 SCAN_RANGE = 4.0  # m drawn from the centre
 KEEP_SCANS = 5  # revolutions drawn together (0.5 s at 10 Hz), the older ones fainter
 
-PAGE = b"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Robot camera</title><style>body{margin:0;background:#111;color:#ccc;font:14px sans-serif;text-align:center}
-img{width:100%;max-width:960px;image-rendering:auto}</style></head>
-<body><img src="/stream" alt="camera"><p>Robot camera (Xtion, 320x240) &middot; <a href="/lidar" style="color:#4af">LiDAR scan</a></p></body></html>"""
-
-LIDAR_PAGE = b"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Robot LiDAR</title><style>body{margin:0;background:#111;color:#ccc;font:14px sans-serif;text-align:center}
-img{width:100%;max-width:960px;image-rendering:auto}</style></head>
-<body><canvas id="scan" width="480" height="480" style="width:100%;max-width:480px;background:#000"></canvas>
-<p id="info">LiDAR scan from above: forward is up, grid every 1 m, robot outline in the centre</p>
-<script>
-const c = document.getElementById("scan"), g = c.getContext("2d"), R = 4.0, s = c.width / (2 * R);
-function px(x, y) { return [c.width / 2 - y * s, c.height / 2 - x * s]; }
-async function tick() {
-  try {
-    const r = await fetch("/scan", {cache: "no-store"}); const d = await r.json();
-    g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height);
-    g.strokeStyle = "#222"; for (let m = 1; m <= R; m++) { g.beginPath(); g.arc(c.width/2, c.height/2, m*s, 0, 7); g.stroke(); }
-    g.strokeStyle = "#4af"; g.beginPath(); const o = [[0.2,0.16],[0.16,0.2],[-0.16,0.2],[-0.2,0.16],[-0.2,-0.16],[-0.16,-0.2],[0.16,-0.2],[0.2,-0.16]];
-    o.forEach((p, i) => { const q = px(p[0], p[1]); i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }); g.closePath(); g.stroke();
-    const f = px(0.35, 0); g.beginPath(); g.moveTo(c.width/2, c.height/2); g.lineTo(f[0], f[1]); g.stroke();
-    (d.older || []).slice().reverse().forEach((pts, i, all) => {
-      g.fillStyle = "rgba(255,68,68," + (0.15 + 0.5 * (i + 1) / (all.length + 1)).toFixed(2) + ")";
-      for (const p of pts) { const q = px(p[0], p[1]); g.fillRect(q[0]-1, q[1]-1, 2, 2); }
-    });
-    g.fillStyle = "#f44"; for (const p of d.points) { const q = px(p[0], p[1]); g.fillRect(q[0]-1, q[1]-1, 3, 3); }
-    document.getElementById("info").textContent = d.points.length + " points, nearest " + (d.nearest == null ? "-" : d.nearest.toFixed(2) + " m") + (d.age == null ? "" : ", " + d.age.toFixed(1) + " s old");
-  } catch (e) {}
-  setTimeout(tick, 100);
+VIEWER = Path(__file__).resolve().parent / "viewer"  # the pages: plain HTML, CSS and JS
+FILES = {  # URL path -> (file in VIEWER, content type)
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/camera": ("camera.html", "text/html; charset=utf-8"),
+    "/lidar": ("lidar.html", "text/html; charset=utf-8"),
+    "/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/lidar.js": ("lidar.js", "text/javascript; charset=utf-8"),
 }
-tick();
-</script>
-<p><a href="/" style="color:#4af">camera</a></p></body></html>"""
 
 
 def jpeg_of(frame, flip=True):
@@ -122,16 +97,14 @@ def handler_for(latest, fps, scan=None):
             pass
 
         def do_GET(self):
-            if self.path == "/":
+            if self.path in FILES:
+                name, kind = FILES[self.path]
+                body = (VIEWER / name).read_bytes()  # read each time: edit a page, reload the browser
                 self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Type", kind)
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(PAGE)
-            elif self.path == "/lidar":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(LIDAR_PAGE)
+                self.wfile.write(body)
             elif self.path == "/scan":
                 body = (scan or Scan()).json(time.monotonic())
                 self.send_response(200)

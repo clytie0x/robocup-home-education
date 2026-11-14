@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Robot view</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>Robot view</h1>
+    <nav>
+      <a href="/" class="here">Home</a>
+      <a href="/camera">Camera</a>
+      <a href="/lidar">LiDAR</a>
+    </nav>
+  </header>
+  <main>
+    <div class="grid">
+      <section class="card">
+        <h2><a href="/camera">Camera</a></h2>
+        <img class="camera" src="/stream" alt="Robot camera">
+        <p class="info">Xtion colour camera, 320x240, about 5 frames a second</p>
+      </section>
+      <section class="card">
+        <h2><a href="/lidar">LiDAR</a></h2>
+        <canvas class="scan" width="480" height="480" data-info="home-scan-info"></canvas>
+        <p class="info scan-info" id="home-scan-info">waiting for the LiDAR</p>
+      </section>
+    </div>
+  </main>
+  <script src="/lidar.js"></script>
+</body>
+</html>
