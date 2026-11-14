@@ -1,6 +1,6 @@
 """Live view of the robot's camera and LiDAR scan in a browser, for people watching the robot.
 
-  .venv/bin/python tools/camera_view.py [--port 8081] [--fps 5] [--no-lidar]
+  .venv/bin/python tools/camera_view.py [--port 8081] [--fps 30] [--no-lidar]
   then open http://<pi address>:8081/ on any device on the same network: the home page shows
   both; /camera and /lidar show one each. The pages are plain files in tools/viewer/.
 
@@ -135,7 +135,7 @@ def handler_for(latest, fps, scan=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=8081)
-    ap.add_argument("--fps", type=float, default=5.0)
+    ap.add_argument("--fps", type=float, default=30.0, help="frames a second to each viewer (the Xtion gives 30)")
     ap.add_argument("--no-lidar", action="store_true", help="camera only (the LiDAR is in use elsewhere)")
     args = ap.parse_args()
     # a background job ignores SIGINT: let `kill` (SIGTERM) close the camera and LiDAR cleanly too
@@ -170,7 +170,7 @@ def main():
                 latest.put(jpeg_of(frame))
             elif cam.error is not None:
                 sys.exit("camera stopped: %r" % (cam.error,))
-            time.sleep(0.05)
+            time.sleep(0.005)  # the Xtion delivers every 33 ms: poll often enough to encode each frame
     except KeyboardInterrupt:
         pass
     finally:
