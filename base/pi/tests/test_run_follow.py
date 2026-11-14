@@ -11,13 +11,16 @@ from unittest import mock
 
 import numpy
 
-from hmc.follower import Mode, Senses
+from hmc import hri, route
+from hmc.follower import Follower, Mode, Senses
+from hmc.perception import MotionTracker
 
 import params
 import run_follow
 import safety
 from link import Answer, Seen
 from test_legs import person, scan_of
+from test_scanmatch import box, world_scan
 from test_wheels import FakePort
 from wheels import Wheels
 
@@ -120,12 +123,14 @@ class Pushy:
         self.mode = Mode.FOLLOW
         self.operator_look = SimpleNamespace(count=20)
         self.last_operator_pos = None
+        self.people_trackers = {}  # the crowd memory reads them, as from hmc's Follower
 
     def score(self, look):
         return 0.0
 
     def watch(self, senses):
-        pass
+        for pid, pos in senses.people.items():
+            self.people_trackers.setdefault(pid, MotionTracker()).update(senses.time, pos)
 
     def step(self, senses, dt):
         self.robot.speed, self.robot.turn_speed = 0.1, 0.0
@@ -148,7 +153,9 @@ class Crowded:
         return Senses(now, None, None, {}, [])
 
 
-class Loop(unittest.TestCase):
+class Logged(unittest.TestCase):
+    """A log folder and the cycle helpers; no tests of its own."""
+
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -172,6 +179,8 @@ class Loop(unittest.TestCase):
         lines = (self.folder / "run" / "log.jsonl").read_text().splitlines()
         return [json.loads(line) for line in lines]
 
+
+class Loop(Logged):
     def test_dry_run_never_opens_the_wheel_port(self):
         old = {s: signal.getsignal(s) for s in run_follow.STOP_SIGNALS}
         self.addCleanup(lambda: [signal.signal(s, h) for s, h in old.items()])
@@ -422,6 +431,252 @@ class Loop(unittest.TestCase):
     def test_closes_up_to_a_standing_walker(self):
         state, records, gaps = self.walk(lambda t: (1.5, 0.0))
         self.assertLess(gaps[-1], P["follow_gap"] + 0.1)
+
+
+class DriftingBase(FakeBase):
+    """A perfect base whose odometry is not: distances 2 % long, turns 1 % large, and a heading
+    drift of DRIFT rad per metre (as hmc's --odometry wheel). `pose` is the belief, `truth` the world."""
+
+    DRIFT = 0.005
+
+    def __init__(self):
+        super().__init__()
+        self.truth = (0.0, 0.0, 0.0)
+
+    def advance(self, dt):
+        v, w = self.command
+        x, y, yaw = self.truth
+        self.truth = (x + v * dt * math.cos(yaw), y + v * dt * math.sin(yaw), yaw + w * dt)
+        x, y, yaw = self.pose
+        yaw += 1.01 * w * dt + self.DRIFT * v * dt
+        self.pose = (x + 1.02 * v * dt * math.cos(yaw), y + 1.02 * v * dt * math.sin(yaw), yaw)
+
+
+class Room:
+    """The LiDAR among fixed walls and legs (world frame), seen from the base's true pose."""
+
+    def __init__(self, base, walls, legs=lambda t: ()):
+        self.base, self.walls, self.legs = base, walls, legs
+        self.t, self.n = 0.0, 0
+
+    def latest(self):
+        self.n += 1  # each revolution of the LDS-03 starts at another angle
+        return world_scan(getattr(self.base, "truth", self.base.pose), self.walls, self.legs(self.t),
+                          start_deg=(0.37 * self.n) % 0.9)
+
+
+class Ways(Follower):
+    """Drives through way points (believed frame) instead of following someone. The breadcrumbs
+    are dropped as in hmc's Follower.step."""
+
+    def __init__(self, robot, speech, ways):
+        super().__init__(robot, speech)
+        self.ways = list(ways)
+
+    def step(self, senses, dt):
+        self.route.add(self.body.pos)
+        while self.ways and math.dist(self.body.pos, self.ways[0]) < 0.1:
+            self.ways.pop(0)
+        if self.ways:
+            self.body.drive_toward(self.ways[0], dt)
+        else:
+            self.body.brake(dt)
+
+
+class Shifted:
+    """Keyframes whose next correction moves the believed pose sideways by `dy` (Review Focus 2)."""
+
+    def __init__(self, dy):
+        self.dy = dy
+
+    def add(self, pose, scan):
+        pass
+
+    def correct(self, pose, scan):
+        if self.dy is None:
+            return pose, {"used": False, "index": None, "share": 0.0, "shift": 0.0, "turn": 0.0, "why": "far"}
+        dy, self.dy = self.dy, None
+        return (pose[0], pose[1] + dy, pose[2]), {"used": True, "index": 0, "share": 1.0, "shift": abs(dy),
+                                                  "turn": 0.0, "why": "used"}
+
+
+# A 12 m L of corridors 2 m wide: 6 m along x, a left turn, 6 m along y. Pillars on the walls
+# give the scan matcher corners; a plain corridor only corrects sideways (keyframes.SLIDE_MAX).
+def _pillar(x, y):
+    return box(x - 0.15, y - 0.15, x + 0.15, y + 0.15)
+
+
+L_WALLS = ([((-1.0, -1.0), (7.0, -1.0)), ((-1.0, 1.0), (5.0, 1.0)), ((-1.0, -1.0), (-1.0, 1.0)),
+            ((7.0, -1.0), (7.0, 7.0)), ((5.0, 1.0), (5.0, 7.0)), ((5.0, 7.0), (7.0, 7.0))]
+           + _pillar(1.5, -0.85) + _pillar(4.0, -0.85) + _pillar(0.5, 0.85) + _pillar(3.0, 0.85)
+           + _pillar(6.85, 2.0) + _pillar(6.85, 5.0) + _pillar(5.15, 3.5) + _pillar(5.15, 1.5))
+FAST = dict(P, max_speed=0.25)  # the simulated base is perfect: drive faster, so the test runs in seconds
+
+
+class Return(Logged):
+    def speech(self):
+        return [r["say"] for r in self.records() if "say" in r]
+
+    def carried_out(self, state, base, metres, start=0.0):
+        """Following, while the base is carried 0.1 m a cycle along x. Returns the time after it."""
+        now = start
+        for i in range(int(round(metres / 0.1)) + 1):
+            now = start + 0.1 * i
+            base.pose = (0.1 * i, base.pose[1], base.pose[2])
+            self.cycle(state, now)
+        return now
+
+    def drive(self, state, base, start, seconds, world=None):
+        """Cycle with the base driving its commands. Returns the records; stops at an end record."""
+        records = []
+        for i in range(int(round(seconds / run_follow.PERIOD))):
+            now = start + run_follow.PERIOD * (i + 1)
+            if world is not None:
+                world.t = now
+            base.advance(run_follow.PERIOD)
+            records.append(self.cycle(state, now))
+            if "end" in records[-1]:
+                break
+        return records
+
+    def test_enter_switches_to_return_and_says_so(self):
+        base = FakeBase()
+        state = self.state(base, brain=None)
+        now = self.carried_out(state, base, 2.0)
+        self.assertEqual(self.records()[-1]["phase"], "follow")
+        state.go_back.set()  # Enter on the console
+        record = self.cycle(state, now + 0.1)
+        self.assertEqual(record["phase"], "return")
+        self.assertEqual(self.speech(), [hri.RETURN_TEXT])
+        self.assertIsNotNone(record["target"])
+
+        # --return-after: by itself after that many seconds of following
+        base = FakeBase()
+        state = self.state(base, brain=None)
+        state.return_after = 0.3
+        self.assertEqual([self.cycle(state, t)["phase"] for t in (0.0, 0.1, 0.2)], ["follow"] * 3)
+        self.assertIn(self.cycle(state, 0.3)["phase"], ("return", "done"))
+
+    def test_enter_is_a_line_on_the_console_not_the_end_of_input(self):
+        import io
+        pressed = run_follow.threading.Event()
+        run_follow.watch_enter(io.StringIO(""), pressed)  # stdin closed: never a return by itself
+        self.assertFalse(pressed.is_set())
+        run_follow.watch_enter(io.StringIO("\n"), pressed)
+        self.assertTrue(pressed.is_set())
+
+    def test_a_keyframe_is_stored_with_each_breadcrumb(self):
+        base = FakeBase()
+        state = self.state(base, brain=None)
+        self.carried_out(state, base, 2.0)
+        points = state.follower.route.points
+        self.assertEqual(len(points), 5)  # the start and every 0.5 m
+        self.assertEqual(self.records()[-1]["breadcrumbs"], 5)
+        self.assertEqual([tuple(round(v, 6) for v in pose[:2]) for pose, _ in state.keyframes.frames],
+                         [tuple(round(v, 6) for v in pt) for pt in points])
+        self.assertTrue(all(scan for _, scan in state.keyframes.frames))
+
+    def test_a_pose_correction_clears_depth_memory_and_keeps_the_speed_limits(self):
+        # Review Focus 2: the believed pose jumps 0.3 m sideways while driving back
+        base = FakeBase()
+        state = self.state(base, brain=None)
+        now = self.carried_out(state, base, 3.0)
+        state.go_back.set()
+        state.keyframes = Shifted(None)
+        records = self.drive(state, base, now, 15.0)
+        self.assertGreater(records[-1]["v"], 0.05)  # turned round and driving back
+        now = records[-1]["time"]
+        state.follower.obstacle_memory[("old",)] = (now, None)
+        state.senses.memory._depth[("old",)] = (2.0, 0.0, now)
+        state.keyframes = Shifted(0.3)
+        state.follower.navigator._planned_at = now  # planned last cycle: only the correction can make it plan again
+        records = records + self.drive(state, base, now, 0.1)
+        jump = len(records) - 1
+        self.assertEqual(records[jump]["keyframe"]["why"], "used")
+        self.assertAlmostEqual(records[jump]["believed"][1] - records[jump]["pose"][1], 0.3, places=6)
+        self.assertNotIn(("old",), state.follower.obstacle_memory)
+        self.assertNotIn(("old",), state.senses.memory._depth)
+        self.assertEqual(state.follower.navigator._planned_at, records[jump]["time"])  # replanned at once
+        records = records + self.drive(state, base, records[jump]["time"], 3.0)
+        for before, after in zip(records[jump - 1:], records[jump:]):
+            self.assertIsNone(after["stop"])
+            self.assertLessEqual(abs(after["v"] - before["v"]), P["accel"] * run_follow.PERIOD + 1e-9)
+            self.assertLessEqual(abs(after["w"] - before["w"]), P["turn_accel"] * run_follow.PERIOD + 1e-9)
+            self.assertGreaterEqual(after["v"], 0.0)  # never backward
+
+    def test_return_with_fakes_ends_within_arrive_of_the_start(self):
+        # A 12 m L route out, 2 % odometry error, the corrections on: back to where it started.
+        base = DriftingBase()
+        world = Room(base, L_WALLS)
+        state = run_follow.State(FAST, base, world, Camera(), None, self.log, clock=lambda: self.now)
+        state.follower = Ways(state.body.robot, state.speech, [(6.0, 0.0), (6.0, 6.0)])
+        started = time.monotonic()
+        out = self.drive(state, base, -run_follow.PERIOD, 90.0, world)
+        self.assertEqual(state.follower.ways, [])
+        self.assertLess(math.dist(base.truth[:2], (6.0, 6.0)), 0.6)
+        state.go_back.set()
+        back = self.drive(state, base, out[-1]["time"], 150.0, world)
+        self.assertTrue(back[-1]["end"].startswith("done"), back[-1].get("end"))
+        # The corrections keep the belief on the truth (without them, measured once: 0.73 m apart and
+        # 0.45 m from the start). The brain stops ARRIVE from its believed start, or a little further
+        # when the last crawl takes over route.SKIP_AFTER and route.ARRIVE_BLOCKED takes over (0.31 m here).
+        self.assertLess(math.dist(base.truth[:2], back[-1]["believed"][:2]), 0.03)
+        self.assertLess(math.dist(base.truth[:2], (0.0, 0.0)), route.ARRIVE + 0.03)
+        self.assertEqual(self.speech()[-2:], [hri.RETURN_TEXT, hri.ARRIVED_TEXT])
+        used = [r for r in back if r["keyframe"] and r["keyframe"]["used"]]
+        self.assertGreater(len(used), 10)
+        self.assertTrue(all(r["stop"] is None for r in out + back))  # never near enough to anything to stop
+        self.assertTrue(all(r["v"] >= 0.0 for r in out + back))  # never backward
+        self.assertLess(time.monotonic() - started, 60.0)
+
+    def test_without_a_link_the_queue_is_never_joined(self):
+        # Three people walk up and stand as a group beside the route for 7 s: no looks, no crowd.
+        base = FakeBase()
+
+        def group(t):
+            walked = min(t, 2.0) * 0.25  # 0.5 m in 2 s, so the senses know they are people
+            return sum((person(x, y + walked) for x, y in ((1.2, 0.6), (1.7, 0.7), (1.5, 1.1))), [])
+
+        world = Room(base, box(-1.5, -2.0, 4.0, 2.5), group)
+        state = run_follow.State(P, base, world, Camera(), None, self.log, clock=lambda: self.now)
+        now = self.carried_out(state, base, 2.0)
+        for i in range(1, 71):
+            world.t = now + 0.1 * i
+            self.cycle(state, world.t)
+        self.assertEqual(state.queue.crowd, [])
+        state.go_back.set()
+        back = self.drive(state, base, world.t, 60.0, world)
+        self.assertTrue(back[-1]["end"].startswith("done"), back[-1].get("end"))
+        self.assertTrue(all(r["queue"] is None for r in back))
+        self.assertFalse(state.joined)
+
+    def test_enter_during_a_search_returns_from_where_it_stands(self):
+        # Review Focus 3: the search's turn stops, the way back starts at the breadcrumb nearest the robot
+        base = FakeBase()
+        state = self.state(base, brain=None)
+        now = self.carried_out(state, base, 2.0)
+        state.follower.mode = Mode.SEARCH
+        base.pose = (1.0, 0.6, math.pi / 2)  # it drove off to look for the operator, past REACHED from (1.0, 0)
+        state.go_back.set()
+        record = self.cycle(state, now + 0.1)
+        self.assertEqual(record["phase"], "return")
+        self.assertIsNone(record["search"])
+        self.assertEqual(record["target"], [1.0, 0.0])
+
+    def test_done_stops_the_wheels_and_ends_the_run(self):
+        # Review Focus 3 as well: Enter before the robot has moved, so it is at the start at once
+        base = FakeBase()
+        state = self.state(base, brain=None)
+        clock = SimpleNamespace(now=0.0)
+        state.clock = lambda: clock.now
+        state.go_back.set()
+        end = run_follow.run(state, 5.0, clock=lambda: clock.now, sleep=lambda s: setattr(clock, "now", clock.now + s))
+        self.assertTrue(end.startswith("done"), end)
+        record = self.records()[-1]
+        self.assertEqual((record["phase"], record["v"], record["w"]), ("done", 0.0, 0.0))
+        self.assertEqual(base.sent[-1], (0.0, 0.0))
+        self.assertEqual(self.speech(), [hri.RETURN_TEXT, hri.ARRIVED_TEXT])
+
 
 if __name__ == "__main__":
     unittest.main()

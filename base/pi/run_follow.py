@@ -1,9 +1,13 @@
 """Follow one operator with the hmc brain on the real base.
 
-    run_follow.py --seconds N [--drive] [--max-speed V] [--no-jetson]
+    run_follow.py --seconds N [--drive] [--max-speed V] [--no-jetson] [--return-after N]
 
 Without --drive the wheel port is never opened: the brain runs on the real sensors, the
 odometry stays at zero motion and nothing is sent to the wheels (a dry run).
+
+Phases: FOLLOW until Enter on the console (or --return-after N seconds), then RETURN along the
+breadcrumbs of the way out (hmc.route), behind the queue while one walks ahead (hmc.queue), with
+the pose corrected against the scans stored at the breadcrumbs (keyframes.py). DONE ends the run.
 
 One cycle per LiDAR revolution (10 Hz): read the sensors, let the brain decide, check the
 safety stop, send the wheel command, log the cycle. Logs go to logs/<start time>/ next to
@@ -17,26 +21,33 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 import numpy
 
 import hmc.follower as hmc_follower
+from hmc import hri
 from hmc import world as hmc_world
 from hmc.follower import Follower, Mode
+from hmc.queue import QueueFollower
+from hmc.route import Returner, Route
+from hmc.task import STAND_STILL, STANDING_FORGET
 
 import calib
 import camera
 import dashboard as dashboard_module
 import depth_obstacles
 import geometry
+import keyframes as keyframes_module
 import lidar
 import link as link_module
 import motion as motion_module
 import params
 import remote_plan
 import safety
+import shapes
 import velocity
 import wheels as wheels_module
 from body import Body
@@ -96,6 +107,9 @@ HISTORY = 2.0  # s of sent commands kept for the latency prediction
 CLOSED_GATE_SPEED = 0.15  # m/s; above this --drive needs the braking numbers measured (params.speed_gates_open)
 STILL = (0.0, 0.0, 0.0)  # the dry run's pose: zero motion
 LOG_ROOT = Path(__file__).resolve().parent / "logs"  # on the Pi: ~/hmc-base/logs
+FOLLOW, RETURN, DONE = "follow", "return", "done"  # the phases of a run
+# m; a larger pose correction leaves the remembered obstacles in the wrong place (Review Focus 2)
+CORRECTED = 0.1
 
 
 class Log:
@@ -143,7 +157,7 @@ class State:
     """
 
     def __init__(self, p, wheels, lidar, camera, link, log, max_speed=None, encode=_no_jpeg, clock=time.monotonic,
-                 velocity_loop=False):
+                 velocity_loop=False, return_after=None):
         self.p = p
         self.wheels, self.lidar, self.camera, self.link, self.log = wheels, lidar, camera, link, log
         self.max_speed = p["max_speed"] if max_speed is None else max_speed
@@ -153,8 +167,21 @@ class State:
         # The brain stops follow_distance from the operator, measured centre to centre
         # (navigation.follow_step -> Robot.drive_toward uses distance(robot.pos, target)).
         # follow_gap is measured from the robot's front edge, so add the centre-to-front length.
-        self.follower = Follower(self.body.robot, Speech(log), follow_distance=p["follow_gap"] + safety.FRONT,
+        self.speech = Speech(log)
+        self.follower = Follower(self.body.robot, self.speech, follow_distance=p["follow_gap"] + safety.FRONT,
                                  search_again_every=SEARCH_AGAIN_EVERY)
+        self.phase = FOLLOW
+        self.go_back = threading.Event()  # Enter on the console (main's watch_enter thread)
+        self.return_after = return_after  # s of following before RETURN by itself (--return-after), or None
+        self.started = None  # time of the first cycle
+        self.start = None  # (x, y, heading) of the first cycle: where the way back ends
+        # odometry frame -> corrected frame: the keyframe corrections so far. believed = _compose(fix, odometry)
+        self.fix = (0.0, 0.0, 0.0)
+        self.keyframes = keyframes_module.Keyframes(p)
+        self.queue = None  # hmc QueueFollower, made in the first cycle
+        self.joined = False  # walking behind the queue (hmc.task's JOIN_QUEUE)
+        self.returner = None  # hmc Returner, made anew each time the drive along the breadcrumbs starts
+        self.standing = []  # places where someone stands: [since, where, last seen] (hmc.task.Task.standing)
         self.sent = (0.0, 0.0)  # the last command the wheels got: the motion since the last scan
         self.coast = safety.Coast(p)  # what the base may still be doing: it slows at decel, not at once
         self.history = []  # (time, v, w) of every command sent in the last HISTORY seconds
@@ -255,6 +282,61 @@ def _search(state, follower, pose, answer, link_alive, now):
     return (0.0, SEARCH_TURN) if state.searched < SEARCH_MAX else (0.0, 0.0)
 
 
+def _spot(standing, pos):
+    """The place record someone at pos stands on, or None (hmc.task.Task._spot)."""
+    near = [s for s in standing if math.dist(pos, s[1]) <= STAND_STILL]
+    return min(near, key=lambda s: math.dist(pos, s[1])) if near else None
+
+
+def _remember_crowd(state, seen, now):
+    """hmc.task.Task.step's bookkeeping of who stands where (by place, not by tracker id), then the crowd."""
+    trackers = state.follower.people_trackers
+    for pid in seen.people:
+        pos = trackers[pid].last()  # smoothed
+        spot = _spot(state.standing, pos)
+        if spot is None:
+            state.standing.append([now, pos, now])
+        else:
+            spot[2] = now
+    state.standing = [s for s in state.standing if now - s[2] <= STANDING_FORGET]
+    standing = {pid: (spot[0], pos) for pid, pos in seen.people.items()
+                if (spot := _spot(state.standing, trackers[pid].last())) is not None}
+    state.queue.remember_crowd(seen, standing)
+
+
+def _return(state, seen, now, dt):
+    """hmc.task.Task's RETURN and JOIN_QUEUE: behind the queue while one walks ahead, else the breadcrumbs."""
+    follower, queue = state.follower, state.queue
+    shapes_now = follower.shapes(seen)
+    if not state.joined and queue.tail(seen) is not None:
+        state.joined, state.returner = True, None
+    if state.joined and not queue.step(seen, shapes_now, follower.navigator, dt):
+        state.joined = False  # left the queue for good (queue.done): on along the breadcrumbs from here
+    if state.joined:
+        return
+    if state.returner is None:
+        state.returner = Returner(state.body.robot, state.speech, follower.navigator, follower.route, state.start[2])
+    state.returner.step(shapes_now, now, dt)
+    if state.returner.done:
+        state.phase = DONE
+
+
+def _correct(state, pose, believed, scan):
+    """RETURN: match the scan against the nearest keyframe. Returns (believed pose, keyframe report)."""
+    corrected, report = state.keyframes.correct(believed, scan)
+    if not report["used"]:
+        return believed, report
+    x, y, _ = motion_module._relative(pose, (0.0, 0.0, 0.0))  # the odometry pose undone; its yaw unwrapped
+    state.fix = motion_module._compose(corrected, (x, y, -pose[2]))  # so believed keeps corrected's turn count
+    if report["shift"] > CORRECTED:
+        # Review Focus 2: what was remembered is now in the wrong place, and so is the path. The speed
+        # stays: the brain ramps from it within the acceleration limits, so the wheels do not jerk.
+        state.senses.memory = shapes.ObstacleMemory(state.p)
+        state.follower.obstacle_memory.clear()
+        state.follower.navigator._goal = None  # the Navigator plans anew on its next step when it has no goal
+    return corrected, report
+
+
 def cycle(state, now):
     """One control cycle. Returns the log record; a record with "end" means stop the run."""
     p = state.p
@@ -285,6 +367,21 @@ def cycle(state, now):
         world_decel, world_delay = state.estimates.safe_braking()  # never better than params.json
         hmc_world.MAX_DECEL, hmc_world.STOP_DELAY = world_decel, world_delay
     t_read = state.clock() - now
+    follower = state.follower
+    # The brain's frame: the odometry, moved by the keyframe corrections of the way back.
+    believed = motion_module._compose(state.fix, pose)
+    if state.start is None:  # the first cycle: the start of the way back is here
+        state.started, state.start = now, believed
+        follower.route = Route(believed[:2])
+        state.queue = QueueFollower(state.body.robot, believed[:2], follower.people_trackers)
+        state.keyframes.add(believed, scan)
+    if state.phase == FOLLOW and (state.go_back.is_set() or (
+            state.return_after is not None and now - state.started >= state.return_after)):
+        state.phase = RETURN
+        state.speech.say(now, hri.RETURN_TEXT)
+    report = None
+    if state.phase == RETURN and scan:
+        believed, report = _correct(state, pose, believed, scan)
     # 2. Depth obstacles (only once the camera pose is measured), the speed cap, the pose.
     depth_points = None
     if frame is not None and params.depth_gates_open(p):
@@ -292,10 +389,10 @@ def cycle(state, now):
     state.body.limit(min(state.max_speed, switches["max_speed"], safety.speed_cap(depth_points, p)))
     # The base acts on a command command_latency after it is sent: the brain plans from where the
     # commands already on their way will have taken it, not from where it is now (Task 5).
-    state.body.sync(ahead(pose, state.history, now, p["command_latency"]))
+    state.body.sync(ahead(believed, state.history, now, p["command_latency"]))
 
     # 3. The brain. While learning, RealSenses cannot lock by itself: enrol again whenever unlocked.
-    senses, follower = state.senses, state.follower
+    senses = state.senses
     senses.learned = follower.operator_look.count
     enrol = None
     if senses.learned < LEARNED and not senses.locked and answer is not None:
@@ -309,21 +406,30 @@ def cycle(state, now):
             state.enrol_said = enrol
     t_depth = state.clock() - now
     v_was, w_was = state.sent
-    seen = senses.read(now, pose, v_was, w_was, dt, scan, depth_points, answer, link_alive, follower.score)
+    seen = senses.read(now, believed, v_was, w_was, dt, scan, depth_points, answer, link_alive, follower.score)
     t_senses = state.clock() - now
     follower.watch(seen)  # every cycle, before step: it keeps track of everyone
-    follower.step(seen, dt)
+    if state.phase == FOLLOW:
+        _remember_crowd(state, seen, now)
+        crumbs = len(follower.route.points)
+        follower.step(seen, dt)
+        if len(follower.route.points) > crumbs:  # a new breadcrumb (a loop cut only shortens the route)
+            state.keyframes.add(believed, scan)
+    elif state.phase == RETURN:
+        _return(state, seen, now, dt)
     t_brain = state.clock() - now
 
     # 4. The command, and the stops that override the brain.
     stop = None
-    if senses.ambiguous:
+    if senses.ambiguous and state.phase == FOLLOW:
         stop = "ambiguous"  # someone is right at the operator: wait, never guess who is who
     points = scan_points(scan, p)
     if depth_points is not None:
         points = numpy.vstack([points, depth_points])
     v, w = state.body.command()
-    search = _search(state, follower, pose, answer, link_alive, now)
+    if state.phase == DONE:
+        v = w = 0.0
+    search = _search(state, follower, pose, answer, link_alive, now) if state.phase == FOLLOW else None
     if search is not None:
         v, w = search
     if state.velocity is not None and state.measured is not None:
@@ -390,7 +496,16 @@ def cycle(state, now):
         "estimates": {name: [round(getattr(state.estimates, name)[0], 4), getattr(state.estimates, name)[2]]
                       for name in ("speed_gain", "turn_gain", "drift_per_m", "latency", "decel", "stop_delay")},
         "period": period,  # s since the previous cycle started
+        "phase": state.phase,
+        "believed": list(believed),  # the pose the brain used: odometry moved by the keyframe corrections
+        "breadcrumbs": len(follower.route.points),
+        "target": None if state.returner is None or state.returner.target is None else list(state.returner.target),
+        "keyframe": report,  # the match against the nearest keyframe (RETURN), or None
+        "queue": state.queue.last_tail[1] if state.joined and state.queue.last_tail else None,  # tail's id
     }
+    if state.phase == DONE:
+        _stop_wheels(state)
+        record["end"] = "done: back at the start"
     state.log.write(record)
     if state.dashboard is not None:
         state.dashboard.latest = record
@@ -412,6 +527,12 @@ def run(state, seconds, clock=time.monotonic, sleep=time.sleep):
         next_at = max(next_at + PERIOD, clock())  # never try to catch up with a burst of cycles
         sleep(max(0.0, next_at - clock()))
     return None
+
+
+def watch_enter(stream, pressed):
+    """Set `pressed` when a line (Enter) comes on stream. The end of input is not Enter."""
+    if stream.readline().endswith("\n"):
+        pressed.set()
 
 
 def refusal(drive, max_speed, p):
@@ -462,6 +583,8 @@ def main(argv=None):
                              " plan_server.py, or in the cycle itself (slow on the Pi)")
     parser.add_argument("--velocity-loop", action="store_true",
                         help="correct the commands until the measured speed matches (Task M3; off until field-checked)")
+    parser.add_argument("--return-after", type=float, metavar="N",
+                        help="start the way back by itself after N s of following (a test aid; Enter does it too)")
     parser.add_argument("--dashboard", type=int, default=dashboard_module.PORT, metavar="PORT",
                         help="serve the status page on this port (0: no page)")
     args = parser.parse_args(argv)
@@ -494,7 +617,7 @@ def main(argv=None):
             link.start()
         wheels = open_wheels(args.drive, p)
         state = State(p, wheels, session, cam, link, log, args.max_speed, encode=link_module._encode_jpeg,
-                      velocity_loop=args.velocity_loop)
+                      velocity_loop=args.velocity_loop, return_after=args.return_after)
         if REMOTE is not None:
             hmc_navigation.REPLAN_ON_NEW_SHAPES = True  # a plan is only a message now: ask every cycle
         if args.dashboard:
@@ -503,8 +626,10 @@ def main(argv=None):
             page.start()
             print("dashboard: http://%s:%d/" % (socket.gethostname(), args.dashboard))
         print("%s. Operator: stand alone within 2.5 m in front of the robot, then press Enter."
+              " Press Enter again to send the robot back to the start."
               % ("DRIVE" if args.drive else "DRY RUN, the wheels stay off"))
         input()
+        threading.Thread(target=watch_enter, args=(sys.stdin, state.go_back), daemon=True).start()
         run(state, args.seconds)
     except KeyboardInterrupt as stop:
         with signals_ignored():
