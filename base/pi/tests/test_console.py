@@ -368,6 +368,21 @@ class DevicesTest(unittest.TestCase):
         self.assertEqual((s["held"], s["camera"]["state"], s["lidar"]["state"]), (True, "held", "held"))
 
 
+class VersionTest(unittest.TestCase):
+    def test_the_deployed_commit_is_read_and_bad_files_give_none(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "VERSION.json")
+        self.assertIsNone(console.deployed_version(path))  # never deployed with deploy.sh
+        with open(path, "w") as f:
+            json.dump({"commit": "b22c5b2" + "0" * 33, "describe": "b22c5b2", "branch": "sim", "deployed": "x"}, f)
+        self.assertEqual(console.deployed_version(path)["describe"], "b22c5b2")
+        for bad in ("{", "[]", '{"commit": 5}'):
+            with open(path, "w") as f:
+                f.write(bad)
+            self.assertIsNone(console.deployed_version(path), bad)
+
+
 class ChildCameraTest(unittest.TestCase):
     """console.ChildCamera over a stand-in child that writes framed JPEGs like tools/camera_pipe.py."""
 

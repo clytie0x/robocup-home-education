@@ -371,6 +371,11 @@ function linkTag() {
   return tagHTML("Jetson ขาด", "", true);
 }
 
+// the commit base/tools/deploy.sh put on this machine (VERSION.json), so everyone sees which code runs
+function codeText(v) {
+  return v && v.describe ? ` · โค้ด ${v.describe}` : " · โค้ดไม่ได้ deploy จาก git";
+}
+
 function renderBar(word) {
   let title = TITLES[tab], sub = location.host, tag = "";
   const task = taskRunning(state), j = jobOf(state);
@@ -397,13 +402,13 @@ function renderBar(word) {
   }
   if (tab === "jetson") {
     const agent = state.jetson.agent;
-    sub = agent ? `agent ${state.jetson.host}` : "agent ไม่ตอบ";
+    sub = agent ? `agent ${state.jetson.host}${codeText(agent.version)}` : "agent ไม่ตอบ";
     if (agent) {
       const progs = Object.values(agent.programs || {});
       tag = tagHTML(`${progs.filter((p) => p.running).length}/${progs.length}`, progs.every((p) => p.running) ? "" : "ring");
     } else tag = tagHTML("ไม่ตอบ", "bad");
   }
-  if (tab === "checks" || tab === "logs" || tab === "help" || tab === "more") sub = location.host;
+  if (tab === "checks" || tab === "logs" || tab === "help" || tab === "more") sub = location.host + codeText(state.version);
   setText($("bar-title"), title);
   setText($("bar-sub"), sub);
   setHTML($("bar-tag"), tag);

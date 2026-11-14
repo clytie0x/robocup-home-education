@@ -297,6 +297,17 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(s["gpu_load_pct"], 37.3)
         self.assertEqual(set(s["programs"]), {"detector", "bridge", "flow"})
         self.assertIsInstance(s["time"], float)
+        self.assertIn("version", s)  # the commit deploy.sh wrote next to agent.py, or None
+
+    def test_deployed_version(self):
+        path = os.path.join(self.tmp.name, "VERSION.json")
+        self.assertIsNone(agent.deployed_version(path))
+        with open(path, "w") as f:
+            json.dump({"commit": "a" * 40, "describe": "aaaaaaa"}, f)
+        self.assertEqual(agent.deployed_version(path)["describe"], "aaaaaaa")
+        with open(path, "w") as f:
+            f.write('{"commit": null}')
+        self.assertIsNone(agent.deployed_version(path))
 
 
 class HttpTest(unittest.TestCase):

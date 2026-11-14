@@ -737,6 +737,18 @@ def link_test(hosts=JETSON_HOSTS, tries=3, ports=(AGENT_PORT, 22), probe=probe):
     return out
 
 
+
+def deployed_version(path=None):
+    """The commit base/tools/deploy.sh wrote next to this file ({"commit", "describe", "branch", "deployed"}),
+    or None (never deployed that way, or an unreadable file)."""
+    try:
+        with open(path or HERE / "VERSION.json", encoding="utf-8") as f:
+            v = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return v if isinstance(v, dict) and isinstance(v.get("commit"), str) else None
+
+
 def pi_health(root=Path("/"), disk=HERE):
     out = {"temp_c": None, "load": None, "disk_free_gb": None, "uptime_s": None}
     try:
@@ -1175,7 +1187,8 @@ class Console:
         return {"time": time.time(), "host": socket.gethostname(), "cards": cards(pi, devices, wheel, jetson, time.time()),
                 "pi": pi, "devices": devices, "job": self.jobs.status(), "jetson": jetson, "wheel_test": wheel,
                 "max_speed": self.p["max_speed"], "speeds": [s for s in SPEEDS if s <= self.p["max_speed"] + 1e-9],
-                "minutes_max": MINUTES_MAX, "pin": self.pin is not None, "virtual_port": VIRTUAL_PORT}
+                "minutes_max": MINUTES_MAX, "pin": self.pin is not None, "virtual_port": VIRTUAL_PORT,
+                "version": deployed_version()}
 
     def live_from_run(self):
         """True while run_follow holds the camera and the LiDAR: its own page serves them (live_feed.py)."""

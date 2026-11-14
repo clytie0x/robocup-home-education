@@ -87,6 +87,18 @@ def tail(path, n=LOG_LINES, start=0):
     return data.decode("utf-8", "replace").splitlines()[-n:]
 
 
+
+def deployed_version(path=None):
+    """The commit base/tools/deploy.sh wrote next to this file ({"commit", "describe", "branch", "deployed"}),
+    or None (never deployed that way, or an unreadable file)."""
+    try:
+        with open(path or HERE / "VERSION.json", encoding="utf-8") as f:
+            v = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return v if isinstance(v, dict) and isinstance(v.get("commit"), str) else None
+
+
 class Program:
     """One program the agent starts and stops. It never signals a process it did not start."""
 
@@ -418,7 +430,7 @@ class Agent:
             out = self.metrics.read()
         out.update({"time": self.clock(), "programs": {n: self.programs[n].status() for n in self.order},
                     "order": self.order, "sequence": self.sequence, "outside": self.find_outside(ours),
-                    "host": socket.gethostname()})
+                    "host": socket.gethostname(), "version": deployed_version()})
         return out
 
     def stop_all(self):
