@@ -24,7 +24,9 @@ States (spec "HmcFlow states"; slice 1 = the operator hands the bag over):
              "go back"/"continue" -> resume. at_start -> dropping_bag (no arm: say "Here is your bag." -> done)
   dropping_bag  sent drop_bag. drop_done -> say "Here is your bag." -> done. drop_failed / timeout -> error
   done       "follow me" starts a new run
-  error      from any active state on base_link_lost or an arm failure: Pi stop ("end"), say why.
+  error      on base_link_lost from following / at_car / handover / returning (after at_start the Pi's run
+             ends and its link with it, so a lost link in dropping_bag or done is only logged),
+             or on an arm failure: Pi stop ("end", or error_pi_cmd), say why.
              "follow me" starts again; "go back" tries the return again.
 
 Commands on /robot/command (JSON {"action","params","stamp","source"}):
@@ -40,7 +42,7 @@ import time
 
 READY, FOLLOWING, AT_CAR, HANDOVER, RETURNING, DROPPING, DONE, ERROR = (
     "ready", "following", "at_car", "handover", "returning", "dropping_bag", "done", "error")
-ACTIVE = (FOLLOWING, AT_CAR, HANDOVER, RETURNING, DROPPING)
+NEEDS_BASE = (FOLLOWING, AT_CAR, HANDOVER, RETURNING)  # a lost Pi link here is an error; not after at_start
 
 # Other names teammates' nodes may send for the same event (copied from voice's flow_node).
 EVENT_ALIASES = {"drop_success": "drop_done", "grab_done": "grab_success", "pick_success": "grab_success",
@@ -229,9 +231,10 @@ class HmcFlow:
             return []
         if name == "base_link_lost":
             self.link_ok = False
-            if s in ACTIVE:
+            if s in NEEDS_BASE:
                 return self._goto(ERROR, now, "I lost the connection to my wheels.")
-            return []
+            # after at_start the Pi's run ends and its link goes with it: not an error
+            return [("log", "(base link lost in state %s: not needed now)" % s)]
         if name == "arm_holding":
             self.carrying = True
             return []

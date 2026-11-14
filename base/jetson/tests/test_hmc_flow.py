@@ -406,12 +406,41 @@ class ErrorTests(FlowCase):
         self.assertEqual(f.state, RETURNING)
         self.assertEqual(actions(out), ["go_back"])
 
-    def test_link_lost_in_every_active_state_is_an_error(self):
-        for state in (FOLLOWING, AT_CAR, HANDOVER, RETURNING, DROPPING):
+    def test_link_lost_while_the_base_is_needed_is_an_error(self):
+        for state in (FOLLOWING, AT_CAR, HANDOVER, RETURNING):
             self.make()
             self.go(state)
             self.flow.on_event("base_link_lost", 9.0)
             self.assertEqual(self.flow.state, ERROR, state)
+
+    def test_link_lost_after_at_start_is_only_logged(self):
+        for use_arm, state in ((True, DROPPING), (True, DONE), (False, DONE)):
+            self.make(use_arm=use_arm)
+            self.go(AT_CAR)
+            self.flow.on_heard("done", 3.0)
+            if use_arm:
+                self.flow.on_event("grab_success", 4.0)
+            self.flow.on_event("at_start", 5.0)
+            if state == DONE and use_arm:
+                self.flow.on_event("drop_done", 6.0)
+            self.assertEqual(self.flow.state, state)
+            out = self.flow.on_event("base_link_lost", 6.5)
+            self.assertEqual(self.flow.state, state, (use_arm, state))
+            self.assertEqual([k for k, _ in out], ["log"], (use_arm, state))
+
+    def test_the_pi_run_ending_does_not_spoil_the_drop(self):
+        """returning -> at_start -> link lost (the Pi's run ends) -> drop_done -> done, with the arm."""
+        f = self.make(use_arm=True)
+        self.go(RETURNING)
+        out = f.on_event("at_start", 5.0)
+        self.assertEqual(actions(out), ["drop_bag"])
+        out = f.on_event("base_link_lost", 5.8)
+        self.assertEqual(f.state, DROPPING)
+        self.assertEqual(actions(out), [])
+        self.assertEqual(f.on_tick(10.0), [])  # no come-back, no timeout yet
+        out = f.on_event("drop_done", 14.0)
+        self.assertEqual(f.state, DONE)
+        self.assertIn("Here is your bag.", says(out))
 
     def test_unknown_events_are_only_logged(self):
         f = self.make()

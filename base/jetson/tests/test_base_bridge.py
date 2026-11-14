@@ -100,22 +100,105 @@ class MappingTests(unittest.TestCase):
             logic = connected(phase=phase)
             self.assertEqual(sent(logic.on_command({"action": "stop"}, 1.0)), ["wait"], phase)
 
-    def test_stop_when_idle_or_done_stops(self):
+    def test_stop_when_idle_done_or_unknown_sends_nothing(self):
         for phase in ("IDLE", "DONE", None):
             logic = connected(phase=phase)
-            self.assertEqual(sent(logic.on_command({"action": "stop"}, 1.0)), ["stop"], phase)
+            out = logic.on_command({"action": "stop"}, 1.0)
+            self.assertEqual(sent(out), [], phase)
+            self.assertIn("log", [k for k, _ in out])
 
     def test_other_actions_are_ignored(self):
         logic = connected()
         for action in ("carry_bag", "drop_bag", "move_forward", "turn", None):
             self.assertEqual(sent(logic.on_command({"action": action}, 1.0)), [], action)
 
-    def test_command_while_disconnected_is_sent_on_connect_latest_only(self):
+    def test_command_while_disconnected_is_restored_from_the_first_status(self):
         logic = BridgeLogic()
         self.assertEqual(sent(logic.on_command({"action": "follow_me"}, 0.0)), [])
-        self.assertEqual(sent(logic.on_command({"action": "end"}, 0.1)), [])
-        self.assertEqual(sent(logic.on_connected(1.0)), ["stop"])
-        self.assertEqual(sent(logic.on_connected(2.0)), [])  # only once
+        self.assertEqual(sent(logic.on_connected(1.0)), [])  # nothing blind: wait for the Pi's state
+        self.assertEqual(sent(logic.on_status(status(phase="IDLE", locked=False), 1.1)), ["follow"])
+
+    def test_end_while_disconnected_is_never_sent_later(self):
+        logic = BridgeLogic()
+        logic.on_command({"action": "follow_me"}, 0.0)
+        logic.on_command({"action": "end"}, 0.1)
+        self.assertEqual(sent(logic.on_connected(1.0)), [])
+        self.assertEqual(sent(logic.on_status(status(phase="FOLLOW", locked=False, held="silent"), 1.1)), [])
+
+
+class RestoreTests(unittest.TestCase):
+    """BridgeLogic keeps what the flow last asked for and puts the Pi back into it."""
+
+    def at(self, action, phase, now=0.0):
+        logic = connected(now, phase=phase)
+        logic.on_command({"action": action}, now)
+        return logic
+
+    def restore(self, logic, now, **kw):
+        kw.setdefault("locked", False)
+        return sent(logic.on_status(status(**kw), now))
+
+    def test_following_but_held_by_silence_resumes(self):
+        logic = self.at("follow_me", "IDLE")
+        self.assertEqual(self.restore(logic, 2.0, phase="FOLLOW", held="silent"), ["resume"])
+        self.assertEqual(self.restore(logic, 2.2, phase="FOLLOW", held="silent"), [])  # not at 5 Hz
+        self.assertEqual(self.restore(logic, 3.1, phase="FOLLOW", held="silent"), ["resume"])
+        self.assertEqual(self.restore(logic, 4.5, phase="FOLLOW", held=None), [])
+
+    def test_following_and_running_needs_nothing(self):
+        logic = self.at("follow_me", "IDLE")
+        self.assertEqual(self.restore(logic, 2.0, phase="FOLLOW", held=None, waiting=False), [])
+
+    def test_following_but_waiting_resumes(self):
+        logic = self.at("follow_me", "IDLE")
+        self.assertEqual(self.restore(logic, 2.0, phase="FOLLOW", waiting=True, held="wait"), ["resume"])
+
+    def test_following_but_idle_or_done_follows(self):
+        for phase in ("IDLE", "DONE"):
+            logic = self.at("follow_me", "IDLE")
+            self.assertEqual(self.restore(logic, 2.0, phase=phase), ["follow"], phase)
+
+    def test_a_fresh_command_is_not_repeated_at_once(self):
+        logic = self.at("follow_me", "IDLE", now=1.0)
+        self.assertEqual(self.restore(logic, 1.2, phase="IDLE"), [])  # the Pi has not read it yet
+
+    def test_waiting_but_not_waiting_waits(self):
+        logic = self.at("follow_me", "IDLE")
+        logic.on_command({"action": "wait"}, 1.0)
+        self.assertEqual(self.restore(logic, 2.5, phase="FOLLOW", waiting=False, held=None), ["wait"])
+        self.assertEqual(self.restore(logic, 4.0, phase="FOLLOW", waiting=False, held="silent"), ["wait"])
+        self.assertEqual(self.restore(logic, 5.5, phase="FOLLOW", waiting=True, held="wait"), [])
+
+    def test_flow_stop_while_following_is_a_wait_that_is_kept(self):
+        logic = self.at("follow_me", "FOLLOW")
+        self.assertEqual(sent(logic.on_command({"action": "stop"}, 1.0)), ["wait"])
+        self.assertEqual(self.restore(logic, 2.5, phase="FOLLOW", waiting=False), ["wait"])
+
+    def test_returning_restores_return_or_resume(self):
+        logic = self.at("go_back", "FOLLOW")
+        self.assertEqual(self.restore(logic, 2.0, phase="FOLLOW"), ["return"])
+        self.assertEqual(self.restore(logic, 3.5, phase="RETURN", held="silent"), ["resume"])
+        self.assertEqual(self.restore(logic, 5.0, phase="RETURN", held=None), [])
+        self.assertEqual(self.restore(logic, 6.5, phase="DONE"), [])  # the return finished
+        self.assertEqual(self.restore(logic, 8.0, phase="IDLE"), [])  # a new run: the Pi refuses return in IDLE
+
+    def test_resume_goes_back_to_what_was_moving(self):
+        logic = self.at("go_back", "RETURN")
+        logic.on_command({"action": "stop"}, 1.0)  # -> wait
+        self.assertEqual(sent(logic.on_command({"action": "resume"}, 2.0)), ["resume"])
+        self.assertEqual(self.restore(logic, 3.5, phase="RETURN", waiting=False, held=None), [])
+        self.assertEqual(self.restore(logic, 5.0, phase="RETURN", waiting=True, held="wait"), ["resume"])
+
+    def test_after_end_nothing_is_restored_and_stop_never_resent(self):
+        logic = self.at("follow_me", "FOLLOW")
+        self.assertEqual(sent(logic.on_command({"action": "end"}, 1.0)), ["stop"])
+        for t in (2.5, 4.0, 6.0):
+            self.assertEqual(self.restore(logic, t, phase="FOLLOW", held="silent"), [])
+
+    def test_nothing_asked_nothing_sent(self):
+        logic = connected(0.0)
+        self.assertEqual(self.restore(logic, 2.0, phase="IDLE"), [])
+        self.assertEqual(self.restore(logic, 3.0, phase="FOLLOW", held="silent"), [])
 
 
 class EventTests(unittest.TestCase):
@@ -284,7 +367,58 @@ class PiLinkTests(unittest.TestCase):
         self.assertIsNone(link.sock)
         link.step(0.8)
         self.assertIs(link.sock, sock2)
-        self.assertEqual(sock2.cmds(), ["return"])  # the failed command is retried on the new link
+        self.assertEqual(sock2.cmds(), [])
+        sock2.feed(status(phase="FOLLOW"))
+        link.step(0.9)
+        self.assertEqual(sock2.cmds(), ["return"])  # the failed command is restored on the new link
+
+    def test_wait_lost_in_a_dying_link_is_restored_after_reconnect(self):
+        sock, sock2 = FakeSocket(), FakeSocket()
+        link = PiLink(BridgeLogic(), FakeConnector([sock, sock2]))
+        link.step(0.0)
+        link.command({"action": "follow_me"}, 0.0)
+        sock.feed(status(phase="FOLLOW"))
+        link.step(0.1)
+        link.command({"action": "wait"}, 0.2)  # sendall succeeds, but the Pi never reads it
+        self.assertEqual(sock.cmds(), ["follow", "wait"])
+        sock.eof = True
+        link.step(0.3)
+        self.assertIsNone(link.sock)
+        link.step(0.9)
+        self.assertIs(link.sock, sock2)
+        sock2.feed(status(phase="FOLLOW", waiting=False, held="silent"))  # latched by silence, not waiting
+        link.step(1.0)
+        self.assertEqual(sock2.cmds(), ["wait"])  # never "resume": the flow wants it to wait
+
+    def test_following_resumed_after_reconnect(self):
+        sock, sock2 = FakeSocket(), FakeSocket()
+        link = PiLink(BridgeLogic(), FakeConnector([sock, sock2]))
+        link.step(0.0)
+        link.command({"action": "follow_me"}, 0.0)
+        sock.feed(status(phase="FOLLOW"))
+        link.step(0.1)
+        sock.eof = True
+        link.step(0.3)
+        link.step(0.9)
+        sock2.feed(status(phase="FOLLOW", held="silent"))
+        link.step(1.0)
+        self.assertEqual(sock2.cmds(), ["resume"])
+
+    def test_error_reply_from_the_pi_is_logged_and_the_link_stays(self):
+        sock = FakeSocket()
+        link = PiLink(BridgeLogic(), FakeConnector([sock]))
+        link.step(0.0)
+        sock.feed(status(phase="IDLE", locked=False))
+        link.step(0.1)
+        link.command({"action": "go_back"}, 0.2)
+        sock.feed({"error": "return refused in IDLE"})
+        out = link.step(0.3)
+        self.assertIs(link.sock, sock)
+        self.assertTrue(any(k == "log" and "return refused in IDLE" in v for k, v in out))
+        self.assertEqual(statuses(out)[0]["error"], "return refused in IDLE")
+        sock.feed(status(phase="IDLE", locked=False))
+        link.step(0.4)
+        self.assertEqual(sock.cmds(), ["return"])  # refused in IDLE: not hammered again
 
     def test_silent_pi_is_dropped(self):
         sock = FakeSocket()

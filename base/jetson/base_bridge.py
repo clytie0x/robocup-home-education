@@ -5,19 +5,26 @@ shell around BridgeLogic (pure, no sockets, no ROS) and PiLink (the socket, no R
 Pi link: TCP to the Pi (run_follow.py --remote), port 5604, one JSON object per line.
   bridge -> Pi  {"cmd": "follow"|"wait"|"resume"|"return"|"stop"|"ping"}; "ping" every 0.5 s
                 (the Pi holds still after 2 s of silence)
-  Pi -> bridge  {"t","phase": "IDLE|FOLLOW|RETURN|DONE","waiting","locked","operator_m","breadcrumbs",
-                 "queue_tail","at_start","stop","ack"} up to 5 Hz, or {"error": ...}
+  Pi -> bridge  {"t","phase": "IDLE|FOLLOW|RETURN|DONE","waiting","held": "silent"|"wait"|null,"locked",
+                 "operator_m","breadcrumbs","queue_tail","at_start","stop","ack"} up to 5 Hz, or {"error": ...}
+                (2 s of silence latches a hold on the Pi until resume, follow or return)
 
 ROS side:
   /robot/command (JSON {"action",...})  follow_me -> follow, go_back -> return, wait -> wait,
-      resume -> resume, end -> stop; stop -> wait while the Pi is in FOLLOW or RETURN (it only halts),
-      else stop (the Pi ends its run). Other actions (carry_bag, drop_bag, ...) are not ours.
+      resume -> resume, end -> stop (the only way to send Pi "stop", which ends its run);
+      stop -> wait while the Pi is in FOLLOW or RETURN, else nothing (logged).
+      Other actions (carry_bag, drop_bag, ...) are not ours.
   /robot/event  see_person when locked becomes true, lost_person when it has been false for 0.5 s,
       at_start when at_start becomes true, base_link_lost when no status for 1.5 s or the socket
       drops, base_link_ok when statuses come back.
   /base/status  every Pi status as JSON, plus "link": true; {"link": false} when the link is lost.
 
-A command given while the link is down is kept (the latest one only) and sent when it is back.
+The bridge keeps the intent, what the flow last asked (following, waiting, returning, idle after end).
+A sent line is not proof it arrived, so every status is compared with the intent; after each
+(re)connect and whenever they disagree the restoring command goes out, at most once a second:
+following -> follow (Pi IDLE/DONE) or resume (held or waiting); returning -> return (Pi FOLLOW) or
+resume (held or waiting); waiting -> wait (moving, not waiting). "stop" is never re-sent, and
+nothing is sent blind on connect: the first status decides. A Pi {"error"} reply is logged only.
 Reconnects after 0.5, 1, 2, 4, 5, 5 ... s; a received status resets the wait to 0.5 s.
 
 Run: source /opt/ros/jazzy/setup.bash && ROS_DOMAIN_ID=42 python3 base_bridge.py [--pi-host IP]
@@ -39,6 +46,7 @@ MAX_BACKOFF_S = 5.0
 CONNECT_TIMEOUT_S = 0.5
 MAX_LINE = 65536
 EPS = 1e-6
+RESEND_S = 1.0  # a restoring command is sent at most once a second (statuses come at 5 Hz)
 ACTION_TO_CMD = {"follow_me": "follow", "go_back": "return", "wait": "wait", "resume": "resume", "end": "stop"}
 MOVING = ("FOLLOW", "RETURN")
 
@@ -53,7 +61,9 @@ class BridgeLogic:
         self.link_ok = None  # None = not known yet
         self.last_heard = 0.0
         self.last_ping = None
-        self.pending = None  # a command that could not be sent yet
+        self.intent = None  # what the flow last asked: following | waiting | returning | idle (after end)
+        self.moving = None  # following | returning: what "resume" goes back to
+        self.last_sent_at = None  # last follow/wait/resume/return/stop on this link, for the resend gap
         self.phase = None
         self.locked = False  # what the Pi said last
         self.reported_locked = False  # what we told ROS last
@@ -70,11 +80,8 @@ class BridgeLogic:
         self.connected = True
         self.last_heard = now  # the link timeout counts from here until the first status
         self.last_ping = None
-        out = [("log", "connected to the Pi")]
-        if self.pending is not None:
-            out.append(("send", self.pending))
-            self.pending = None
-        return out
+        self.last_sent_at = None  # what went into the old link may be lost: restore at the first status
+        return [("log", "connected to the Pi")]
 
     def _backoff(self, now):
         self.next_connect_at = now + self.retry_delay
@@ -94,29 +101,67 @@ class BridgeLogic:
 
     def on_disconnected(self, now, why="socket closed"):
         self.connected = False
+        self.last_sent_at = None
         self._backoff(now)
         return self._link_lost(why)
 
     def on_send_failed(self, message, now):
-        """The socket broke while sending: keep the command for the next link."""
-        if message.get("cmd") != "ping":
-            self.pending = message
+        """The socket broke while sending. The intent is kept and restored on the next link."""
         return self.on_disconnected(now, "send failed")
 
     # ---------------- inputs ----------------
     def on_command(self, command, now):
         action = command.get("action")
         if action == "stop":
-            cmd = "wait" if self.phase in MOVING else "stop"
-        else:
-            cmd = ACTION_TO_CMD.get(action)
+            if self.phase not in MOVING:  # IDLE, DONE or not known: Pi "stop" would end its run
+                return [("log", "stop with the Pi in %s: nothing to halt" % self.phase)]
+            action = "wait"
+        cmd = ACTION_TO_CMD.get(action)
         if cmd is None:
             return []
-        message = {"cmd": cmd}
+        if action == "follow_me":
+            self.intent = self.moving = "following"
+        elif action == "go_back":
+            self.intent = self.moving = "returning"
+        elif action == "wait":
+            self.intent = "waiting"
+        elif action == "resume":
+            self.intent = self.moving or "following"
+        else:  # end
+            self.intent = "idle"
         if not self.connected:
-            self.pending = message
-            return [("log", "link down, %s kept until it is back" % cmd)]
-        return [("send", message), ("log", "%s -> %s" % (action, cmd))]
+            note = "not sent" if cmd == "stop" else "restored when it is back"
+            return [("log", "link down, %s %s" % (cmd, note))]
+        self.last_sent_at = now
+        return [("send", {"cmd": cmd}), ("log", "%s -> %s" % (command.get("action"), cmd))]
+
+    def _restore_cmd(self, status):
+        """The command that puts the Pi back into the intent, or None when it agrees (never "stop")."""
+        phase, held = status.get("phase"), status.get("held")
+        waiting = bool(status.get("waiting"))
+        if self.intent == "following":
+            if phase in ("IDLE", "DONE"):
+                return "follow"
+            if phase == "FOLLOW" and (waiting or held):
+                return "resume"
+        elif self.intent == "returning":
+            if phase == "FOLLOW":
+                return "return"
+            if phase == "RETURN" and (waiting or held):
+                return "resume"  # IDLE refuses return; DONE means the return is over
+        elif self.intent == "waiting":
+            if phase in MOVING and not waiting and held != "wait":
+                return "wait"
+        return None
+
+    def _restore(self, status, now):
+        cmd = self._restore_cmd(status)
+        if cmd is None or (self.last_sent_at is not None and now - self.last_sent_at < RESEND_S - EPS):
+            return []
+        self.last_sent_at = now
+        return [("send", {"cmd": cmd}),
+                ("log", "Pi in %s (waiting %s, held %s), flow wants %s: %s" % (
+                    status.get("phase"), status.get("waiting"), status.get("held"), self.intent, cmd))]
 
     def on_status(self, status, now):
         self.last_heard = now
@@ -142,7 +187,7 @@ class BridgeLogic:
             out.append(("event", "at_start"))
         self.at_start = at_start
         out.append(("status", dict(status, link=True)))
-        return out
+        return out + self._restore(status, now)
 
     def _debounce(self, now):
         if self.reported_locked and not self.locked and self.unlocked_since is not None \
@@ -236,8 +281,7 @@ class PiLink:
         for kind, val in outputs:
             if kind == "send":
                 if self.sock is None:
-                    self.logic.pending = val if val.get("cmd") != "ping" else self.logic.pending
-                    continue
+                    continue  # the link broke earlier in this batch; the intent is restored later
                 try:
                     self.sock.sendall((json.dumps(val) + "\n").encode("utf-8"))
                 except OSError:
