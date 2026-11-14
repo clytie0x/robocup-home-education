@@ -44,6 +44,17 @@ def _encode_jpeg(frame):
 
 
 MAX_REPLY = 1_000_000  # bytes; a bigger reply means a broken or hostile peer
+RETRY_PRIMARY_S = 10.0  # while on a backup host, how often to try the primary again
+PROBE_TIMEOUT_S = 0.2  # that try: the cable answers in ~1 ms, and a frame waits at most this long
+
+
+def hosts(p):
+    """The Jetson's addresses in priority order: "jetson_host", then "jetson_hosts_backup", each once."""
+    found = []
+    for host in [p["jetson_host"]] + list(p.get("jetson_hosts_backup", [])):
+        if host not in found:
+            found.append(host)
+    return found
 
 
 def _read_exactly(sock, count, deadline):
@@ -59,10 +70,24 @@ def _read_exactly(sock, count, deadline):
 
 
 class JetsonLink:
-    """One frame in flight at a time. send() only stores the frame, so it never blocks."""
+    """One frame in flight at a time. send() only stores the frame, so it never blocks.
 
-    def __init__(self, host, port, hfov_deg, encode=_encode_jpeg, reply_timeout=2.0, clock=time.monotonic):
-        self._host, self._port, self._hfov = host, port, hfov_deg
+    host is one address or a list in priority order (the cable first). Each (re)connect takes the
+    first that answers. On a backup, every retry_primary seconds and only between frames, a short
+    connect to the primary is tried; when it answers it becomes the link and the backup is closed.
+    The Jetson server serves one client and a new connection replaces the old one, so the try is
+    never a bare probe: a connection made is a connection used, and no reply is in flight then.
+    """
+
+    def __init__(self, host, port, hfov_deg, encode=_encode_jpeg, reply_timeout=2.0, clock=time.monotonic,
+                 connect=socket.create_connection, retry_primary=RETRY_PRIMARY_S):
+        self._hosts = [host] if isinstance(host, str) else list(host)
+        self._port, self._hfov = port, hfov_deg
+        self._connect = connect
+        self._retry_primary = retry_primary
+        self._next_primary_try = 0.0
+        self._sock = None
+        self.host = None  # the address in use, None while not connected
         self._encode = encode
         self._reply_timeout = reply_timeout
         self._clock = clock
@@ -103,15 +128,50 @@ class JetsonLink:
     def _run(self):
         while not self._stop.is_set():
             try:
-                with socket.create_connection((self._host, self._port), timeout=1.0) as sock:
-                    sock.settimeout(self._reply_timeout)
-                    self._talk(sock)
+                self._open_first()
+                self._talk()
             except Exception as error:  # the thread must live until stop()
                 self.error = "%s: %s" % (type(error).__name__, error)
+            finally:
+                if self._sock is not None:
+                    self._sock.close()
+                self._sock = self.host = None
             self._stop.wait(1.0)  # reconnect every second
 
-    def _talk(self, sock):
+    def _open_first(self):
+        """Connect to the first host that answers, in priority order; raises the last error."""
+        for host in self._hosts:
+            try:
+                self._use(self._connect((host, self._port), timeout=1.0), host)
+                return
+            except Exception as error:
+                self.error = "%s %s: %s" % (host, type(error).__name__, error)
+                last = error
+        raise last
+
+    def _use(self, sock, host):
+        sock.settimeout(self._reply_timeout)
+        old, self._sock, self.host = self._sock, sock, host
+        if old is not None:
+            old.close()
+        self._next_primary_try = time.monotonic() + self._retry_primary
+
+    def _back_to_primary(self):
+        """On a backup: now and then try the primary, between frames. A failed try keeps the backup."""
+        primary = self._hosts[0]
+        if self.host == primary or time.monotonic() < self._next_primary_try:
+            return
+        self._next_primary_try = time.monotonic() + self._retry_primary
+        try:
+            sock = self._connect((primary, self._port), timeout=PROBE_TIMEOUT_S)
+        except Exception:
+            return
+        self._use(sock, primary)
+
+    def _talk(self):
         while not self._stop.is_set():
+            self._back_to_primary()
+            sock = self._sock
             if not self._wake.wait(0.2):
                 continue
             with self._lock:

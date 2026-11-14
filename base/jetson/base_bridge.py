@@ -27,8 +27,14 @@ resume (held or waiting); waiting -> wait (moving, not waiting). "stop" is never
 nothing is sent blind on connect: the first status decides. A Pi {"error"} reply is logged only.
 Reconnects after 0.5, 1, 2, 4, 5, 5 ... s; a received status resets the wait to 0.5 s.
 
-Run: source /opt/ros/jazzy/setup.bash && ROS_DOMAIN_ID=42 python3 base_bridge.py [--pi-host IP]
-     (the host defaults to "pi_host" in base/params.json)
+Pi addresses in priority order (cable, Wi-Fi, Tailscale): each connect takes the first that answers.
+On a backup, every 10 s a short connect to the primary is tried; when it answers it becomes the
+link and the backup is closed. The Pi's command server takes the new client after reading the old
+one's lines, and the switch counts as a reconnect for the intent (restored at the first status), so
+a command lost on the way is restored. It is not a link loss: no event goes to ROS.
+
+Run: source /opt/ros/jazzy/setup.bash && ROS_DOMAIN_ID=42 python3 base_bridge.py [--pi-host IP[,IP...]]
+     (the hosts default to "pi_host" then "pi_hosts_backup" in base/params.json)
 """
 
 import argparse
@@ -44,6 +50,8 @@ LINK_TIMEOUT_S = 1.5
 MIN_BACKOFF_S = 0.5
 MAX_BACKOFF_S = 5.0
 CONNECT_TIMEOUT_S = 0.5
+RETRY_PRIMARY_S = 10.0  # while on a backup address, how often the primary is tried again
+PROBE_TIMEOUT_S = 0.2  # that try blocks the ROS timer at most this long (the cable answers in ~1 ms)
 MAX_LINE = 65536
 EPS = 1e-6
 RESEND_S = 1.0  # a restoring command is sent at most once a second (statuses come at 5 Hz)
@@ -210,12 +218,17 @@ class BridgeLogic:
 
 class PiLink:
     """The socket around BridgeLogic, stepped by the caller (the ROS timer), no threads.
-    `connect()` returns a connected socket or raises OSError. step() and command() return the outputs
-    that are not sends: ("event", ...), ("status", ...), ("log", ...)."""
+    `connect` is one connector or a list in priority order; a connector returns a connected socket
+    or raises OSError, and the primary's is called with timeout=PROBE_TIMEOUT_S when it is tried
+    again from a backup. step() and command() return the outputs that are not sends:
+    ("event", ...), ("status", ...), ("log", ...)."""
 
-    def __init__(self, logic, connect):
+    def __init__(self, logic, connect, retry_primary_s=RETRY_PRIMARY_S):
         self.logic = logic
-        self.connect = connect
+        self.connects = list(connect) if isinstance(connect, (list, tuple)) else [connect]
+        self.retry_primary_s = retry_primary_s
+        self.using = None  # index in connects of the link that is up
+        self.next_primary_try = 0.0
         self.sock = None
         self.buffer = b""
 
@@ -225,18 +238,43 @@ class PiLink:
     def step(self, now):
         out = []
         if self.sock is None and self.logic.should_connect(now):
-            try:
-                self.sock = self.connect()
-            except OSError as error:
-                out += self._run(self.logic.on_connect_failed(now, str(error)), now)
+            errors = []
+            for index, connect in enumerate(self.connects):
+                try:
+                    sock = connect()
+                except OSError as error:
+                    errors.append(str(error))
+                    continue
+                out += self._use(sock, index, now)
+                break
             else:
-                self.buffer = b""
-                out += self._run(self.logic.on_connected(now), now)
+                out += self._run(self.logic.on_connect_failed(now, "; ".join(errors)), now)
+        elif self.sock is not None and self.using != 0 and now >= self.next_primary_try - EPS:
+            out += self._back_to_primary(now)
         if self.sock is not None:
             out += self._read(now)
         if self.sock is not None:
             out += self._run(self.logic.on_tick(now), now)
         return out
+
+    def _use(self, sock, index, now):
+        self.sock, self.using, self.buffer = sock, index, b""
+        self.next_primary_try = now + self.retry_primary_s
+        out = self._run(self.logic.on_connected(now), now)
+        return out if index == 0 else out + [("log", "on backup address %d" % index)]
+
+    def _back_to_primary(self, now):
+        """A short try of the primary; when it answers the backup socket is closed without a link loss."""
+        self.next_primary_try = now + self.retry_primary_s
+        try:
+            sock = self.connects[0](timeout=PROBE_TIMEOUT_S)
+        except OSError:
+            return []
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        return self._use(sock, 0, now) + [("log", "back on the primary address")]
 
     def _read(self, now):
         out = []
@@ -272,7 +310,7 @@ class PiLink:
                 self.sock.close()
             except OSError:
                 pass
-        self.sock = None
+        self.sock = self.using = None
         self.buffer = b""
         return self._run(self.logic.on_disconnected(now, why), now) if notify else []
 
@@ -297,7 +335,7 @@ class PiLink:
 
 
 def tcp_connector(host, port=PORT, timeout=CONNECT_TIMEOUT_S):
-    def connect():
+    def connect(timeout=timeout):
         sock = socket.create_connection((host, port), timeout=timeout)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setblocking(False)
@@ -315,28 +353,40 @@ def load_params():
 
 
 def pi_host(argument, params):
-    """--pi-host if given, else "pi_host" from base/params.json."""
-    host = argument or params.get("pi_host")
-    if not host:
+    """The Pi's addresses in priority order, each once: --pi-host (comma-separated) if given, else
+    "pi_host" then "pi_hosts_backup" from base/params.json."""
+    if argument:
+        candidates = argument.split(",")
+    else:
+        candidates = [params.get("pi_host")] + list(params.get("pi_hosts_backup", []))
+    hosts = []
+    for host in candidates:
+        host = (host or "").strip()
+        if host and host not in hosts:
+            hosts.append(host)
+    if not hosts:
         raise SystemExit('no Pi address: pass --pi-host or add "pi_host" to base/params.json')
-    return host
+    return hosts
 
 
 def make_bridge(host, port=PORT):
-    """The rclpy node, built here so the rest of the file imports without ROS."""
+    """The rclpy node, built here so the rest of the file imports without ROS. host: one address or a
+    list in priority order."""
     import rclpy
     from rclpy.node import Node
     from std_msgs.msg import String
 
+    hosts = [host] if isinstance(host, str) else list(host)
+
     class Bridge(Node):
         def __init__(self):
             super().__init__("base_bridge")
-            self.link = PiLink(BridgeLogic(), tcp_connector(host, port))
+            self.link = PiLink(BridgeLogic(), [tcp_connector(h, port) for h in hosts])
             self.pub_event = self.create_publisher(String, "/robot/event", 10)
             self.pub_status = self.create_publisher(String, "/base/status", 10)
             self.create_subscription(String, "/robot/command", self.on_command, 10)
             self.create_timer(0.05, self.on_tick)
-            self.get_logger().info("Pi link %s:%d" % (host, port))
+            self.get_logger().info("Pi link %s port %d" % (", ".join(hosts), port))
 
         def emit(self, outputs):
             for kind, val in outputs:

@@ -196,5 +196,88 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(jpeg[:2], b"\xff\xd8")
 
 
+def free_port():
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+class BackupHostTests(unittest.TestCase):
+    """Host names stand for ports on 127.0.0.1, through a fake connect."""
+
+    def setUp(self):
+        self.servers = {}
+        self.ports = {"cable": free_port(), "wifi": free_port()}
+        self.jl = None
+
+    def tearDown(self):
+        if self.jl:
+            self.jl.stop()
+        for srv in self.servers.values():
+            srv.stop()
+
+    def serve(self, name):
+        self.servers[name] = server.Server(server.fake_people, "127.0.0.1", self.ports[name])
+        self.servers[name].start()
+
+    def connect(self, address, timeout):
+        return socket.create_connection(("127.0.0.1", self.ports[address[0]]), timeout=timeout)
+
+    def make_link(self, hosts, retry_primary=0.3):
+        self.jl = link.JetsonLink(hosts, None, 58.59, encode=lambda f: b"jpg", reply_timeout=1.0,
+                                  connect=self.connect, retry_primary=retry_primary)
+        self.jl.start()
+        return self.jl
+
+    def answered(self):
+        self.jl.send(make_frame(1.0))
+        return self.jl.latest() is not None
+
+    def test_primary_refused_uses_the_backup(self):
+        self.serve("wifi")
+        jl = self.make_link(["cable", "wifi"], retry_primary=60)
+        self.assertTrue(wait_for(self.answered, 5.0))
+        self.assertEqual(jl.host, "wifi")
+
+    def test_link_goes_back_to_the_primary_when_it_returns(self):
+        self.serve("wifi")
+        jl = self.make_link(["cable", "wifi"])
+        self.assertTrue(wait_for(self.answered, 5.0))
+        self.assertEqual(jl.host, "wifi")
+        self.serve("cable")
+        self.assertTrue(wait_for(lambda: jl.host == "cable", 5.0))
+        self.servers.pop("wifi").stop()  # answers must now come over the primary
+        self.assertTrue(wait_for(self.answered, 5.0))
+        self.assertEqual(jl.host, "cable")
+
+    def test_primary_up_is_used_first(self):
+        self.serve("cable")
+        self.serve("wifi")
+        jl = self.make_link(["cable", "wifi"])
+        self.assertTrue(wait_for(self.answered, 5.0))
+        self.assertEqual(jl.host, "cable")
+
+    def test_a_single_host_string_still_works(self):
+        self.serve("cable")
+        jl = self.make_link("cable")
+        self.assertTrue(wait_for(self.answered, 5.0))
+        self.assertEqual(jl.host, "cable")
+
+
+class HostsTests(unittest.TestCase):
+    def test_primary_then_backups_without_duplicates(self):
+        p = {"jetson_host": "10.0.0.2", "jetson_hosts_backup": ["192.168.31.137", "10.0.0.2", "100.108.202.48", "192.168.31.137"]}
+        self.assertEqual(link.hosts(p), ["10.0.0.2", "192.168.31.137", "100.108.202.48"])
+
+    def test_no_backups_is_the_primary_alone(self):
+        self.assertEqual(link.hosts({"jetson_host": "10.0.0.2"}), ["10.0.0.2"])
+
+    def test_committed_params_list_the_cable_first(self):
+        import params
+        self.assertEqual(link.hosts(params.load()), ["10.0.0.2", "192.168.31.137", "100.108.202.48"])
+
+
 if __name__ == "__main__":
     unittest.main()

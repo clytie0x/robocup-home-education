@@ -72,7 +72,7 @@ class FakeConnector:
         self.plan = list(plan)
         self.calls = 0
 
-    def __call__(self):
+    def __call__(self, timeout=None):
         self.calls += 1
         item = self.plan.pop(0) if self.plan else None
         if item is None:
@@ -440,12 +440,113 @@ class PiLinkTests(unittest.TestCase):
         self.assertIsNone(link.sock)
 
 
+class BackupLinkTests(unittest.TestCase):
+    """PiLink with connectors in priority order: [cable, wifi]."""
+
+    def make(self, cable_plan, wifi_plan):
+        self.cable, self.wifi = FakeConnector(cable_plan), FakeConnector(wifi_plan)
+        return PiLink(BridgeLogic(), [self.cable, self.wifi])
+
+    def test_primary_refused_uses_the_backup(self):
+        wifi = FakeSocket()
+        link = self.make([None], [wifi])
+        link.step(0.0)
+        self.assertIs(link.sock, wifi)
+        self.assertEqual((self.cable.calls, self.wifi.calls), (1, 1))
+
+    def test_primary_up_is_used_first(self):
+        cable = FakeSocket()
+        link = self.make([cable], [FakeSocket()])
+        link.step(0.0)
+        self.assertIs(link.sock, cable)
+        self.assertEqual(self.wifi.calls, 0)
+
+    def test_all_refused_is_one_link_lost_and_backoff(self):
+        link = self.make([None, None], [None, None])
+        out = link.step(0.0)
+        self.assertEqual(events(out), ["base_link_lost"])
+        self.assertEqual((self.cable.calls, self.wifi.calls), (1, 1))
+        link.step(0.3)  # inside the 0.5 s backoff
+        self.assertEqual((self.cable.calls, self.wifi.calls), (1, 1))
+
+    def test_primary_is_tried_again_every_10_s_and_taken_back(self):
+        wifi, cable = FakeSocket(), FakeSocket()
+        link = self.make([None, None, cable], [wifi])
+        tries, out = [], []
+        for i in range(61):  # 0 .. 30 s, a status from whichever link is up every 0.5 s
+            t = i * 0.5
+            if link.sock is not None:
+                link.sock.feed(status())
+            before = self.cable.calls
+            step = link.step(t)
+            out += step
+            if self.cable.calls > before:
+                tries.append(t)
+            if t == 20.0:
+                self.assertIs(link.sock, cable)
+                self.assertTrue(wifi.closed)
+                self.assertEqual(len(cable.pings()), 1)  # the Pi hears the new link at once
+        self.assertEqual(tries, [0.0, 10.0, 20.0])  # refused at 10 s, taken at 20 s, then no more tries
+        self.assertEqual(events(out), ["base_link_ok", "see_person"])  # a switch is not a link loss, nor a new lock
+        self.assertEqual(self.wifi.calls, 1)
+        self.assertIs(link.sock, cable)
+
+    def test_switch_back_restores_the_intent_on_the_primary(self):
+        wifi, cable = FakeSocket(), FakeSocket()
+        link = self.make([None, cable], [wifi])
+        link.step(0.0)
+        link.command({"action": "follow_me"}, 0.1)
+        self.assertEqual(wifi.cmds(), ["follow"])
+        wifi.feed(status(phase="FOLLOW"))
+        link.step(9.9)
+        link.command({"action": "wait"}, 9.95)  # may be lost when the Pi drops the wifi client
+        link.step(10.0)
+        self.assertIs(link.sock, cable)
+        self.assertEqual(cable.cmds(), [])  # nothing blind: the first status decides
+        cable.feed(status(phase="FOLLOW", waiting=False))
+        link.step(10.05)
+        self.assertEqual(cable.cmds(), ["wait"])
+
+    def test_reconnect_to_a_backup_restores_the_intent(self):
+        cable, wifi = FakeSocket(), FakeSocket()
+        link = self.make([cable, None], [wifi])
+        link.step(0.0)
+        self.assertIs(link.sock, cable)
+        link.command({"action": "follow_me"}, 0.0)
+        cable.feed(status(phase="FOLLOW"))
+        link.step(0.1)
+        cable.eof = True  # the cable is pulled
+        out = link.step(0.2)
+        self.assertIn("base_link_lost", events(out))
+        link.step(0.8)
+        self.assertIs(link.sock, wifi)
+        wifi.feed(status(phase="FOLLOW", held="silent"))
+        out = link.step(0.9)
+        self.assertIn("base_link_ok", events(out))
+        self.assertEqual(wifi.cmds(), ["resume"])
+
+
 class HostTests(unittest.TestCase):
     def test_argument_wins_then_params(self):
-        self.assertEqual(base_bridge.pi_host("10.0.0.2", {"pi_host": "10.0.0.9"}), "10.0.0.2")
-        self.assertEqual(base_bridge.pi_host(None, {"pi_host": "10.0.0.9"}), "10.0.0.9")
+        self.assertEqual(base_bridge.pi_host("10.0.0.2", {"pi_host": "10.0.0.9"}), ["10.0.0.2"])
+        self.assertEqual(base_bridge.pi_host(None, {"pi_host": "10.0.0.9"}), ["10.0.0.9"])
         with self.assertRaises(SystemExit):
             base_bridge.pi_host(None, {})
+
+    def test_argument_may_be_a_comma_list(self):
+        self.assertEqual(base_bridge.pi_host("10.0.0.1, 192.168.31.21,,100.73.128.36", {"pi_host": "10.0.0.9"}),
+                         ["10.0.0.1", "192.168.31.21", "100.73.128.36"])
+
+    def test_params_primary_then_backups_without_duplicates(self):
+        p = {"pi_host": "10.0.0.1", "pi_hosts_backup": ["192.168.31.21", "10.0.0.1", "100.73.128.36"]}
+        self.assertEqual(base_bridge.pi_host(None, p), ["10.0.0.1", "192.168.31.21", "100.73.128.36"])
+        self.assertEqual(base_bridge.pi_host("10.0.0.1,10.0.0.1", {}), ["10.0.0.1"])
+
+    def test_committed_params_list_the_cable_first(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "..", "params.json")
+        with open(path) as f:
+            p = json.load(f)
+        self.assertEqual(base_bridge.pi_host(None, p), ["10.0.0.1", "192.168.31.21", "100.73.128.36"])
 
 
 @unittest.skipUnless(importlib.util.find_spec("rclpy"), "rclpy is not installed")
