@@ -701,3 +701,11 @@ On the owner's approval, with the owner at the robot and the wheels lifted.
 - Pi side: params.json scales back to 1.0 (695d274, deployed; old copy in backups/20261114-074446).
   The return-trip code (Tasks 1-5 with the review fixes, up to 12bcd82) is deployed; old copies are in
   backups/20261114-075449. None of it has driven on the floor yet.
+- Serial-break escape across a USB unplug, 08:26. This is the only way to cut the Blue Pill's power
+  with the deck closed. `/tmp/escape_test.py` (one-off) sent the 50-baud pattern whenever the port
+  existed. Timeline: the port was lost at 40.9 s and back at 46.7 s, 5.9 s later (USB enumeration
+  and udev). The pattern then ran for 6 s, then the line went quiet. The probe found no bootloader
+  and the app answered V# normally. stage1 watches right after reset, long before the Pi can talk
+  again. So this escape does not work on this robot as wired. It would need power switched apart
+  from the CH340, or DTR wired to RESET. An app that runs but ignores U# can still only be fixed
+  with the jumper.
