@@ -806,3 +806,24 @@ start" and the bridge reported the dropped link as not needed. Found on the way:
   is passed on to the brain and lost. With tts_node up this does not happen.
 - At first a red bag hung 0.34 m in front of the camera, so enrol said "nobody in view".
 - A fixed object at (0.38, 0.22) m stayed in the LiDAR "people" list the whole run.
+
+## Wheels without motor power, 2026-11-14 23:06 to 2026-11-15 00:00
+
+Three follow runs (23:06, 23:10, 23:15; `--remote`, `--drive`, 0.12 m/s) locked onto the owner but
+never moved. The first two were held by the LAN cable, which hung in the LiDAR plane at about
+(0.04, -0.20) m (raw -120 to -125 deg, 0.24 m, outside the post mask); the owner taped it away.
+In the third, run_follow sent v 0.114 m/s for 575 cycles and the pose never changed.
+
+A one-off probe (0.05 m/s for 0.8 s under safe_run, reading `D#` and `E#` every 0.07 s) gave the
+same picture every time, with three different Pi power setups: PWM ramps 14 -> 76 % on both
+wheels, both encoder counts stay put, and after 0.3 s above 30 % PWM the firmware sets flags 03
+(both encoder faults) and cuts the motors, as designed. Pushing the robot by hand moved the
+counts (left 17983, later right 502), so both encoders and the board work: the motors get no
+power. The last drive that moved was base_check at 08:31 to 08:35 (new firmware).
+
+Motor power: the owner said on 2026-11-13 that the one UGREEN power bank (145 W, 25,000 mAh)
+feeds the Pi and the motors; the motor feed is a USB-C cable from it down to the driver board.
+I had wrongly told the owner tonight that the 21V tool battery feeds the motors (my guess from
+photos). The bank showed 15 % at 23:30. Not measured, but consistent: a USB-C source gives 12 V
+only when it agrees to (PD), and a nearly empty bank, or one being charged, may give only 5 V.
+run_follow did not notice the wheels were not turning; the `E#` fault flags are not read by the Pi.
