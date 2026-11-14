@@ -69,7 +69,7 @@ VERSION=$(printf '{"commit": "%s", "describe": "%s", "branch": "%s", "deployed":
 backup() { # <host> <folder>; the file list on stdin (paths relative to the folder)
   local host=$1 dir=$2
   ssh "$host" "cd ~/$dir && mkdir -p backups && files=\$(while read -r f; do [ -e \"\$f\" ] && echo \"\$f\"; done; \
-    [ -e VERSION.json ] && echo VERSION.json) && n=\$(printf '%s\n' \"\$files\" | grep -c . || true) && \
+    if [ -e VERSION.json ]; then echo VERSION.json; fi) && n=\$(printf '%s\n' \"\$files\" | grep -c . || true) && \
     printf '%s\n' \"\$files\" | tar -czf backups/deploy-$STAMP.tar.gz -T - && echo \"$host: backed up \$n files to $dir/backups/deploy-$STAMP.tar.gz\""
 }
 send() { # <host> <folder> <git tree path> <subfolder>
