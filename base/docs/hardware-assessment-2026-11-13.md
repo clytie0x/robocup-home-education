@@ -779,3 +779,10 @@ stayed. This board is an Orin Nano developer kit, whose USB-A ports all go throu
 hub, so after 22:25 no USB 2 device registers on any USB-A port: replugging the camera and
 plugging it into another port gave no kernel event at all, and the owner toggling
 usb1-port2/disable (1 then 0, sudo, 22:46) changed nothing. Over-current counters are 0.
+Unbinding and binding tegra-xusb (22:48) reset the controller but then the hub answered on
+neither side; a `sudo reboot` (22:50) did not bring it back either. Only a full power cycle
+(poweroff, plug out, plug in, about 22:58) did: the hub's USB 2 side (0bda:5489), the AX1080P,
+the MP-710 and the serial adapter all came back, and the arm team's webcam_view.py was running
+again. After it the Pi viewer relayed 50 webcam frames in 5 s from port 8082 over the LAN.
+Lesson: if the Jetson's USB-A ports go dead, only a power cycle helps; take care plugging cables
+near the Jetson while it runs.
