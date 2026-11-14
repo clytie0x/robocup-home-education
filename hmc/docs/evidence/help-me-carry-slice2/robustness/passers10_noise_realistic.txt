@@ -1,0 +1,21 @@
+map                  ok / 20   (10 passers-by, noise realistic, sensors ideal, odometry perfect, robot 1.0 m/s, base sim)
+default              18 / 20
+bangkok2022          20 / 20
+bordeaux2023         19 / 20
+eindhoven2024        19 / 20
+germanopen2024       15 / 20
+portugalopen2024     16 / 20
+all                 107 / 120  (89.2 %)
+  failed: default seed 7: touched something (-0.12 m into it)
+  failed: default seed 9: touched something (-0.03 m into it)
+  failed: bordeaux2023 seed 19: lost avoid_hard_to_see, touched something (-0.10 m into it)
+  failed: eindhoven2024 seed 19: touched something (-0.06 m into it)
+  failed: germanopen2024 seed 2: touched something (-0.06 m into it)
+  failed: germanopen2024 seed 10: touched something (-0.13 m into it)
+  failed: germanopen2024 seed 11: lost avoid_crowd, touched something (-0.04 m into it)
+  failed: germanopen2024 seed 16: touched something (-0.00 m into it)
+  failed: germanopen2024 seed 19: touched something (-0.07 m into it)
+  failed: portugalopen2024 seed 0: touched something (-0.02 m into it)
+  failed: portugalopen2024 seed 2: touched something (-0.00 m into it)
+  failed: portugalopen2024 seed 10: touched something (-0.10 m into it)
+  failed: portugalopen2024 seed 15: touched something (-0.03 m into it)

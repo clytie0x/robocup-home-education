@@ -1,0 +1,29 @@
+# Reference only: Rust PR #37 sim output (commit 696ec641), produced by GitHub CI
+
+Help Me Carry 2025.1 slice 1
+deterministic fixed script
+elapsed_ms 20000
+timed_out no
+measured_subtotal 615
+printed_total 1115
+id catalog status awarded action
+HMC-FOLLOW 300 implemented-in-slice1 300 Following the person to the car
+HMC-PERCEIVE 15 implemented-in-slice1 15 Perceiving the correct beg (visualize on screen or say which one)
+HMC-PICK 100 implemented-in-slice1 100 Picking up the correct bag
+HMC-CROWD 50 not-run 0 Avoiding the crowd of people obstructing the path
+HMC-SMALL 50 not-run 0 Avoiding the small object on the ground
+HMC-HARD 50 not-run 0 Avoiding the hard-to-see object
+HMC-BARRIER 50 not-run 0 Avoiding the area blocked with retractable barriers
+HMC-RETURN 200 implemented-in-slice1 200 Re-reaching the starting location
+HMC-QUEUE 300 not-run 0 Joining and staying in the queue on the way to the arena
+HMC-DROP -50 implemented-in-slice1 0 Dropping the bag
+HMC-DEM-NATURAL -50 not-run 0 Rediscovering the operator by natural interaction
+HMC-DEM-UNNATURAL -100 not-run 0 Rediscovering the operator by unnatural interaction
+HMC-DEM-BACK -150 not-run 0 Rediscovering the operator by asking them to come back
+HMC-DEM-CONTACT -200 not-run 0 Rediscovering the operator by direct contact
+HMC-ABSENT -500 out-of-sim-scope 0 Not attending (see sec. 3.9.1)
+HMC-ALT -100 not-run 0 Using alternative start signal (see sec. 3.7.8)
+HMC-OUTSTANDING 111 out-of-sim-scope 0 Outstanding performance (see sec. 3.9.3)
+HMC-TOTAL 1115 implemented-in-slice1 0 Total Score (excluding special penalties & standard bonuses)
+
+

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robot Dashboard</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2228; --muted: #66707a; --line: #dde1e6;
+    --good: #1f8f4e; --warn: #b7791f; --bad: #c53030; --accent: #2b6cb0; --btn: #edf1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171a; --card: #1d2125; --text: #e7eaee; --muted: #9aa4ae; --line: #2e343a;
+            --good: #48bb78; --warn: #ecc94b; --bad: #fc8181; --accent: #63b3ed; --btn: #262b30; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .value { font-size: 22px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .good { color: var(--good); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  h2 { font-size: 16px; margin: 20px 0 8px; }
+  .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+  button { font: inherit; padding: 12px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--btn); color: var(--text); cursor: pointer; width: 100%; }
+  button.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  button.stop { background: var(--bad); color: #fff; border-color: var(--bad); font-weight: 700; }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=range] { width: 100%; }
+  .note { color: var(--muted); font-size: 13px; margin-top: 16px; }
+  #err { color: var(--bad); min-height: 1.4em; margin-top: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Robot dashboard</h1>
+  <div class="sub" id="run">connecting…</div>
+
+  <div class="grid">
+    <div class="card"><div class="label">Operator</div><div class="value" id="locked">–</div></div>
+    <div class="card"><div class="label">Mode</div><div class="value" id="mode">–</div></div>
+    <div class="card"><div class="label">Speed / turn</div><div class="value" id="cmd">–</div></div>
+    <div class="card"><div class="label">Nearest obstacle</div><div class="value" id="nearest">–</div></div>
+    <div class="card"><div class="label">Path</div><div class="value" id="path">–</div></div>
+    <div class="card"><div class="label">Cycle time</div><div class="value" id="cycle">–</div></div>
+    <div class="card"><div class="label">Stopped by</div><div class="value" id="stop">–</div></div>
+    <div class="card"><div class="label">Planner</div><div class="value" id="planner">–</div></div>
+  </div>
+
+  <h2>Switches</h2>
+  <div class="controls">
+    <button id="pause">Pause</button>
+    <button id="search">Search turn</button>
+    <button id="close_plan">Close plan</button>
+    <div class="card">
+      <div class="label">Top speed <span id="speedv"></span></div>
+      <input type="range" id="speed" min="0" max="0.12" step="0.01">
+    </div>
+    <button id="end" class="stop">STOP and end the run</button>
+  </div>
+  <div id="err"></div>
+  <p class="note">This page is not an emergency stop: if the Wi-Fi drops, it cannot stop the robot.
+    Keep the red button within reach. Driving can only be started on the Pi with tools/safe_run.py.</p>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let controls = null;
+
+function show(id, text, cls) { const el = $(id); el.textContent = text; el.className = "value " + (cls || ""); }
+
+async function send(change) {
+  try {
+    const r = await fetch("/control", {method: "POST", headers: {"Content-Type": "application/json"},
+                                       body: JSON.stringify(change)});
+    const got = await r.json();
+    $("err").textContent = got.error || "";
+    if (got.controls) paint(got.controls);
+  } catch (e) { $("err").textContent = "could not reach the robot"; }
+}
+
+function paint(c) {
+  controls = c;
+  $("pause").textContent = c.paused ? "Resume" : "Pause";
+  $("pause").className = c.paused ? "on" : "";
+  $("search").className = c.search ? "on" : "";
+  $("search").textContent = "Search turn: " + (c.search ? "on" : "off");
+  $("close_plan").className = c.close_plan ? "on" : "";
+  $("close_plan").textContent = "Close plan: " + (c.close_plan ? "on" : "off");
+  $("speed").max = c.top_speed;
+  if (document.activeElement !== $("speed")) $("speed").value = c.max_speed;
+  $("speedv").textContent = c.max_speed.toFixed(2) + " m/s";
+  for (const id of ["pause", "search", "close_plan", "end", "speed"]) $(id).disabled = c.end;
+}
+
+async function poll() {
+  try {
+    const s = await (await fetch("/status")).json();
+    paint(s.controls);
+    const r = s.record, run = s.run;
+    $("run").textContent = (run.drive ? "DRIVING" : "dry run") + " · up " + s.uptime.toFixed(0) + " s of " + run.seconds + " s";
+    if (r) {
+      show("locked", r.locked ? "locked" : "not locked", r.locked ? "good" : "warn");
+      show("mode", r.search ? "search: " + r.search : r.mode);
+      show("cmd", r.v.toFixed(2) + " m/s · " + r.w.toFixed(2) + " rad/s");
+      show("nearest", r.nearest == null ? "–" : r.nearest.toFixed(2) + " m", r.nearest != null && r.nearest < 0.35 ? "warn" : "");
+      show("path", r.path ? r.path + " points" : "none", r.path ? "good" : (r.locked ? "warn" : ""));
+      show("cycle", (r.cycle_time * 1000).toFixed(0) + " ms", r.cycle_time > 0.25 ? "bad" : r.cycle_time > 0.15 ? "warn" : "good");
+      show("stop", r.stop || "–", r.stop ? "warn" : "");
+      const p = r.planner || {};
+      show("planner", (p.remote ? "remote " : "") + (p.local ? "local" : "") || "–");
+    }
+    $("err").textContent = $("err").textContent === "robot not answering" ? "" : $("err").textContent;
+  } catch (e) { $("err").textContent = "robot not answering"; }
+}
+
+$("pause").onclick = () => send({pause: !controls.paused});
+$("search").onclick = () => send({search: !controls.search});
+$("close_plan").onclick = () => send({close_plan: !controls.close_plan});
+$("speed").onchange = () => send({max_speed: parseFloat($("speed").value)});
+$("end").onclick = () => { if (confirm("Stop the wheels and end this run?")) send({end: true}); };
+poll();
+setInterval(poll, 500);
+</script>
+</body>
+</html>

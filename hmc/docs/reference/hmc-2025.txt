@@ -1,0 +1,141 @@
+===== split 45 =====
+Chapter 5. Tests in Stage I                                                                     39
+
+
+5.1 Help Me Carry
+The robot’s owner needs help carrying something from the car to the starting location.
+Main Goal: The robot helps the operator to carry a bag from a car parked outside.
+
+Optional Goals:
+  1. Re-reaching the starting location
+  2. Following the queue on the way back
+
+
+Focus
+Person following, navigation in unmapped environments, social navigation.
+
+
+Setup
+   • Locations:
+        – The test is performed outside the arena in a public space.
+        – The robot starts at a predefined location.
+   • People: The operator is standing in front of the robot.
+   • Objects:
+        – At least two bags are placed near the car.
+        – A small object on the ground.
+        – A hard-to-see object.
+        – Retractable barriers.
+   • Uncontrolled environment: There are no restrictions on other people walking by or
+     standing around throughout the complete task.
+
+
+Procedure
+  1. Following the operator: The robot should inform the operator when it is ready to follow
+     them. The operator walks naturally towards the car; after reaching the car, the operator
+     points at the bag.
+  2. Obstacles: The robot will face 4 obstacles along its way (in arbitrary order): (a) a small
+     object on the ground, (b) a hard-to-see object, (c) a crowd of people obstructing the path
+     outside, and (d) a small area blocked using retractable barriers.
+  3. Picking up the bag: The robot picks up the bag pointed at by the operator.
+  4. Bag delivery: The robot takes the bag to the starting location. It may place the bag on
+     the floor.
+  5. Optional goals:
+      5.1. Following the queue: After the robot has reached the car, a few of the people that
+           formed the crowd obstructing the robot return to the starting location in a queue.
+           The robot can decide to join the queue on its way back, in a manner that appears
+           natural to the people in the queue.
+
+
+
+               RoboCup@Home Rulebook / Final version for RoboCup 2025 (Revision 2025-04-28 1)
+
+===== split 46 =====
+40                                                                                          5.1 Help Me Carry
+
+
+Additional Rules and Remarks
+     1. Car location: There is no real car outside; instead, a fixed location outside the Arena is
+        designated as a car location.
+     2. Reaching the car: The robot can reach the car location only by following the operator
+        (the location is unknown before the test).
+     3. Deus ex Machina: Score reductions for human assistance are applied in case the robot
+        loses the operator, and needs to find them again through:
+
+        3.1. Natural interaction (e.g., waving and calling)
+        3.2. Unnatural interaction (e.g., raising both hands and jumping)
+        3.3. Coming back (e.g., asking the operator to step back in front of the robot)
+        3.4. Touching the robot (e.g., pulling the robot’s hand)
+
+       Note: Penalties for human assistance are only applied if the robot continues to score after
+       the interaction. Penalties can be applied multiple times up to a total of 250 points.
+
+
+Referee Instructions
+
+The referees need to:
+   • Select one volunteer to act as the operator.
+   • Select three to four people to obstruct the robot’s path outside and form the queue on the
+     way back.
+   • Choose positions for the bags and assign a bag to the operator.
+   • Choose the order of the obstacles that the robot will face outside while following the
+     operator.
+   • Designate a location outside as a car location.
+   • Designate a location for the queue to form. The queue is composed of the same people
+     that form the crowd.
+   • Mind the robot when it moves around.
+   • Instruct the Operator to follow the robots instructions, step over the small obstacle and
+     closely around the hard to see object
+
+
+OC Instructions
+
+At least two hours before test:
+   • Select and announce the robot’s starting point.
+   • Select which bags will be used in the test.
+   • Organize retractable barriers.
+
+
+Score Sheet
+
+The maximum time for this test is 5:00 minutes.
+
+
+
+                 RoboCup@Home Rulebook / Final version for RoboCup 2025 (Revision 2025-04-28 1)
+
+===== split 47 =====
+Chapter 5. Tests in Stage I                                                                         41
+
+
+Action                                                                                          Score
+Main Goal
+Following the person to the car                                                                   300
+Perceiving the correct beg (visualize on screen or say which one)                                  15
+Picking up the correct bag                                                                        100
+Avoiding the crowd of people obstructing the path                                                  50
+Avoiding the small object on the ground                                                            50
+Avoiding the hard-to-see object                                                                    50
+Avoiding the area blocked with retractable barriers                                                50
+Bonus rewards
+Re-reaching the starting location                                                                 200
+Joining and staying in the queue on the way to the arena                                          300
+Penalties
+Dropping the bag                                                                                  –50
+Deus Ex Machina Penalties
+Rediscovering the operator by natural interaction                                                 –50
+Rediscovering the operator by unnatural interaction                                              –100
+Rediscovering the operator by asking them to come back                                           –150
+Rediscovering the operator by direct contact                                                     –200
+Special Penalties & Bonuses
+Not attending (see sec. 3.9.1)                                                                   –500
+Using alternative start signal (see sec. 3.7.8)                                                  –100
+Outstanding performance (see sec. 3.9.3)                                                          111
+
+
+
+Total Score (excluding special penalties & standard bonuses)                                     1115
+
+
+
+
+               RoboCup@Home Rulebook / Final version for RoboCup 2025 (Revision 2025-04-28 1)
