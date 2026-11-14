@@ -709,3 +709,43 @@ On the owner's approval, with the owner at the robot and the wheels lifted.
   again. So this escape does not work on this robot as wired. It would need power switched apart
   from the CH340, or DTR wired to RESET. An app that runs but ignores U# can still only be fixed
   with the jumper.
+
+## Floor runs on the new firmware, and the unattended attempt, 2026-11-14 08:30 to 10:00
+
+With the owner at the robot (until about 08:45):
+- `base_check --line 0.10 --metres 1.0`, no loop:
+  - 1.038 m by scan, 1.024 m by odometry (1.4 % short)
+  - 0.102 m/s for 0.10 asked
+  - heading +0.39 deg/m, sideways -0.3 cm/m
+- Turn 180 deg (tether-aware turn script): 180.5 deg by odometry, 180.3 deg by scan match.
+- Task 9 line 1, `--line 0.12 --metres 2.0 --velocity-loop --max-speed 0.16`: 2.070 m, 0.111 m/s,
+  heading +0.28 deg/m (the old firmware gave 3.7 to 4.1 deg/m).
+  - The next four lines were refused: the owner stood in the lane.
+  - The fifth line was cut by an emergency stop near its end (+1.92 deg/m, not a clean run).
+  - So Task 9 is not complete: one clean run of the six.
+- The owner reminded me that out-and-back runs drive over the trailing power cable.
+
+Owner's rules for unattended runs: track the cable yourself; never run over it; stop when the camera
+cannot see; when ahead is blocked and the LiDAR shows behind free, back up to find another angle.
+Built and committed:
+- tether.py (210ac9b)
+- floor_cable.py (210ac9b)
+- guarded backing: wheels.send_reverse, safety.rear_clear, tools/back_up.py (e022474, Fable review;
+  lap_check lost its raw backward escapes)
+- tools/tether_run.py (59fc2d2)
+All deployed (md5 matching; old copies in backups/20261114-095302).
+
+Unattended attempt at 09:55: `tether_run.py init` (camera survey). The floor band was not visible at
+-60 and -30 deg, and the turn back to 0 was refused. A photo showed the lab lights off: only 12 % of
+the floor band was usable. By the owner's rule the robot stopped. It stands at a net turn of
+-18.9 deg, its left side 0.39 m from a desk. A dry run of run_follow, to time its cycles on the Pi
+(no wheels), was refused by the session's permission classifier and not run.
+
+Open for the owner:
+- the rest of Task 9 (U-shaped runs with tether_run)
+- lap_check
+- SLAM while moving
+- follow and return with a person
+- tether_run's survey covers only ±60 deg: tether.py's model blocks larger on-the-spot turns over its
+  own assumed lay
+- the camera-height parameter in params.json (0.07) should be about 0.105
