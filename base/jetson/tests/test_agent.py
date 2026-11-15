@@ -338,7 +338,9 @@ class TaskProgramsTest(unittest.TestCase):
     """The programs start-all runs for the whole task, in the order each needs the one before."""
 
     def test_start_all_order(self):
-        self.assertEqual(agent.ORDER, ["detector", "whisper", "voice", "bridge", "arm", "flow"])
+        self.assertEqual(agent.ORDER, ["detector", "whisper", "voice", "bridge", "armstack", "arm", "flow"])
+        self.assertIn("armstack", agent.SHARED)  # the arm stack started by hand before 2026-11-15 is used as it is
+        self.assertIn("arm.launch.py mount:=robot", agent.PROGRAMS["armstack"][0])
         self.assertEqual(list(agent.PROGRAMS), agent.ORDER)
         self.assertEqual(set(agent.SCRIPTS) | set(agent.EXECUTABLES), set(agent.ORDER))
 
@@ -387,6 +389,25 @@ class TaskProgramsTest(unittest.TestCase):
         finally:
             agent.SETTLE = saved
         self.assertFalse(a.programs["whisper"].running())
+        self.assertTrue(a.programs["flow"].running())
+
+
+    def test_start_all_uses_an_arm_stack_started_by_hand(self):
+        """The arm stack (no port of its own) started from a terminal before 2026-11-15: used, never doubled."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        fakes = {name: (shell(SLEEPER), False, None) for name in ("armstack", "flow")}
+        a = agent.Agent(fakes, logs=Path(tmp.name), find_outside=lambda ours: {"armstack": [5555]},
+                        hold=lambda: None, port_open=lambda port: True)
+        self.addCleanup(a.stop_all)
+        saved = agent.SETTLE
+        agent.SETTLE = 0.0
+        try:
+            self.assertEqual(a.act("start-all")[0], 200)
+            self.assertTrue(wait_for(lambda: a.sequence == "all started"), a.sequence)
+        finally:
+            agent.SETTLE = saved
+        self.assertFalse(a.programs["armstack"].running())
         self.assertTrue(a.programs["flow"].running())
 
 

@@ -559,6 +559,7 @@ def _report(state, now, record, force=False):
         "wheels": state.wheels_alarm,  # "not turning" or "fault 03" while held for wheels that did not turn
         "cable_deg": round(state.cable.net_deg, 1),  # the power cable's net turn since it was straightened
         "bag": None if state.bag is None else state.bag.status(),  # the running or last bag task (bag.py)
+        "mode": last.get("mode"),  # the brain's mode ("follow", "search", ...): base_bridge reads "search" from it
     })
     state.status_at = now
 

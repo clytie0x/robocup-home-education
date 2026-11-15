@@ -315,6 +315,8 @@ class HmcFlow:
         name = EVENT_ALIASES.get(parts[0].strip().lower(), parts[0].strip().lower())
         code = parts[1].strip().upper() if len(parts) > 1 else ""
         arm_msg = parts[2].strip() if len(parts) > 2 else ""
+        # bag_arm appends the grasp reading ("gripper_pos=R gripper_load=L", maybe in brackets) for the log: never said
+        arm_msg = re.sub(r"\s*\[?gripper_pos=\S+ gripper_load=[^\]\s]+\]?", "", arm_msg).strip()
         if name == "grab_failed" and code == "HOLDING":  # the arm already holds something: the bag
             name = "grab_success"
         s = self.state

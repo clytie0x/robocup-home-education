@@ -84,14 +84,19 @@ PROGRAMS = {  # name: (shell command, needs ROS, TCP port that says it is up, or
     "whisper": (WHISPER, False, 8080),
     "voice": ("source %s/install/setup.bash && ros2 launch voice_assistant hmc_voice.launch.py" % VOICE_WS, True, None),
     "bridge": ("python3 base_bridge.py --pi-host 10.0.0.1,192.168.31.21", True, None),
+    # the arm stack (driver, MoveIt, pick_place with /arm/*): before 2026-11-15 it was started by hand from a
+    # terminal; a copy started that way is used as it is (SHARED)
+    "armstack": ("source ~/so100_ws/install/setup.bash && ros2 launch so100_moveit_config arm.launch.py mount:=robot"
+                 " rviz:=false", True, None),
     "arm": ("source ~/so100_ws/install/setup.bash && python3 bag_arm.py", True, None),
     "flow": ("python3 hmc_flow.py " + FLOW_ARGS, True, None),
 }
-ORDER = ["detector", "whisper", "voice", "bridge", "arm", "flow"]
+ORDER = ["detector", "whisper", "voice", "bridge", "armstack", "arm", "flow"]
 SCRIPTS = {"detector": "server.py", "voice": "hmc_voice.launch.py", "bridge": "base_bridge.py", "arm": "bag_arm.py",
+           "armstack": "arm.launch.py",
            "flow": "hmc_flow.py"}  # a python* argv with this file name (ros2 is python: its launch file counts)
 EXECUTABLES = {"whisper": "whisper-server"}  # argv[0]'s file name
-SHARED = ("whisper",)  # start-all uses a copy started by hand (servers.sh start-stt) instead of stopping there
+SHARED = ("whisper", "armstack")  # start-all uses a copy started by hand (servers.sh start-stt) instead of stopping there
 LOG_LINES = 20
 STOP_STEPS = ((signal.SIGINT, 5.0), (signal.SIGTERM, 3.0))  # ROS nodes end cleanly on Ctrl+C; SIGKILL after
 KILL = getattr(signal, "SIGKILL", signal.SIGTERM)
@@ -429,7 +434,7 @@ class Agent:
             for name in self.order:
                 p = self.programs[name]
                 self.sequence = "starting %s" % name
-                shared = name in SHARED and p.port and self.find_outside(self._ours()).get(name)
+                shared = name in SHARED and self.find_outside(self._ours()).get(name)
                 if not p.running() and not shared:  # a shared copy by hand: only its port is waited for
                     error = self._outside_error(name) or p.start()
                     if error:
@@ -449,7 +454,7 @@ class Agent:
                     end = self.clock() + SETTLE
                     while self.clock() < end:
                         self.sleep(0.2)
-                    if not p.running():
+                    if not shared and not p.running():
                         self.sequence = "%s ended at once: see its log" % name
                         return
             self.sequence = "all started"

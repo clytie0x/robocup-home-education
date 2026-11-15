@@ -14,7 +14,8 @@ const PROGRAM_TEXT = {
   bridge: "ตัวส่งคำสั่งจาก ROS ไป Pi (base_bridge.py)",
   flow: "ลำดับงาน รับเสียง พูด และสถานะ (hmc_flow.py)",
 };
-const PROGRAM_NAME = { detector: "ตรวจจับคน", bridge: "สะพาน", flow: "HmcFlow" };
+const PROGRAM_NAME = { detector: "ตรวจจับคน", whisper: "ฟังเสียง", voice: "เสียง", bridge: "สะพาน",
+  armstack: "ระบบแขน", arm: "งานแขน", flow: "HmcFlow" };
 const PHASE_TEXT = { idle: "รอ Follow", follow: "กำลังตามคน", return: "กำลังกลับ", done: "เสร็จแล้ว" };
 const ACT_TEXT = { start: "เปิด", stop: "ปิด", restart: "เปิดใหม่" };
 const STOP_TEXT = { // run_follow's stop reasons
@@ -873,7 +874,7 @@ function renderJetson() {
 
 $("btn-start-all").addEventListener("click", async () => {
   const r = await post("/api/jetson/start-all", {});
-  if (r && !r.error) toast("กำลังเปิด detector แล้ว bridge แล้ว flow");
+  if (r && !r.error) toast("กำลังเปิดทุกโปรแกรมตามลำดับ");
 });
 $("btn-stop-all").addEventListener("click", async () => {
   if (taskRunning(state) && !(await confirmBox("ปิดโปรแกรมบน Jetson ไหม", "งานกำลังวิ่งอยู่ ถ้าไม่มี detector และ bridge หุ่นจะตามใครไม่ได้และหยุดนิ่ง", "ปิดทั้งหมด"))) return;

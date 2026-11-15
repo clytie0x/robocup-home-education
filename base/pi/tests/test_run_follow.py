@@ -1035,7 +1035,7 @@ class Return(Logged):
 
 
 STATUS_FIELDS = {"t", "phase", "waiting", "held", "locked", "operator_m", "breadcrumbs", "queue_tail", "at_start",
-                 "stop", "ack", "ack_by", "wheels", "cable_deg", "bag"}
+                 "stop", "ack", "ack_by", "wheels", "cable_deg", "bag", "mode"}
 
 
 class DeadMotors(FakeBase):

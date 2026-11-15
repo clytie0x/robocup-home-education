@@ -536,6 +536,14 @@ class PickingTests(FlowCase):
         self.assertEqual(actions(out), ["end"])
         self.assertTrue(any("Something is in the way." in t for t in says(out)))
 
+    def test_the_grasp_reading_is_never_said(self):
+        # bag_arm appends gripper_pos and gripper_load for the log (lane C); the flow says only the words
+        f = self.make()
+        self.go(PICKING)
+        out = f.on_event("grab_failed|COLLISION|Something is in the way. [gripper_pos=0.044 gripper_load=12]", 40.0)
+        self.assertTrue(any(t.startswith("Sorry. Something is in the way.") for t in says(out)), says(out))
+        self.assertFalse(any("gripper" in t for t in says(out)), says(out))
+
     def test_grab_timeout_is_an_error(self):
         f = self.make(grab_timeout=90.0)
         self.go(PICKING, now=1.0)
