@@ -213,6 +213,32 @@ class TouchProbe(unittest.TestCase):
         self.assertEqual(self.contact(s), 3)
         self.assertIsNone(self.contact(s[:3]))     # only the baseline yet: nothing is judged
 
+    def test_settling_steps_are_not_the_baseline(self):
+        # real run 2026-11-15 ~11:25, robot (0.335, 0.035): steps 1-2 still settling after the MoveIt move
+        sh = [13, 12, 3, 2, 4, 4, 3, 4, 6]
+        el = [2, 2, 3, 2, 2, 2, 2, 5, 13]
+        err = [0.004, 0.003, 0.002, 0.002, 0.003, 0.002, 0.003, 0.004, 0.011]
+        s = [((a, b), (e, e)) for a, b, e in zip(sh, el, err)]
+        hit = tr.probe_contact(s, self.BASE, self.LOAD, self.ERR, skip=2)
+        self.assertEqual(hit, 8)                                  # step 9: elbow +13 (measured tip 27.7 cm)
+        self.assertIsNone(tr.probe_contact(s[:8], self.BASE, self.LOAD, self.ERR, skip=2))
+        flat_elbow = [((a, 2.0), (0.002, 0.002)) for a in sh]   # the shoulder alone gives no contact
+        self.assertIsNone(tr.probe_contact(flat_elbow, self.BASE, self.LOAD, self.ERR, skip=2))
+        self.assertIsNone(tr.probe_contact(s[:5], self.BASE, self.LOAD, self.ERR, skip=2))   # baseline only
+        # baseline from the settling steps (skip 0): shoulder 13, 12 pull it to 9.3, a drop of 3.3 later
+        # would already pass for contact with a 6 % threshold
+        self.assertEqual(tr.probe_contact(flat_elbow, self.BASE, 6.0, self.ERR), 3)
+
+    def test_held_by_weight(self):
+        # 0.1 kg at the approach pose: 0.98 N x 21-28.5 cm = 7-9.5 % of 2.94 N.m on the shoulder (STS3215 30 kg.cm)
+        held, change = tr.held_by_weight((3.0, 2.0), (11.0, 7.0), 5.0)
+        self.assertTrue(held)
+        self.assertEqual(change, (8.0, 5.0))
+        self.assertFalse(tr.held_by_weight((3.0, 2.0), (6.0, 4.0), 5.0)[0])     # free-air spread of the run
+        self.assertTrue(tr.held_by_weight((3.0, 2.0), (2.0, 8.0), 5.0)[0])      # the elbow alone, either sign
+        self.assertFalse(tr.held_by_weight((math.nan, 2.0), (30.0, 3.0), 5.0)[0])   # no reading: not held
+        self.assertFalse(tr.held_by_weight((3.0, 2.0), (30.0, 30.0), 0.0)[0])   # 0 = check off
+
     def test_missing_readings_never_count(self):
         s = self.free_air(10)
         s[5] = ((math.nan, math.nan), (math.nan, math.nan))
@@ -241,6 +267,16 @@ class TouchProbe(unittest.TestCase):
         # a real z keeps the height check it always had
         to_bag = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'to_bag')
         self.assertIn('0.03 < h < 0.6', ast.unparse(to_bag))
+
+    def test_weight_check_only_rescues_a_closed_bag_grasp(self):
+        tree = ast.parse((PKG / 'pick_place_node.py').read_text(encoding='utf-8'))
+        pick = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'pick')
+        src = ast.unparse(pick)
+        self.assertIn("'hang' in plan", src)                     # bags only, the tabletop pick is unchanged
+        self.assertIn('r.position < miss', src)                 # bag_miss_below decides first, as before
+        self.assertIn('self.weigh_bag(', src)
+        after = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'after_failure')
+        self.assertIn("by_weight", ast.unparse(after))         # a bag held by weight is not forgotten either
 
 
 if __name__ == '__main__':

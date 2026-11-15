@@ -364,15 +364,16 @@ class GraspPlanner:
             return [p for p in self.PITCHES if p > self.NEAR_DOWN]
         raise PlanError(f'grasp_mode ไม่รู้จัก: {mode!r} (ใช้ auto / top / side)', 9, 'FAILED')
 
-    def picks(self, obj, current=None, mode='auto', errors=None, target=None, wide=False):
+    def picks(self, obj, current=None, mode='auto', errors=None, target=None, wide=False, grip_depth=None):
         """All fully checked ways to pick `obj`, best first (generator). wide: the jaws open fully
-        (JAW_G_MAX) instead of the object plus the margins (a bag part whose place is known only roughly)."""
+        (JAW_G_MAX) instead of the object plus the margins (a bag part whose place is known only roughly).
+        grip_depth: finger tips this far below the top on a top-down grasp (default GRIP_DEPTH)."""
         k = self.k
         errors = [] if errors is None else errors
         prefer = (current or {}).get('wrist_roll', 0.0)
         for pitch in self.pitches(mode):
             for branch in (1, -1):
-                centre = np.array([obj.x, obj.y, self._grasp_height(obj, pitch)])
+                centre = np.array([obj.x, obj.y, self._grasp_height(obj, pitch, grip_depth)])
                 sols = k.solve(centre, pitch, branch=branch)
                 if not sols:
                     errors.append(PlanError('เอื้อมไม่ถึงตำแหน่งของ', 0))
@@ -400,10 +401,10 @@ class GraspPlanner:
     def _join(held, place):
         return {**held, **place, 'steps': {**held['steps'], **place['steps']}}
 
-    def plan_pick(self, obj, current=None, mode='auto', wide=False):
-        """Pick only (Pick action / voice 'carry'; wide: see picks)."""
+    def plan_pick(self, obj, current=None, mode='auto', wide=False, grip_depth=None):
+        """Pick only (Pick action / voice 'carry'; wide, grip_depth: see picks)."""
         errors = []
-        for held in self.picks(obj, current, mode, errors, wide=wide):
+        for held in self.picks(obj, current, mode, errors, wide=wide, grip_depth=grip_depth):
             return held
         raise self._best(errors)
 
@@ -429,10 +430,10 @@ class GraspPlanner:
             return [(e, d) for e, d in dirs]
         return [(box.extent_along(side), side)]
 
-    def _grasp_height(self, box, pitch):
+    def _grasp_height(self, box, pitch, grip_depth=None):
         h = box.size[2]
         if pitch <= self.NEAR_DOWN:
-            depth = min(GRIP_DEPTH, 0.6 * h)
+            depth = min(grip_depth or GRIP_DEPTH, 0.6 * h)
             return self.table_z + h - depth + (GRASP_Y - TIP_Y)   # finger tips at (top - depth)
         return self.table_z + min(max(0.5 * h, 0.015), max(h - 0.01, 0.01))
 
