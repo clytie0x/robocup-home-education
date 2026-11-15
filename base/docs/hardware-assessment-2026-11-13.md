@@ -947,3 +947,25 @@ about 9 to 10 V of the converter's 12 V) and the motors' rated voltage (label no
   front, which looks over a bag this close; the Xtion has no depth nearer than about 0.5 m; the LiDAR is blind
   within 0.12 m of the laser and cuts the bag at 0.245 m only). The bag's top height and handle place must be
   measured from a distance (front camera with the room lit, LiDAR range) before the last approach.
+
+## 2026-11-15 late morning: touch probe on the real bag, Xtion auto light, run_console.sh mode
+
+Source: the arm stack log on the Jetson (`~/hmc-follow/logs/armstack.log`, pick_place lines 11:2x), the console
+`/scan`, and `python3 camera.py` on the Pi. Deployed: main aed1ff5 (base), arm-system def69dc (arm).
+- Where the robot stood: a red gift bag 0.30 to 0.37 m ahead (LiDAR points (0.325, 0.017) to (0.36, 0.048) and
+  (0.301, 0.062)), furniture 0.35 m to the right, the power cable behind. No safe turn or reverse; only a
+  forward creep (tools/approach.py --to 0.27): it moved 0.014 m and stopped on "something else ahead" (the
+  second LiDAR spot of the bag).
+- Probe 1 at robot (0.36, 0.05): UNREACHABLE (0.348 m ahead of the pan axis; the probe plan reaches about 0.32).
+- Probe 2 at robot (0.335, 0.035): plan tips 37 -> 20 cm, pitch -65 deg. Free air steps 1 to 8: shoulder_lift
+  load +13, +12 (still settling after the move), then +2 to +4 %; elbow_flex +2 to +5 %; tracking error up to
+  0.004 rad. CONTACT at step 9: tip 27.7 cm, elbow_flex +13 %, error 0.011 rad. Top taken as 27.7 cm.
+- The grasps after it (tilt 20 deg, then 10 deg shifted +5 cm; the -5 cm try was unreachable) both closed to
+  0.048 and 0.049 rad, load 8.8 and 10.0 %: the empty-close range, so MISSED. Not seen why (dark room, no
+  camera on the jaws): the tilted closed jaws may have touched the rim with their side rather than the tips, or
+  the thin paper rim was held but reads like an empty close.
+- To fix next: the baseline must skip the first settling steps (shoulder +13/+12 would have hidden a shoulder
+  contact); grasp below a probed top deeper than 2.8 cm, or probe and grasp at the handle with its yaw.
+- Xtion: auto exposure true, auto white balance true (read back by camera.py), colour mean 45.4 in the dark room.
+- base/pi/tools/run_console.sh was 100644 in git, so the 11:06 deploy left it without +x on the Pi and the
+  @reboot crontab could not have started the console. Fixed in git (07f01ec) and `chmod +x` on the Pi.
