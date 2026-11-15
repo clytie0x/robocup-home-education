@@ -239,6 +239,29 @@ class TouchProbe(unittest.TestCase):
         self.assertFalse(tr.held_by_weight((math.nan, 2.0), (30.0, 3.0), 5.0)[0])   # no reading: not held
         self.assertFalse(tr.held_by_weight((3.0, 2.0), (30.0, 30.0), 0.0)[0])   # 0 = check off
 
+    def test_a_weight_reading_counts_once_settled(self):
+        self.assertIsNone(tr.settled_load([(14.0, 0.0), (11.0, 0.0), (8.0, 0.0)], 2.0))   # still falling
+        self.assertEqual(tr.settled_load([(17.0, 0.0), (16.0, 0.0), (16.0, 0.0)], 2.0), (16.0, 0.0))
+        self.assertEqual(tr.settled_load([(17.0, 1.0), (16.0, 3.0)], 2.0), (16.5, 2.0))   # mean of the pair
+        self.assertIsNone(tr.settled_load([(16.0, 0.0)], 2.0))                            # one reading
+        self.assertIsNone(tr.settled_load([(16.0, 0.0), (16.0, 4.0)], 2.0))               # every joint
+        self.assertIsNone(tr.settled_load([(16.0, math.nan), (16.0, math.nan)], 2.0))
+
+    def test_friction_hysteresis_is_not_a_bag(self):
+        # robot 2026-11-15 13:25, nothing lifted: empty jaws arrived from above, read while settling
+        # (shoulder 14, 11, 8), closed jaws arrived from below (17, 16, 16); elbow 0 in both
+        above = [(14.0, 0.0), (11.0, 0.0), (8.0, 0.0)]
+        closed = [(17.0, 0.0), (16.0, 0.0), (16.0, 0.0)]
+        self.assertTrue(tr.held_by_weight(above[-1], closed[-1], 5.0)[0])     # the old way: false positive
+        self.assertIsNone(tr.settled_load(above, 2.0))                        # now: not a reading at all
+        free_below = [(17.0, 0.0), (16.0, 0.0), (16.0, 0.0)]                 # empty jaws after the dip (~16)
+        free, held = tr.settled_load(free_below, 2.0), tr.settled_load(closed, 2.0)
+        self.assertFalse(tr.held_by_weight(free, held, 5.0)[0])
+        # a real bag: +12 % on the shoulder, settled
+        bag = tr.settled_load([(29.0, 0.0), (28.0, 0.0), (28.0, 0.0)], 2.0)
+        self.assertTrue(tr.held_by_weight(free, bag, 5.0)[0])
+        self.assertEqual(tr.held_by_weight(free, bag, 5.0)[1], (12.0, 0.0))
+
     def test_missing_readings_never_count(self):
         s = self.free_air(10)
         s[5] = ((math.nan, math.nan), (math.nan, math.nan))
@@ -275,6 +298,10 @@ class TouchProbe(unittest.TestCase):
         self.assertIn("'hang' in plan", src)                     # bags only, the tabletop pick is unchanged
         self.assertIn('r.position < miss', src)                 # bag_miss_below decides first, as before
         self.assertIn('self.weigh_bag(', src)
+        # the empty-jaws reading also arrives from below: a dip down the approach and back first
+        self.assertLess(src.index("'bag_weight_dip'"), src.index('self.weight_loads('))
+        weigh = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'weigh_bag')
+        self.assertIn('unmeasured', ast.unparse(weigh))
         after = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'after_failure')
         self.assertIn("by_weight", ast.unparse(after))         # a bag held by weight is not forgotten either
 

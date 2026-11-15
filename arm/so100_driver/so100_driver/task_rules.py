@@ -136,9 +136,23 @@ def probe_contact(samples, base_steps, load_jump, error_jump, skip=0):
     return None
 
 
+def settled_load(readings, tol):
+    """A load reading that counts: the mean of the last two readings (PROBE_JOINTS loads %, one status line
+    each) when every joint changed by at most tol % between them, else None (still settling: on 2026-11-15
+    the shoulder read 14, 11, 8 after a MoveIt move). NaN never settles."""
+    if len(readings) < 2:
+        return None
+    a, b = readings[-2], readings[-1]
+    if all(math.isfinite(x) and math.isfinite(y) and abs(y - x) <= tol for x, y in zip(a, b)):
+        return tuple((x + y) / 2 for x, y in zip(a, b))
+    return None
+
+
 def held_by_weight(free, loaded, load_jump):
     """Did a bag grasp whose jaws read closed (a thin rim) lift the bag? free / loaded: PROBE_JOINTS loads %
-    at the same pose, jaws empty before going down and closed after coming back up. Held = some joint's load
+    at the same pose, both arriving there from below (servo friction: the shoulder read ~8 % more after rising
+    into a pose than after lowering into it, 2026-11-15), jaws empty before going down and closed after coming
+    back up, each settled (settled_load). Held = some joint's load
     changed by more than load_jump % (the bag's weight on its lever). NaN never counts, load_jump <= 0 = off.
     Returns (held, per-joint change)."""
     change = tuple(abs(b - a) for a, b in zip(free, loaded))

@@ -61,7 +61,7 @@ from so100_interfaces.msg import ArmState
 from .calib import Calibration
 from .ik import ARM, GRASP_Y, TIP_Y, Box, GraspPlanner, Kinematics, PlanError, bag_shifts, deck_box
 from .task_rules import (PICK_PLACE, PROBE_JOINTS, Failed, api_code, descent_loads, gripper_load, held_by_weight,
-                         probe_contact, still_held, top_unknown)
+                         probe_contact, settled_load, still_held, top_unknown)
 
 READY = {'shoulder_pan': 0.0, 'shoulder_lift': 1.2, 'elbow_flex': -1.2, 'wrist_flex': 0.3, 'wrist_roll': 0.0}
 REST = {'shoulder_pan': 0.0, 'shoulder_lift': 0.04, 'elbow_flex': -0.04, 'wrist_flex': 0.0, 'wrist_roll': 0.0}  # SRDF 'rest'
@@ -147,8 +147,14 @@ class PickPlace(Node):
         # approach pose levers (model, 24-34 cm in front: shoulder 21-28.5 cm, elbow 12-18.5 cm) is 0.21-0.28 N.m
         # = 7-9.5 % shoulder, 4-6 % elbow of the STS3215's 2.94 N.m (30 kg.cm); 0.3 kg three times that. Free air
         # on 2026-11-15 spread 2-6 % (shoulder), 2-5 % (elbow).
+        # Unmeasured: on 2026-11-15 13:25 an empty reading taken while settling and arriving from above read 8 % below
+        # the closed one arriving from below (nothing lifted) -> both readings now arrive from below and settle.
         self.declare_parameter('bag_weight_load', 5.0)
-        self.declare_parameter('bag_weight_settle_reads', 2)  # status lines (1 Hz) skipped before a weight reading
+        # Before the empty-jaws reading the hand dips this far down the approach line and comes back, so it also
+        # arrives from below. At most 1.5 cm: the approach starts with the tips 2 cm above the top (approach_dist).
+        self.declare_parameter('bag_weight_dip', 0.015)
+        self.declare_parameter('bag_weight_settle_tol', 2.0)  # % two readings in a row may differ: settled
+        self.declare_parameter('bag_weight_max_reads', 6)     # status lines (1 Hz) at most for one weight reading
         p = lambda n: self.get_parameter(n).value
         self.table_z = float(p('table_z'))
         self.sim = bool(p('sim'))
@@ -941,13 +947,19 @@ class PickPlace(Node):
             raise Failed(f'{what}: มอเตอร์ขัดข้อง ({fault})', 'FAILED')
 
     def weight_loads(self, what):
-        """PROBE_JOINTS loads % with the arm standing still, after bag_weight_settle_reads status lines."""
-        reads = []
-        for _ in range(max(0, int(self.get_parameter('bag_weight_settle_reads').value)) + 1):
+        """Settled PROBE_JOINTS loads % with the arm standing still: status lines (1 Hz) until two in a row differ
+        by at most bag_weight_settle_tol (their mean, settled_load), at most bag_weight_max_reads; None if not."""
+        tol = float(self.get_parameter('bag_weight_settle_tol').value)
+        cap = max(2, int(self.get_parameter('bag_weight_max_reads').value))
+        reads, value = [], None
+        while value is None and len(reads) < cap:
             self.fresh_status(what, self.PROBE_SETTLE)
             reads.append(descent_loads(self.driver_status))
-        self.get_logger().info(f'weight check {what}: load% {PROBE_JOINTS} readings {reads} | {self.driver_status}')
-        return reads[-1]
+            value = settled_load(reads, tol)
+        self.get_logger().info(f'weight check {what}: load% {PROBE_JOINTS} readings {reads} -> '
+                               f'{"settled " + str(value) if value else f"not settled in {cap} reads"} '
+                               f'| {self.driver_status}')
+        return value
 
     def weigh_bag(self, plan, free, i, n):
         """The bag jaws closed to a miss reading: go back up the approach to the pre-grasp pose with the jaws
@@ -955,11 +967,15 @@ class PickPlace(Node):
         s = plan['steps']
         self.progress(i, n, 'weigh', 'ก้ามหุบเกือบสุด: ยกขึ้นดูน้ำหนักถุงก่อน...')
         self.line(list(reversed(s['approach'][:-1])) + [s['pre']], 'ยกขึ้นดูน้ำหนัก')
-        loaded = self.weight_loads('closed jaws back up')
+        loaded = self.weight_loads('closed jaws back up (from below)')
+        if loaded is None:
+            self.get_logger().info('weight check: closed reading did not settle: nothing held')
+            return False
         limit = float(self.get_parameter('bag_weight_load').value)
         held, change = held_by_weight(free, loaded, limit)
-        self.get_logger().info(f'weight check: free {free} -> closed {loaded}, change {change} % (limit {limit}): '
-                               + ('held by weight, jaws read closed' if held else 'nothing held'))
+        self.get_logger().info(f'weight check: free {free} -> closed {loaded}, change {change} % (limit {limit} %, '
+                               f'unmeasured first guess): ' + ('held by weight, jaws read closed' if held else
+                                                               'nothing held'))
         return held
 
     def do_pick_place(self, obj, target, mode='auto'):
@@ -989,7 +1005,13 @@ class PickPlace(Node):
         self.gripper(plan['jaw_open'], 'อ้าก้าม')
         free = None          # bag: empty-jaws loads here, to weigh a grasp whose jaws read closed (weigh_bag)
         if 'hang' in plan and not self.sim and float(self.get_parameter('bag_weight_load').value) > 0:
-            free = self.weight_loads('empty jaws above the bag')
+            # arrive at the pose from below, as the closed reading will (servo friction hysteresis)
+            dip = min(float(self.get_parameter('bag_weight_dip').value), 0.015)
+            k = min(int(round(dip / self.planner.STEP)), len(s['approach']) - 1)
+            if k > 0:
+                self.line(s['approach'][:k], 'ลงนิดก่อนชั่งก้ามว่าง')
+                self.line(list(reversed(s['approach'][:k - 1])) + [s['pre']], 'ขึ้นกลับท่าเหนือถุง')
+            free = self.weight_loads('empty jaws above the bag (from below)')
         self.progress(3, n, 'approach', 'ลงไปที่ของ...')
         self.line(s['approach'], 'ลงไปที่ของ')
         self.progress(4, n, 'grasp', 'หนีบ...')
