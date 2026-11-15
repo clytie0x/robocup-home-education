@@ -398,7 +398,9 @@ class TaskProgramsTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         fakes = {name: (shell(SLEEPER), False, None) for name in ("armstack", "flow")}
         a = agent.Agent(fakes, logs=Path(tmp.name), find_outside=lambda ours: {"armstack": [5555]},
-                        hold=lambda: None, port_open=lambda port: True)
+                        hold=lambda: None, port_open=lambda port: True,
+                        read_args=lambda pid: ["/usr/bin/python3", "/opt/ros/humble/bin/ros2", "launch",
+                                               "so100_moveit_config", "arm.launch.py", "mount:=robot"])
         self.addCleanup(a.stop_all)
         saved = agent.SETTLE
         agent.SETTLE = 0.0
@@ -409,6 +411,31 @@ class TaskProgramsTest(unittest.TestCase):
             agent.SETTLE = saved
         self.assertFalse(a.programs["armstack"].running())
         self.assertTrue(a.programs["flow"].running())
+
+
+    def test_start_all_refuses_a_hand_started_arm_stack_on_another_mount(self):
+        """A copy launched with mount:=desk (or none) has the wrong floor for the robot: nothing after it starts."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        fakes = {name: (shell(SLEEPER), False, None) for name in ("armstack", "flow")}
+        a = agent.Agent(fakes, logs=Path(tmp.name), find_outside=lambda ours: {"armstack": [5555]},
+                        hold=lambda: None, port_open=lambda port: True,
+                        read_args=lambda pid: ["python3", "ros2", "launch", "so100_moveit_config", "arm.launch.py",
+                                               "mount:=desk"])
+        self.addCleanup(a.stop_all)
+        self.assertEqual(a.act("start-all")[0], 200)
+        self.assertTrue(wait_for(lambda: "lacks mount:=robot" in a.sequence), a.sequence)
+        self.assertIn("5555", a.sequence)
+        self.assertFalse(a.programs["armstack"].running())
+        self.assertFalse(a.programs["flow"].running())
+
+    def test_cmdline_reads_proc(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (Path(tmp.name) / "77").mkdir()
+        (Path(tmp.name) / "77" / "cmdline").write_bytes(b"python3\0arm.launch.py\0mount:=robot\0")
+        self.assertEqual(agent.cmdline(77, Path(tmp.name)), ["python3", "arm.launch.py", "mount:=robot"])
+        self.assertEqual(agent.cmdline(78, Path(tmp.name)), [])
 
 
 class HttpTest(unittest.TestCase):

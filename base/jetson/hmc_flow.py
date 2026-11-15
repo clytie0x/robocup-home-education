@@ -46,7 +46,7 @@ States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, t
              "stop" -> stop (the arm holds) -> at_car
   returning  say "I will go back to the start now.", go_back: the Pi does the breadcrumbs (the drive to the
              bag counts as path), queue and start heading. "stop"/"wait" -> wait (paused),
-             "go back"/"continue" -> resume, or by itself after RESUME_AFTER_S (20 s) with "Going back to
+             "go back"/"continue" -> resume; after RESUME_AFTER_S (20 s) it only asks (never moves by itself), "Going back to
              the start.". at_start -> dropping_bag (no arm: say "Here is your bag." -> done)
   dropping_bag  sent drop_bag {"x": 0.31, "y": 0.0}. drop_done -> say "Here is your bag." -> done.
              drop_failed / timeout -> error
@@ -88,7 +88,7 @@ STATUS_WAIT = 1.0  # s to wait at start for one /base/status (link and person as
 # s a lost Pi link may last before the flow gives up (error): base_bridge reconnects and restores the
 # Pi's intent itself, so a short drop needs nothing from the flow
 LINK_GRACE_S = 4.0
-RESUME_AFTER_S = 20.0  # s a "stop"/"wait" pause on the way back lasts before the return goes on by itself
+RESUME_AFTER_S = 20.0  # s into a "stop"/"wait" pause on the way back, the robot asks to be told to go on
 COME_BACK_TEXT = "Please come back."
 STEP_BACK_TEXT = "Please step back two steps and point at the bag."  # the camera sees the shoulder from about 2.2 m
 
@@ -111,6 +111,9 @@ WORDS = [  # checked in this order; the first match wins
 # Words that count only in a short command ("wait", "wait here", "please wait", "okay"), not inside a
 # longer sentence ("you have to wait for the bag", "okay I can see the bag over there")
 SHORT_WORDS = {"stop": re.compile(r"\bwait\b"), "done": re.compile(r"\b(okay|ok)\b")}
+# On the way back "wait" anywhere pauses (review 2026-11-15: "robot please wait a moment" drove on); there a
+# stop only pauses, while in following it would mean "this is the car"
+WAIT_ANYWHERE = re.compile(r"\bwait\b")
 SHORT = 3  # words at most in a short command
 # Brain intents with the same meaning
 INTENT_KINDS = {"follow_me": "follow", "stop": "stop", "wait": "stop", "go_back": "back",
@@ -171,6 +174,7 @@ class HmcFlow:
         self.last_prompt = 0.0  # at_car: when the ready line was said or someone spoke
         self.paused = False  # returning: halted by "stop"
         self.paused_at = None
+        self.pause_asked = False  # returning: "Say continue ..." said for this pause
 
     # ---------------- helpers ----------------
     @staticmethod
@@ -242,6 +246,10 @@ class HmcFlow:
         first = self._start_first(now)
         self.last_prompt = max(self.last_prompt, now)  # someone is talking: don't nag
         kind = classify(text)
+        if kind is None and self.state == RETURNING:
+            low = text.lower()
+            if any(not _negated(low, m.start()) for m in WAIT_ANYWHERE.finditer(low)):
+                kind = "stop"  # on the way back a long "wait" pauses (WAIT_ANYWHERE)
         out = self._handle(kind, now) if kind else None
         return first + (out if out is not None else [("text", text)])
 
@@ -289,7 +297,7 @@ class HmcFlow:
             return [("say", "Please wait a moment.")]
         if s == RETURNING:
             if kind == "stop":
-                self.paused, self.paused_at = True, now
+                self.paused, self.paused_at, self.pause_asked = True, now, False
                 return [self._cmd("wait"), ("say", "Okay, I will wait.")]
             if kind in ("back", "resume", "done") and self.paused:
                 self.paused = False
@@ -420,9 +428,9 @@ class HmcFlow:
                 and now - self.lost_since >= self.come_back_s:
             self.come_back_said = True
             return [("say", COME_BACK_TEXT)]
-        if s == RETURNING and self.paused and now - self.paused_at >= RESUME_AFTER_S:
-            self.paused = False
-            return [self._cmd("resume"), ("say", "Going back to the start.")]
+        if s == RETURNING and self.paused and not self.pause_asked and now - self.paused_at >= RESUME_AFTER_S:
+            self.pause_asked = True  # never moves by itself: the stop may be for the cable or a foot (review)
+            return [("say", "Say continue when I can go on.")]
         if s == AT_CAR and now - self.last_prompt > self.reask_s:
             self.last_prompt = now
             return [("say", self.ready_text)]

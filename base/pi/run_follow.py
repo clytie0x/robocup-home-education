@@ -564,6 +564,13 @@ def _report(state, now, record, force=False):
     state.status_at = now
 
 
+def _least_error(state, escaped, error):
+    """The heading error wheels.least may use for its deadband: none for an escape's turn, and none in the bag
+    task, whose turns are bag.py's own (review 2026-11-15: the brain's unrelated turn_error, small, zeroed the
+    bag's last 1.5 to 2 deg turns and used up its MAX_TURNS)."""
+    return None if escaped is not None or state.phase == BAG else error
+
+
 def predict(pose, v, w, seconds):
     """Where the base will be after driving (v, w) for `seconds` from pose (an arc)."""
     x, y, th = pose
@@ -869,7 +876,7 @@ def cycle(state, now):
         v, w = state.velocity.command(v, w, state.measured, state.body.robot.max_speed)  # 0 stays 0
     # The smallest commands that move the wheels, here only: the stops below judge this final command. A turn made
     # larger meets the cable's limit again. An escape's turn has no heading error of the brain's.
-    v, least_w = wheels_module.least(v, w, None if escaped is not None else error)
+    v, least_w = wheels_module.least(v, w, _least_error(state, escaped, error))
     w = state.cable.check(least_w, now) if abs(least_w) > abs(w) else least_w
     # SLOW_CYCLE: the next cycle may come that late (a later one ends the run), so the command runs that long.
     # BAG creeping: the locked bag's own points are left out, only they may come closer than the clearance.

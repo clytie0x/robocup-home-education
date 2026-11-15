@@ -260,6 +260,18 @@ def outside(ours, proc=Path("/proc")):
     return {name: sorted(pids) for name, pids in found.items()}  # /proc's own order differs between machines
 
 
+def cmdline(pid, proc=Path("/proc")):
+    """The argv of pid as text, [] when it does not read (gone, no /proc)."""
+    try:
+        return [a.decode("utf-8", "replace") for a in (proc / str(pid) / "cmdline").read_bytes().split(b"\0") if a]
+    except OSError:
+        return []
+
+
+SHARED_NEEDS = {"armstack": "mount:=robot"}  # a hand-started arm stack with another mount (the desk) has the
+# wrong floor and arm pose for the robot (review 2026-11-15): start-all refuses it instead of using it
+
+
 def send_hold(port=HOLD_PORT, settle=HOLD_SETTLE):
     """Ask the bridge to put a moving Pi on wait; nobody listening is no error."""
     try:
@@ -366,7 +378,8 @@ class Metrics:
 
 class Agent:
     def __init__(self, programs=None, logs=LOGS, order=None, popen=subprocess.Popen, clock=time.time,
-                 sleep=time.sleep, port_open=port_open, metrics=None, find_outside=outside, hold=send_hold):
+                 sleep=time.sleep, port_open=port_open, metrics=None, find_outside=outside, hold=send_hold,
+                 read_args=cmdline):
         programs = PROGRAMS if programs is None else programs
         self.programs = {}
         for name, (cmd, ros, port) in programs.items():
@@ -375,6 +388,7 @@ class Agent:
         self.order = list(order or programs)
         self.clock, self.sleep, self.port_open = clock, sleep, port_open
         self.find_outside = find_outside
+        self.read_args = read_args
         self.hold = hold
         self.metrics = metrics or Metrics()
         self.metrics_lock = threading.Lock()
@@ -435,6 +449,13 @@ class Agent:
                 p = self.programs[name]
                 self.sequence = "starting %s" % name
                 shared = name in SHARED and self.find_outside(self._ours()).get(name)
+                need = SHARED_NEEDS.get(name)
+                if shared and need and not all(need in self.read_args(pid) for pid in shared):
+                    listed = ", ".join(str(pid) for pid in shared)
+                    self.sequence = ("%s เปิดด้วยมือ (pid %s) แต่ไม่มี %s ให้ปิดตัวนั้นก่อน / "
+                                     "%s started by hand (pid %s) lacks %s: stop that copy first"
+                                     % (name, listed, need, name, listed, need))
+                    return
                 if not p.running() and not shared:  # a shared copy by hand: only its port is waited for
                     error = self._outside_error(name) or p.start()
                     if error:

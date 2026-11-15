@@ -600,7 +600,9 @@ class ReturningTests(FlowCase):
         out = f.on_heard("continue", 6.0)
         self.assertEqual(actions(out), ["resume"])
 
-    def test_a_pause_on_the_way_back_resumes_by_itself_after_20_s(self):
+    def test_a_pause_on_the_way_back_never_moves_by_itself(self):
+        # review 2026-11-15: a stop on the way back may be for the cable or a foot; after 20 s the robot only
+        # asks, it drives on when told
         for words in ("stop", "wait"):
             f = self.make()
             self.go(RETURNING)
@@ -608,11 +610,27 @@ class ReturningTests(FlowCase):
             self.assertTrue(f.paused, words)
             self.assertEqual(f.on_tick(24.9), [], words)
             out = f.on_tick(25.0)
-            self.assertEqual(cmds(out), [{"action": "resume", "params": {}}], words)
-            self.assertEqual(says(out), ["Going back to the start."], words)
-            self.assertFalse(f.paused, words)
-            self.assertEqual(f.on_tick(50.0), [], words)
-            self.assertEqual(f.state, RETURNING, words)
+            self.assertEqual(cmds(out), [], words)
+            self.assertEqual(says(out), ["Say continue when I can go on."], words)
+            self.assertTrue(f.paused, words)
+            self.assertEqual(f.on_tick(50.0), [], words)  # asked once
+            self.assertEqual(cmds(f.on_heard("continue", 51.0)), [{"action": "resume", "params": {}}], words)
+
+    def test_wait_in_a_longer_sentence_pauses_the_way_back(self):
+        # review 2026-11-15: "robot please wait a moment" drove on; in following a long "wait" stays no stop
+        # (there stop means "this is the car")
+        for words in ("robot please wait a moment", "wait a second please", "you need to wait",
+                      "whoa wait wait wait wait", "please wait for me"):
+            f = self.make()
+            self.go(RETURNING)
+            out = f.on_heard(words, 5.0)
+            self.assertTrue(f.paused, words)
+            self.assertEqual(cmds(out), [{"action": "wait", "params": {}}], words)
+        f = self.make()
+        self.go(RETURNING)
+        f.on_heard("don't wait, keep going", 5.0)
+        self.assertFalse(f.paused)
+        self.assertIsNone(hmc_flow.classify("wait, I want to show you something"))
 
     def test_a_pause_resumed_by_voice_is_not_resumed_again(self):
         f = self.make()

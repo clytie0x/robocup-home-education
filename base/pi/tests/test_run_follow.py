@@ -1,6 +1,7 @@
 """The control loop with fake devices. Nothing here opens a serial port or drives the base."""
 import json
 import math
+import types
 import signal
 import socket
 import tempfile
@@ -1969,6 +1970,16 @@ class Least(Logged):
         follower = state.follower
         self.assertEqual((follower.restart_gap, follower.wait_gap, follower.go_on_gap), (0.25, 2.0, 1.2))
         self.assertEqual((run_follow.RESTART_GAP, run_follow.WAIT_GAP, run_follow.GO_ON_GAP), (0.25, 2.0, 1.2))
+
+
+class LeastError(unittest.TestCase):
+    def test_no_deadband_for_an_escape_or_the_bag_task(self):
+        state = types.SimpleNamespace(phase=run_follow.FOLLOW)
+        self.assertEqual(run_follow._least_error(state, None, 0.02), 0.02)
+        self.assertIsNone(run_follow._least_error(state, (0.0, 0.2), 0.02))  # an escape
+        state.phase = run_follow.BAG
+        self.assertIsNone(run_follow._least_error(state, None, 0.02))
+        self.assertEqual(wheels_module.least(0.0, 0.1, run_follow._least_error(state, None, math.radians(1.9))), (0.0, 0.1))
 
 
 class SearchSpin(Logged):
