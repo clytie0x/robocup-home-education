@@ -917,3 +917,33 @@ about 9 to 10 V of the converter's 12 V) and the motors' rated voltage (label no
 - Detector check on the Jetson (bench image, 2 people, 320 x 240): without pose 2 people, no keypoints;
   with pose 2 people, both with keypoints; every answer has `objects`.
 - Left on the Pi, not in git: `air_check.py`.
+
+## M1 deployed, arm stack on the new code, first real bag picks, 2026-11-15 07:40 to 08:15
+
+- Deployed e7f0f41 (all five M1 lanes merged; suites on the PC: Pi 796, Jetson 326, hmc 175, PC 41, voice 73,
+  arm 62), with `--voice` and `--arm` (colcon builds on the Jetson passed). Pi suite on the Pi: 793 passed,
+  1 failed (test_params: the Pi kept its params.json, as deploy.sh does when it differs); after `--params`
+  (decel 0.10, command_latency 0.40) that test passed. Backups: `deploy-20261115-074052` and `-075418`.
+- Jetson agent start-all: detector, whisper, voice (hmc_voice), bridge, arm (bag_arm) and flow running; the flow
+  said "Say follow me when you are ready." With the owner's permission the arm stack started by hand at 03:39
+  (pid 39764) was stopped: SIGINT did not end `ros2 launch` in 20 s, SIGTERM did, and its four nodes were gone;
+  the agent then started it on the new code (`/arm/state` with gripper_pos and gripper_load, resting, torque on,
+  floor at z -0.331). The driver keeps torque on when it exits, so the arm did not drop.
+- A new ROS node needed about 3.5 s to receive the first `/arm/state`; RosArm now waits 8 s (736ccbf).
+- Bag in front, room lights off. `tools/approach.py --to 0.31` turned toward it (stop "there"), `--to 0.25`
+  stopped "turn blocked" near the corner; a one-off straight creep (scratchpad) moved 0.041 m, after which the
+  bag's near face was inside the LiDAR's blind zone (0.12 m from the laser) and only its back-left corner showed.
+- Three `/arm/pick_bag` calls, each with up to three tries:
+
+  | Centre (robot frame) | Top used | Yaw | Tries that closed | Gripper at close | Load | Other tries |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | (0.355, 0.060) | 0.26 m | default | 1 | 0.051 rad | 9.2 % | 1 not in the log excerpt, 1 out of reach |
+  | (0.355, 0.060) | 0.30 m | 34.5 deg (LiDAR face) | 1 (shifted +5 cm) | 0.049 rad | 9.6 % | 2 out of reach |
+  | (0.314, -0.020) | 0.30 m | default | 2 | 0.043 / 0.046 rad | 8.8 / 9.2 % | 1 out of reach |
+
+  Every close was on air (the arm reported MISSED); these are empty-close samples for the miss threshold:
+  0.043 to 0.051 rad, load 8.8 to 9.6 %. Afterwards the arm was idle, not holding.
+- Why it cannot work like this: at the pick distance nothing sees the bag (the gripper camera was moved to the
+  front, which looks over a bag this close; the Xtion has no depth nearer than about 0.5 m; the LiDAR is blind
+  within 0.12 m of the laser and cuts the bag at 0.245 m only). The bag's top height and handle place must be
+  measured from a distance (front camera with the room lit, LiDAR range) before the last approach.
