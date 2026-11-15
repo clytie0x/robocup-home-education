@@ -799,7 +799,7 @@ class RosArm:
         reading = {k: float(getattr(r, k)) for k in ("gripper_pos", "gripper_load") if hasattr(r, k)}
         return bool(r.success), r.error_code, r.message, reading
 
-    def arm_state(self, wait=3.0):
+    def arm_state(self, wait=8.0):  # a new node needs about 3.5 s to discover /arm/state (DDS), seen 2026-11-15
         end = time.monotonic() + wait
         while time.monotonic() < end:
             if self._state is not None and time.monotonic() - self._state_t < 2.0:   # 2 Hz topic
