@@ -289,8 +289,9 @@ class Loop(Logged):
         self.assertEqual(state.coast.parts["v"], (0.1, 0.0))  # the last-resort stop knows the base now rolls
 
         base = FakeBase()
-        state = self.state(base, scan=scan_of([(0.25, 0.0)]))  # 0.225 m ahead of the front, inside the strip
-        self.assertLess(0.25 + P["lidar_x"] - safety.FRONT, safety.braking_distance(0.1, P))
+        # 0.125 m ahead of the front, inside the strip (0.163 m at 0.1 m/s with decel 0.14; 0.225 m was inside at 0.064)
+        state = self.state(base, scan=scan_of([(0.15, 0.0)]))
+        self.assertLess(0.15 + P["lidar_x"] - safety.FRONT, safety.braking_distance(0.1, P))
         record = self.cycle(state, 0.0)
         self.assertEqual((record["v"], record["w"], record["stop"]), (0.0, 0.0, "obstacle"))
         self.assertEqual(base.sent[-1], (0.0, 0.0))
@@ -1895,6 +1896,107 @@ class Stuck(Logged):
         state.follower = Pushy(state.body.robot)
         state.follower.operator_look = SimpleNamespace(count=0)
         return state
+
+
+class Creep(Pushy):
+    """A brain that turns on the spot at `w` toward a heading `error` rad away (wheels.least)."""
+
+    w, error = 0.07, math.radians(44)
+
+    def step(self, senses, dt):
+        self.robot.speed, self.robot.turn_speed, self.robot.turn_error = 0.0, self.w, self.error
+
+
+class Least(Logged):
+    """Task 1 of 2026-11-15: every command moves the wheels or is 0, made so in one place before the stops."""
+
+    def test_a_crawl_on_the_spot_becomes_min_turn_and_the_obstacle_check_judges_that(self):
+        base = FakeBase()
+        state = self.state(base, brain=Creep)
+        with mock.patch.object(run_follow.safety, "must_stop", wraps=safety.must_stop) as checked:
+            record = self.cycle(state, 0.0)
+        self.assertEqual(base.sent[-1], (0.0, wheels_module.MIN_TURN))
+        self.assertEqual((record["v"], record["w"]), (0.0, wheels_module.MIN_TURN))
+        self.assertTrue(checked.called)
+        self.assertTrue(all(abs(call.args[2]) == wheels_module.MIN_TURN for call in checked.call_args_list))
+        self.assertEqual(state.coast.parts["left"][0], wheels_module.MIN_TURN)  # the coast knows the real command
+
+    def test_a_small_heading_error_on_the_spot_sends_0(self):
+        base = FakeBase()
+        state = self.state(base, brain=Creep)
+        state.follower.error = math.radians(1.0)
+        record = self.cycle(state, 0.0)
+        self.assertEqual((record["v"], record["w"]), (0.0, 0.0))
+        self.assertEqual(base.sent[-1], (0.0, 0.0))
+
+    def test_the_raised_turn_still_stops_for_what_its_outline_would_hit(self):
+        base = FakeBase()
+        r, deg = 0.30, math.radians(65)  # a leg beside the front-left corner the left turn swings toward
+        state = self.state(base, scan=scan_of([(r * math.cos(deg) - P["lidar_x"], r * math.sin(deg))]), brain=Creep)
+        record = self.cycle(state, 0.0)
+        self.assertEqual(record["stop"], "obstacle")
+        self.assertEqual(base.sent[-1], (0.0, 0.0))
+
+    def test_the_real_base_follows_with_its_own_gaps(self):
+        state = run_follow.State(P, FakeBase(), Scans(WALL_ONLY), Camera(), None, self.log, clock=lambda: self.now)
+        follower = state.follower
+        self.assertEqual((follower.restart_gap, follower.wait_gap, follower.go_on_gap), (0.25, 2.0, 1.2))
+        self.assertEqual((run_follow.RESTART_GAP, run_follow.WAIT_GAP, run_follow.GO_ON_GAP), (0.25, 2.0, 1.2))
+
+
+class SearchSpin(Logged):
+    """Cable review major 2: the brain's own search spin (Mode.SEARCH) is an open turn, not a turn to +90 deg."""
+
+    def test_from_net_100_a_minute_of_search_turns_unwinds_first_and_never_shakes(self):
+        base = FakeBase()
+        state = run_follow.State(P, base, Scans(WALL_ONLY), Camera(), None, self.log, clock=lambda: self.now)
+        follower = state.follower
+        follower.mode, follower.look_since = Mode.SEARCH, 0.0  # lost: looking around on the spot
+        # Not this test: the Pi's wheel check takes the turn round at -200 deg (net yaw about 0 over its 1 s
+        # window) for wheels that do not turn.
+        wheels_unwatched(state)
+        state.cable.net_deg = 100.0
+        records = []
+        with mock.patch.object(run_follow.hmc_follower, "LOOK_AROUND", 1e9):  # keep looking round all the minute
+            for i in range(600):
+                records.append(self.cycle(state, round(0.1 * i, 1)))
+                base.advance(0.1)
+        ws = [r["w"] for r in records]
+        self.assertLess(next(w for w in ws if w), 0.0)  # to the right first: it unwinds from +100
+        self.assertLess(records[30]["cable_deg"], 100.0)
+        self.assertNotIn("wound", [r["cable"] for r in records])
+        self.assertLessEqual(max(abs(r["cable_deg"]) for r in records), cable_module.LIMIT_DEG)
+        turning = [w for w in ws if w]
+        self.assertGreater(len(turning), 590)  # it kept turning
+        runs, n = [], 1
+        for a, b in zip(turning, turning[1:]):
+            if a * b < 0:
+                runs.append(n)
+                n = 0
+            n += 1
+        self.assertTrue(runs)  # it turned round at the warning
+        self.assertGreaterEqual(min(runs[1:] or runs), 50)  # each way for seconds, never back and forth on the spot
+
+
+class BackingOverTheCable(Logged):
+    """Cable review major 3: backing never drives over the cable lying behind (cable.Lay)."""
+
+    def backing(self, trail):
+        base = FakeBase()
+        state = self.state(base, brain=Blocked)
+        state.cable.lay.trail = list(trail)  # the post's path, oldest first, odometry frame
+        state.escape.command = lambda *a: (-wheels_module.REVERSE_MAX, 0.0)  # an escape backs straight
+        return base, self.cycle(state, 0.0)
+
+    def test_the_obstacle_stop_holds_a_backing_over_the_cable_behind(self):
+        base, record = self.backing([(-0.24, -1.0), (-0.24, -0.1)])  # from the post round the back, then right
+        self.assertEqual(record["stop"], "obstacle")
+        self.assertEqual(base.sent[-1], (0.0, 0.0))
+
+    def test_a_cable_beside_the_robot_lets_it_back(self):
+        base, record = self.backing([(-2.0, cable_module.ATTACH[1]), (-0.2, cable_module.ATTACH[1])])
+        self.assertIsNone(record["stop"])
+        self.assertEqual(base.sent[-1], (-wheels_module.REVERSE_MAX, 0.0))
 
 
 if __name__ == "__main__":

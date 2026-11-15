@@ -114,7 +114,7 @@ class SafetyTest(unittest.TestCase):
         self.assertFalse(safety.must_stop([(0.27, 0.10)], 0.0, 0.49, P))  # the command alone passes
         # it keeps its speed for stop_delay, then slows at decel until it stands
         self.assertEqual(coast.motions(0.0, 0.0, 0.27), [(0.09, 0.0)])
-        self.assertAlmostEqual(coast.motions(0.0, 0.0, 0.27 + 1.0)[0][0], 0.09 - P["decel"])
+        self.assertAlmostEqual(coast.motions(0.0, 0.0, 0.27 + 0.5)[0][0], 0.09 - 0.5 * P["decel"])  # 0.14: stands at 0.91 s
         self.assertEqual(coast.motions(0.0, 0.0, 10.0), [(0.0, 0.0)])
 
     def test_a_turn_that_flips_direction_still_checks_the_old_one(self):

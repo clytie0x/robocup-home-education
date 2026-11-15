@@ -158,3 +158,87 @@ def test_robot_keeps_up_with_an_operator_who_walks_away(monkeypatch):
         follower.watch(senses)
         follower.step(senses, dt)
     assert distance(body.pos, operator) < 0.8 + 0.15
+
+
+def real_base(monkeypatch) -> Robot:
+    """The real base's limits (base/params.json and base/pi/body.py), at (0, 0) facing +x."""
+    from hmc import world
+    monkeypatch.setattr(world, "ROBOT_RADIUS", 0.29)
+    monkeypatch.setattr(world, "MAX_ACCEL", 0.25)
+    monkeypatch.setattr(world, "MAX_TURN_ACCEL", 0.7)
+    monkeypatch.setattr(world, "HEADING_DEADBAND", math.radians(4))
+    return Robot(max_speed=0.12, max_turn_rate=0.49)
+
+
+def test_standing_within_the_follow_distance_turns_toward_the_operator_at_a_useful_rate(monkeypatch):
+    # 2026-11-15: standing within the follow distance the real base turned at 0.07 rad/s every cycle
+    # (brake() set the turn to 0, turn_toward ramped one step of 0.7 rad/s^2 from there), the median
+    # operator 44 deg off: the camera lost them.
+    body = real_base(monkeypatch)
+    follower = Follower(body, hri.Speech(), follow_distance=0.8)
+    operator = (0.7 * math.cos(math.radians(44)), 0.7 * math.sin(math.radians(44)))
+    time = learn(follower, operator)
+    turns = []
+    for i in range(30):  # 3 s
+        cycle(follower, seen(time + i * DT, operator=operator))
+        turns.append(body.turn_speed)
+        assert body.speed == 0.0  # it stands: it only turns
+    off = abs(math.degrees(math.atan2(operator[1], operator[0]) - body.heading))
+    assert max(turns) >= 0.2  # a useful rate, not 0.07
+    assert off < 10.0
+
+
+def test_once_stopped_at_the_follow_distance_it_starts_again_only_past_the_restart_gap():
+    follower, body, _ = make(follow_distance=0.8, restart_gap=0.25)
+    time = learn(follower, (2.0, 0.0))
+    for i in range(100):
+        cycle(follower, seen(time + i * DT, operator=(2.0, 0.0)))
+    time += 100 * DT
+    assert distance(body.pos, (2.0, 0.0)) == pytest.approx(0.8, abs=0.05)
+    stood = body.pos
+    inside = (body.x + 0.8 + 0.2, 0.0)  # 0.2 m further: within the restart gap
+    for i in range(20):
+        cycle(follower, seen(time + i * DT, operator=inside))
+    time += 20 * DT
+    assert distance(body.pos, stood) < 1e-9  # no stop-and-go for a step of the operator
+    beyond = (body.x + 0.8 + 0.3, 0.0)
+    for i in range(20):
+        cycle(follower, seen(time + i * DT, operator=beyond))
+    assert distance(body.pos, stood) > 0.1  # 0.3 m further: it follows again
+
+
+def test_without_a_restart_gap_it_starts_again_at_once():
+    # The simulation's default: the old behaviour, its runs stay the same.
+    follower, body, _ = make(follow_distance=0.8)
+    time = learn(follower, (2.0, 0.0))
+    for i in range(100):
+        cycle(follower, seen(time + i * DT, operator=(2.0, 0.0)))
+    time += 100 * DT
+    stood = body.pos
+    for i in range(20):
+        cycle(follower, seen(time + i * DT, operator=(body.x + 0.8 + 0.2, 0.0)))
+    assert distance(body.pos, stood) > 0.05
+
+
+def test_wait_and_go_on_gaps_are_parameters():
+    # The real base drives at most 0.12 m/s: it asks the operator to wait at 2.0 m and to go on at 1.2 m
+    # (WAIT_GAP 4.0 and GO_ON_GAP 2.5 were set for the simulation's 1 m/s base, which keeps them).
+    body = Robot(max_speed=0.0)  # held back: the operator gets away
+    speech = hri.Speech()
+    follower = Follower(body, speech, follow_distance=0.8, wait_gap=2.0, go_on_gap=1.2)
+    time = learn(follower, (1.0, 0.0))
+    for i in range(30):
+        cycle(follower, seen(time + i * DT, operator=(1.0 + 0.05 * i, 0.0)))  # to 2.45 m
+    time += 30 * DT
+    assert speech.has_said(hri.WAIT_TEXT)
+    assert not speech.has_said(hri.GO_ON_TEXT)
+    body.max_speed = 1.0
+    for i in range(100):
+        cycle(follower, seen(time + i * DT, operator=(2.45, 0.0)))
+    assert speech.has_said(hri.GO_ON_TEXT)
+    follower, body, speech = make()  # the simulation's defaults
+    body.max_speed = 0.0
+    time = learn(follower, (1.0, 0.0))
+    for i in range(30):
+        cycle(follower, seen(time + i * DT, operator=(1.0 + 0.05 * i, 0.0)))
+    assert not speech.has_said(hri.WAIT_TEXT)
