@@ -286,6 +286,7 @@ class State:
         self.bag = None  # bag.BagTask: the running one in BAG, then the last one (its result stays on the status)
         self.bag_seq = 0  # bag tasks so far this run
         self.bag_odom = None  # odometry (x, y) of the last chosen bag (record "bag", and what bag_again looks for)
+        self.bag_look = None  # bag.Look: the Jetson's front camera measures the bag when depth cannot (None: no Jetson)
 
 
 def scan_points(scan, p):
@@ -466,7 +467,8 @@ def _bag_refused(state):
 
 def _start_bag(state, now, cmd):
     state.bag_seq += 1
-    state.bag = bag_module.BagTask(state.p, now, state.bag_seq, BAG_COMMANDS[cmd], last=state.bag_odom)
+    state.bag = bag_module.BagTask(state.p, now, state.bag_seq, BAG_COMMANDS[cmd], last=state.bag_odom, look=True,
+                                   rgb=state.bag_look is not None)
     state.phase = BAG
     state.log.write({"time": now, "bag": "start", "mode": state.bag.mode, "seq": state.bag_seq})
 
@@ -499,7 +501,10 @@ def _bag_step(state, now, pose, believed, seen, sensed, answer, frame, points):
         now, pose, seen=scan_points(sensed, p), clusters=bag_module.lidar_clusters(sensed, p), operator=operator,
         found=found, boxes=boxes, frame=(getattr(frame, "width", 320), getattr(frame, "height", 240)),
         virtual_bags=virtual_bags or (), lay=[geometry.odom_to_base((c.x, c.y), believed) for c in state.cable.lay.shapes],
-        speed_cap=state.body.robot.max_speed, cable_holding=state.cable.holding, real=points)
+        speed_cap=state.body.robot.max_speed, cable_holding=state.cable.holding, real=points,
+        depth=getattr(frame, "depth", None))
+    if state.bag_look is not None:
+        state.bag_look.serve(state.bag, now)
     return state.bag.step(view)
 
 
@@ -1180,6 +1185,8 @@ def main(argv=None):
         state = State(p, wheels, session, cam, link, log, args.max_speed, encode=link_module._encode_jpeg,
                       velocity_loop=args.velocity_loop, return_after=args.return_after, remote=remote,
                       cable_path=args.cable)
+        if link is not None:
+            state.bag_look = bag_module.Look(link_module.hosts(p))  # the Jetson's front camera (bag_arm.py serves it)
         if args.virtual_operator is not None:
             state.virtual = virtual_module.VirtualOperator(p, args.virtual_operator, allow=virtual_allowed,
                                                            controls=state.controls)

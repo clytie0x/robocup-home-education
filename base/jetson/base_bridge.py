@@ -31,8 +31,9 @@ ROS side:
       intent is then idle and nothing is restored until the flow asks again.
       For a find_bag sent by this bridge, once per bag task (the status "bag" id differs from the one
       seen when it was sent): bag_chosen|SIDE|say text (SIDE LEFT, RIGHT, MIDDLE or NONE for one bag),
-      then bag_reached|CODE|x,y (CODE OK, or ESTIMATED when the LiDAR never saw the bag; robot frame,
-      metres, 3 decimals) or bag_failed|CODE|message (NOT_POINTED, NO_BAG, BLOCKED, TIMEOUT, LOST_BAG,
+      then bag_reached|CODE|x,y[,top=T][,yaw=Y] (CODE OK, or ESTIMATED when the LiDAR never saw the bag; robot
+      frame, metres, 3 decimals; top m and yaw rad when the Pi's look measured them, base/docs/bag-sensing.md)
+      or bag_failed|CODE|message (NOT_POINTED, NO_BAG, BLOCKED, TIMEOUT, LOST_BAG,
       CANCELLED; REFUSED when the Pi refused the command).
   /base/status  every Pi status as JSON, plus "link": true and "search": true while the Pi's brain looks for a
       lost operator (the Pi's "mode" == "search" when it sends a mode, else FOLLOW, not waiting, not held and
@@ -242,7 +243,9 @@ class BridgeLogic:
         if isinstance(result, dict):
             self.bag_asked = None
             if result.get("ok"):
-                out.append(("event", "bag_reached|%s|%.3f,%.3f" % (result.get("code", "OK"), result["x"], result["y"])))
+                extra = "".join(",%s=%.3f" % (k, result[k]) for k in ("top", "yaw") if result.get(k) is not None)
+                out.append(("event", "bag_reached|%s|%.3f,%.3f%s" % (result.get("code", "OK"), result["x"], result["y"],
+                                                                     extra)))
             else:
                 out.append(("event", "bag_failed|%s|%s" % (result.get("code", "FAILED"), result.get("message", ""))))
         return out

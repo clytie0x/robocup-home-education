@@ -347,6 +347,38 @@ class PointingTests(FlowCase):
         self.assertEqual(cmds(out), [{"action": "pick_bag", "params": {"x": 0.31, "y": 0.015}}])
         self.assertEqual(f.deadline, 20.0 + 90.0)  # the arm moves slowly
 
+    def test_a_measured_top_and_yaw_go_to_the_arm(self):
+        f = self.make()
+        self.go(POINTING)
+        out = f.on_event("bag_reached|OK|0.310,0.015,top=0.286,yaw=-1.200", 20.0)
+        self.assertEqual(f.state, PICKING)
+        self.assertEqual(cmds(out), [{"action": "pick_bag",
+                                      "params": {"x": 0.31, "y": 0.015, "top": 0.286, "yaw": -1.2}}])
+
+    def test_the_remeasure_after_a_miss_keeps_the_top_but_not_the_yaw(self):
+        f = self.make()
+        self.go(POINTING)
+        f.on_event("bag_reached|OK|0.310,0.015,top=0.286,yaw=-1.200", 20.0)
+        f.on_event("grab_failed|MISSED|I missed it.", 40.0)
+        out = f.on_event("bag_reached|OK|0.305,0.012", 50.0)  # bag_again: too near to look again
+        self.assertEqual(cmds(out), [{"action": "pick_bag", "params": {"x": 0.305, "y": 0.012, "top": 0.286}}])
+
+    def test_a_new_pointing_forgets_the_last_bags_top(self):
+        f = self.make()
+        self.go(POINTING)
+        f.on_event("bag_reached|OK|0.310,0.015,top=0.286", 20.0)
+        f.on_heard("stop", 30.0)  # cancelled: at the car, then pointing afresh
+        f.on_heard("ready", 31.0)
+        self.assertEqual(f.state, POINTING)
+        out = f.on_event("bag_reached|OK|0.300,0.010", 50.0)
+        self.assertEqual(cmds(out), [{"action": "pick_bag", "params": {"x": 0.3, "y": 0.01}}])
+
+    def test_a_bad_extra_field_is_left_out(self):
+        f = self.make()
+        self.go(POINTING)
+        out = f.on_event("bag_reached|OK|0.310,0.015,top=high,yaw=nan", 20.0)
+        self.assertEqual(cmds(out), [{"action": "pick_bag", "params": {"x": 0.31, "y": 0.015}}])
+
     def test_without_the_arm_bag_reached_says_so_and_goes_back(self):
         f = self.make(use_arm=False)
         self.go(POINTING)

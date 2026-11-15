@@ -5,16 +5,19 @@ collision model of the robot body and their carry pose are used, and their nodes
 Ours is what they need as input:
   - where: the bag's x, y from the Pi (robot frame, LiDAR after the approach), refined by the gripper
     camera when it is calibrated (floor_pick.py --calibrate-self);
-  - how high its top is: triangulated from 3 gripper camera views (gripper_camera.triangulate), else
+  - how high its top is: measured by the Pi from a distance ("top": Xtion depth or the front camera,
+    base/docs/bag-sensing.md), else triangulated from 3 gripper camera views (gripper_camera.triangulate), else
     DEFAULT_TOP. Too low is safe (the jaws close lower on the handles or the gathered mouth),
     too high closes on air (MISSED), so the fallback is just above the LiDAR plane the bag crossed.
+  - which way its handles run: the Pi's "yaw" (robot frame, the long axis of its LiDAR points), turned into the
+    arm frame by arm_yaw; without it their default (the part across the arm's view).
 Before anything moves, /arm/home (an API task) restarts the arm team's idle timer: their auto rest
 fires 120 s after their last task and would replace our camera moves (seen 2026-11-15 04:15).
 The top goes to them in the arm frame of their floor: z = ARM_FLOOR_Z + top (their floor_z for mount:=robot
 is the measured -0.331 itself, so no offset of ours is added); x, y go through Mount.to_arm.
 
 /robot/command (JSON {"action", "params"}):
-  pick_bag {"x", "y"[, "top"]}   robot frame, metres -> grab_success | grab_failed|CODE|message
+  pick_bag {"x", "y"[, "top", "yaw"]}  robot frame, metres, rad -> grab_success | grab_failed|CODE|message
                                  (with their grasp reading: grab_success|SUCCESS|gripper_pos=R gripper_load=L,
                                  grab_failed|CODE|message [gripper_pos=R gripper_load=L])
   drop_bag {"x", "y"}            floor point, robot frame -> drop_done | drop_failed|CODE|message
@@ -22,7 +25,8 @@ is the measured -0.331 itself, so no offset of ours is added); x, y go through M
 Events go out on /robot/event, the names hmc_flow.py reads.
 
   source /opt/ros/jazzy/setup.bash; source ~/so100_ws/install/setup.bash; export ROS_DOMAIN_ID=42
-  python3 bag_arm.py                        # the node
+  python3 bag_arm.py                        # the node, and the front camera's bag measurements for the Pi
+                                            # (front_camera.serve, TCP 5606)
   python3 bag_arm.py --pick 0.31 0.0        # one pick from the shell, then exit
   python3 bag_arm.py --place 0.31 0.0
 """
@@ -35,6 +39,7 @@ import time
 
 import numpy as np
 
+import front_camera
 import gripper_camera as gc
 from floor_pick import JAW_OPEN, READY, Failure, FloorPick, Planner, Result
 from so100_ik import Kinematics, Mount, Unreachable, load_limits
@@ -49,6 +54,14 @@ LOOK_CLEAR = 0.08         # m, the gripper stays this far above the assumed top 
 HOME_TIMEOUT = 60.0
 PICK_TIMEOUT = 150.0      # their pick: up to 3 tries, slow carry (bag_speed 0.08)
 PLACE_TIMEOUT = 120.0
+
+
+def arm_yaw(yaw, mount):
+    """A direction in the robot frame (rad, + left of forward) -> the arm team's yaw in the arm frame (rad from
+    their +x): their forward is -y and their left is +x (API.md), so robot forward is -pi/2 there. A line, so the
+    result is in [-pi/2, pi/2)."""
+    a = yaw - mount.yaw - math.pi / 2
+    return (a + math.pi / 2) % math.pi - math.pi / 2
 
 
 def look_poses(plan, kin, target, count=3):
@@ -144,8 +157,9 @@ class BagArm:
             return ""
         return "gripper_pos=%.3f gripper_load=%.1f" % (pos, load)
 
-    def pick(self, x, y, top=None):
-        """Pick the bag at robot (x, y). Sends grab_success or grab_failed|CODE|message (with their grasp
+    def pick(self, x, y, top=None, yaw=None):
+        """Pick the bag at robot (x, y); top (m above the floor) and yaw (robot frame rad, the handles' line)
+        when the Pi measured them. Sends grab_success or grab_failed|CODE|message (with their grasp
         reading when they send one, for the flow log)."""
         self.reading = {}
         try:
@@ -162,7 +176,10 @@ class BagArm:
             grasp = np.array([*self.k.mount.to_arm([where[0], where[1], 0.0])[:2], ARM_FLOOR_Z + top])
             self.log("pick_bag at robot (%.3f, %.3f), top %.3f m -> arm (%.3f, %.3f, %.3f)"
                      % (where[0], where[1], top, grasp[0], grasp[1], grasp[2]))
-            msg = self._task("pick_bag", PICK_TIMEOUT, grasp=tuple(grasp), yaw=None)
+            ayaw = None if yaw is None else arm_yaw(yaw, self.k.mount)
+            if ayaw is not None:
+                self.log("yaw %.1f deg robot -> %.1f deg arm" % (math.degrees(yaw), math.degrees(ayaw)))
+            msg = self._task("pick_bag", PICK_TIMEOUT, grasp=tuple(grasp), yaw=ayaw)
         except Failure as exc:
             self.log("FAILED %s: %s" % (exc.code, exc.message))
             note = self._reading()
@@ -214,6 +231,7 @@ class Jobs:
         try:
             x, y = float(p["x"]), float(p["y"])
             top = float(p["top"]) if p.get("top") is not None else None
+            yaw = float(p["yaw"]) if p.get("yaw") is not None else None
         except (KeyError, TypeError, ValueError):
             self.arm.event("%s|FAILED|%s needs x and y" % (fail, action))
             return
@@ -223,7 +241,7 @@ class Jobs:
         if self.busy():
             self.arm.event("%s|BUSY|another arm job is running" % fail)
             return
-        job = (lambda: self.arm.pick(x, y, top)) if action == "pick_bag" else (lambda: self.arm.place(x, y))
+        job = (lambda: self.arm.pick(x, y, top, yaw)) if action == "pick_bag" else (lambda: self.arm.place(x, y))
         self.thread = threading.Thread(target=job, daemon=True)
         self.thread.start()
 
@@ -235,6 +253,7 @@ def parse(argv=None):
     ap.add_argument("--top", type=float, help="pick: the bag top above the floor (m), skip the camera")
     ap.add_argument("--camera-file", default=gc.DEFAULT_FILE)
     ap.add_argument("--snap-url", default="http://127.0.0.1:8082/snap.jpg")
+    ap.add_argument("--front-camera-file", default=front_camera.DEFAULT_FILE)
     return ap.parse_args(argv)
 
 
@@ -255,6 +274,11 @@ def main(argv=None):
             print("result: %s %s %s" % ("OK" if res.ok else "FAILED", res.code, res.message))
             return 0 if res.ok else 1
         from std_msgs.msg import String  # noqa: PLC0415
+        try:
+            front_camera.serve(front_camera.PORT, a.front_camera_file, a.snap_url)
+            print("bag_arm: front camera bag measurements on TCP %d" % front_camera.PORT)
+        except OSError as exc:  # another copy serves it: the arm jobs still run
+            print("bag_arm: front camera service not started: %s" % exc)
         jobs = Jobs(arm)
         t.node.create_subscription(String, "/robot/command", lambda m: jobs.on_command(m.data), 10)
         print("bag_arm: waiting for pick_bag / drop_bag on /robot/command")
