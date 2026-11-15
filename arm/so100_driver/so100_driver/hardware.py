@@ -75,6 +75,11 @@ class RealArm:
                       'torque': torque[i][0]}
         return out
 
+    def gripper_load(self):
+        """Gripper servo load % read now (present load register, same scale as health())."""
+        load = self.bus.read2(GRIPPER_ID, ft.PRESENT_LOAD)
+        return (load & 0x3FF) / 10.0      # bit 10 is the direction
+
     def close(self):
         self.bus.close()
 
@@ -110,6 +115,9 @@ class SimArm:
     def health(self):
         return {i: {'load': 0.0, 'voltage': 12.0, 'temp': 30, 'status': 0, 'torque': int(self.enabled)}
                 for i in IDS}
+
+    def gripper_load(self):
+        return 0.0
 
     def close(self):
         pass

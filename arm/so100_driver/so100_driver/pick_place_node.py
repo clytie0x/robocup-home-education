@@ -58,7 +58,8 @@ from so100_interfaces.action import PickPlace as PickPlaceAction
 from so100_interfaces.msg import ArmState
 
 from .calib import Calibration
-from .ik import ARM, GRASP_Y, TIP_Y, Box, GraspPlanner, Kinematics, PlanError, deck_box
+from .ik import ARM, GRASP_Y, TIP_Y, Box, GraspPlanner, Kinematics, PlanError, bag_shifts, deck_box
+from .task_rules import PICK_PLACE, Failed, api_code, gripper_load, still_held
 
 READY = {'shoulder_pan': 0.0, 'shoulder_lift': 1.2, 'elbow_flex': -1.2, 'wrist_flex': 0.3, 'wrist_roll': 0.0}
 REST = {'shoulder_pan': 0.0, 'shoulder_lift': 0.04, 'elbow_flex': -0.04, 'wrist_flex': 0.0, 'wrist_roll': 0.0}  # SRDF 'rest'
@@ -73,14 +74,6 @@ def yaw_q(yaw):
 
 def q_yaw(q):
     return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
-
-
-class Failed(Exception):
-    def __init__(self, msg, code=None):
-        super().__init__(msg)
-        text = str(msg)
-        self.code = code or ('HOT' if 'too hot' in text else 'COLLISION' if any(
-            w in text for w in ('blocked', 'stopped', 'short', 'ติด', 'ชน')) else 'FAILED')
 
 
 def copy_box(b):
@@ -98,6 +91,7 @@ MESSAGES = {
     'NOT_HOLDING': 'I am not holding anything.',
     'HOT': 'My motors are too hot. Please wait a minute.',
     'STOPPED': 'Stopped.',
+    'REPLACED': 'Another program moved my arm, so I stopped.',
     'FAILED': 'Something went wrong.',
 }
 SUCCESS = {'pick': 'I have picked it up.', 'place': 'I have put it down.', 'pick_place': 'Done, I moved it.',
@@ -172,6 +166,8 @@ class PickPlace(Node):
         self.attached = False
         self.check = ''
         self.lock = threading.Lock()
+        self.grasped = None              # plan of this task's grasp once the jaws closed on something
+        self.grip_reading = (math.nan, math.nan)   # (gripper rad, load %) right after this task's last grasp
 
         cb = ReentrantCallbackGroup()
         self.status_pub = self.create_publisher(String, 'so100/pick_place/status', 10)
@@ -452,12 +448,12 @@ class PickPlace(Node):
     def run_action(self, client, goal, timeout, what):
         self.moved = True
         if not client.wait_for_server(timeout_sec=3.0):
-            raise Failed(f'{what}: ไม่พบ action server')
+            raise Failed(f'{what}: ไม่พบ action server', 'FAILED')
         if self.preempt:
             raise Failed(f'{what}: ให้ทางงานใหม่', 'STOPPED')
         handle = self.wait(client.send_goal_async(goal), 5.0)
         if handle is None or not handle.accepted:
-            raise Failed(f'{what}: คำสั่งถูกปฏิเสธ')
+            raise Failed(f'{what}: คำสั่งถูกปฏิเสธ', 'FAILED')
         self.current = handle
         if self.preempt:                 # asked to give way while the goal was being sent
             handle.cancel_goal_async()
@@ -469,7 +465,7 @@ class PickPlace(Node):
             raise Failed(f'{what}: ให้ทางงานใหม่', 'STOPPED')
         if res is None:
             handle.cancel_goal_async()
-            raise Failed(f'{what}: หมดเวลา')
+            raise Failed(f'{what}: หมดเวลา', 'FAILED')
         return res.result
 
     def moveit_to(self, q, what):
@@ -491,11 +487,13 @@ class PickPlace(Node):
         res = self.run_action(self.move, goal, 60.0, what)
         code = res.error_code.val
         if code != 1:
-            reason = {99999: 'หาเส้นทางไม่ได้ (ท่าปลายทางชนของ/โต๊ะในโมเดล หรือทางถูกบัง)',
-                      -10: 'ท่าเริ่มต้นชนอยู่แล้วในโมเดล', -12: 'ท่าปลายทางชนในโมเดล',
-                      -4: 'แขนไปไม่ถึง (ติด/ชน หรือมอเตอร์ไม่ตาม)', -6: 'หมดเวลา',
-                      -7: 'ถูกหยุดกลางทาง'}.get(code, f'MoveIt code {code}')
-            raise Failed(f'{what}: {reason}')
+            reason, api = {99999: ('หาเส้นทางไม่ได้ (ท่าปลายทางชนของ/โต๊ะในโมเดล หรือทางถูกบัง)', 'COLLISION'),
+                           -10: ('ท่าเริ่มต้นชนอยู่แล้วในโมเดล', 'COLLISION'),
+                           -12: ('ท่าปลายทางชนในโมเดล', 'COLLISION'),
+                           -4: ('แขนไปไม่ถึง (ติด/ชน หรือมอเตอร์ไม่ตาม)', 'COLLISION'),
+                           -6: ('หมดเวลา', 'FAILED'),
+                           -7: ('ถูกหยุดกลางทาง', 'FAILED')}.get(code, (f'MoveIt code {code}', 'FAILED'))
+            raise Failed(f'{what}: {reason}', api)
 
     def line(self, qs, what, speed=None, step=None):
         """Send a joint path of equal steps (default: the 5 mm straight lines) with a smooth start/stop."""
@@ -503,6 +501,7 @@ class PickPlace(Node):
         n = len(qs)
         total = 1.875 * n * (step or self.planner.STEP) / speed     # min-jerk peak speed = 1.875 x average
         goal = FollowJointTrajectory.Goal()
+        goal.trajectory.header.frame_id = PICK_PLACE     # the driver lets only us take a running arm move
         goal.trajectory.joint_names = list(ARM)
         goal.path_tolerance = [JointTolerance(name=j, position=0.2) for j in ARM]   # = exact path, no retime
         for i, q in enumerate(qs, 1):
@@ -512,7 +511,7 @@ class PickPlace(Node):
             goal.trajectory.points.append(pt)
         res = self.run_action(self.arm, goal, total + 10.0, what)
         if res.error_code != 0:
-            raise Failed(f'{what}: {res.error_string or res.error_code}')
+            raise Failed(f'{what}: {res.error_string or res.error_code}', api_code(res.error_code))
 
     @staticmethod
     def minjerk_time(s):
@@ -545,6 +544,7 @@ class PickPlace(Node):
                     self.busy, self.task, self.step, self.goal_handle = True, name, '', handle
                     self.cancel_requested, self.preempt = False, False
                     self.moved = False       # set by the first motion command; refusals keep the scene as is
+                    self.grasped, self.grip_reading = None, (math.nan, math.nan)
                     break
                 if self.task != 'rest' or name == 'rest' or time.monotonic() > end:
                     return 'BUSY', MESSAGES['BUSY'], 'กำลังทำงานอื่นอยู่'
@@ -571,7 +571,7 @@ class PickPlace(Node):
             if self.attached:
                 self.hold_still = 'อาจมีของค้างในก้าม'
             if self.moved and name != 'rest':
-                self.release_scene()
+                self.after_failure()
         except Exception as exc:  # keep the node alive and tell the user  # noqa: BLE001
             code, detail = 'FAILED', repr(exc)
             self.say(f'✘ ผิดพลาด: {detail}')
@@ -579,7 +579,7 @@ class PickPlace(Node):
             if self.attached:
                 self.hold_still = 'อาจมีของค้างในก้าม'
             if self.moved and name != 'rest':
-                self.release_scene()
+                self.after_failure()
         finally:
             with self.lock:
                 given_way = self.preempt
@@ -648,6 +648,23 @@ class PickPlace(Node):
             fb = self.feedback_type[self.task]()
             fb.step, fb.step_index, fb.step_count = key, i, n
             h.publish_feedback(fb)
+
+    MISS_DEFAULT = 0.05   # rad: the planner's own miss threshold (ik.py _pick_part) for a plan without one
+
+    def after_failure(self):
+        """A task failed or was stopped after the arm moved. If the jaws had closed on something and still
+        read open above the miss threshold, it is still held: keep `holding` (a new pick then answers
+        HOLDING instead of opening the jaws, and /arm/place can put it down). Otherwise forget it."""
+        held = self.holding or self.grasped
+        pos = self.joints.get('gripper')
+        if held is not None and still_held(pos, held.get('miss_below') or self.MISS_DEFAULT, held.get('jaw_open')):
+            if 'carry' in held and all(n in self.joints for n in ARM):
+                # a bag: the put-down path starts where the arm stopped, not at the carry pose
+                held['carry'] = dict(held['carry'], q={n: float(self.joints[n]) for n in ARM})
+            self.holding = held
+            self.say(f'ยังถือของอยู่ (ก้าม {pos:.3f} rad): ไม่ลืม สั่งวางได้')
+            return
+        self.release_scene()
 
     def release_scene(self):
         """After a failure the object may be in the jaws or knocked over: drop MoveIt's copy of it
@@ -758,18 +775,18 @@ class PickPlace(Node):
         if self.holding:
             raise Failed('ถือของอยู่แล้ว: สั่งวางก่อน', 'HOLDING')
         p = lambda n: float(self.get_parameter(n).value)
-        # The jaws open wide over the part; a miss (jaws close on nothing) is tried again shifted across the
-        # part (yaw + 90 deg): 0, +step, -step, +2 step, ... (bag_tries in all). The position of a soft bag
-        # is only known roughly, the part (the gathered mouth / handle roots) is soft and safe to touch.
+        # The jaws open fully (JAW_G_MAX, 7.5 cm) over the part; a miss (jaws close on nothing) is tried again
+        # shifted across the part (yaw + 90 deg): 0, +step, -step, +2 step, ... (bag_tries in all), the step
+        # at most what the open jaws cover minus 1 cm so the tries overlap (ik.bag_shifts). The position of a
+        # soft bag is only known roughly, the part (the gathered mouth / handle roots) is soft and safe to touch.
         across = np.array([-math.sin(obj.yaw), math.cos(obj.yaw)])
-        step, tries = p('bag_try_step'), max(1, int(p('bag_tries')))
-        shifts = [0.0] + [s * k * step for k in range(1, tries) for s in (1, -1)][:tries - 1]
+        shifts = bag_shifts(obj.size[1], p('bag_try_step'), max(1, int(p('bag_tries'))))
         miss_below = p('bag_miss_below')
         err = None
         for i, d in enumerate(shifts):
             part = Box(obj.x + d * across[0], obj.y + d * across[1], obj.yaw, obj.size)
             try:
-                plan = self.planner.plan_pick(part, self.joints or None, 'top')
+                plan = self.planner.plan_pick(part, self.joints or None, 'top', wide=True)
                 hang = float(plan['grasp_centre'][2] - self.table_z)
                 carry = self.planner.plan_carry(plan, hang, math.radians(p('bag_carry_side')),
                                                 p('bag_bottom_min'))
@@ -828,7 +845,8 @@ class PickPlace(Node):
         self.progress(4, n, 'grasp', 'หนีบ...')
         r = self.gripper(0.0, 'หนีบ')
         miss = plan.get('miss_below', 0.05)
-        self.get_logger().info(f'grip: position {r.position:.3f} rad, effort {r.effort:.0f}, '
+        self.grip_reading = (float(r.position), float(r.effort))
+        self.get_logger().info(f'grip: position {r.position:.3f} rad, load {r.effort:.1f} %, '
                                f'reached {r.reached_goal}, stalled {r.stalled}')
         if miss is None:
             self.say('ของบาง (ผนังถุง/หูหิ้ว): ก้ามหุบเกือบสุดเสมอ บอกไม่ได้ว่าหนีบโดน — ยกขึ้นต่อ')
@@ -837,6 +855,7 @@ class PickPlace(Node):
             self.gripper(plan['jaw_open'], 'อ้าก้าม')
             self.line(list(reversed(s['approach'][:-1])) + [s['pre']], 'ถอยขึ้น')
             raise Failed('จับพลาด: ลองเลื่อนกล่องสีฟ้าให้ตรงของจริง หรือเช็กขนาด', 'MISSED')
+        self.grasped = plan
         self.attach(obj, top_part=0.04 if 'hang' in plan else None)
         self.attached = True
         self.progress(5, n, 'lift', 'ยกขึ้น...')
@@ -863,7 +882,7 @@ class PickPlace(Node):
         obj.x, obj.y, obj.yaw = float(plan['place_centre'][0]), float(plan['place_centre'][1]), plan['final_yaw']
         self.detach_to(obj)
         self.attached = False
-        self.holding = None
+        self.holding = self.grasped = None
         self.make_markers()
         self.request_map()
         self.progress(first + 2, n, 'retreat', 'ถอยออกแล้วกลับท่า ready...')
@@ -961,10 +980,12 @@ class PickPlace(Node):
             raise Failed('object_size ต้องเป็น [ลึก, กว้าง, สูง] เมตร (0..0.3)', 'FAILED')
         return Box(x, y, yaw, size)
 
-    def finish(self, handle, result, res):
+    def finish(self, handle, result, res, grip=(math.nan, math.nan)):
         code, msg, detail = res
         result.success = code == 'SUCCESS'
         result.error_code, result.message = code, msg
+        if hasattr(result, 'gripper_pos'):     # PickBag: (gripper rad, load %) of the last grasp
+            result.gripper_pos, result.gripper_load = grip
         self.get_logger().info(f'API {self.feedback_name(handle)} -> {code}: {detail}')
         if code == 'STOPPED' and handle.is_cancel_requested:
             handle.canceled()
@@ -985,7 +1006,8 @@ class PickPlace(Node):
         except (Failed, PlanError) as exc:
             code = getattr(exc, 'code', 'FAILED')
             return self.finish(handle, result, (code, MESSAGES.get(code, MESSAGES['FAILED']), str(exc)))
-        return self.finish(handle, result, self.run_task(name, fn, handle))
+        res = self.run_task(name, fn, handle)
+        return self.finish(handle, result, res, self.grip_reading)
 
     def exec_pick(self, handle):
         return self.api_task('pick', handle, Pick.Result(), lambda g: (
@@ -1069,6 +1091,8 @@ class PickPlace(Node):
         st.holding = self.holding is not None
         st.task, st.step = self.task, self.step
         st.last_error_code, st.last_message = self.last
+        st.gripper_pos = float(self.joints.get('gripper', math.nan))
+        st.gripper_load = gripper_load(self.driver_status)
         if time.monotonic() - self.driver_seen > 3.0:
             st.state = 'no_arm'
         elif st.fault:

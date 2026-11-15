@@ -54,6 +54,14 @@ def jaw_for_gap(gap):
     return (gap - 0.016) / 0.066
 
 
+def bag_shifts(thickness, step, tries):
+    """Grasp-try offsets across a bag part (m): 0, +s, -s, +2s, ... (`tries` in all). With the jaws open
+    fully (jaw_gap(JAW_G_MAX), 7.5 cm) a part `thickness` thick fits anywhere within the gap minus its
+    thickness; s is `step` but at most that minus 1 cm, so neighbouring tries overlap by 1 cm or more."""
+    s = max(0.0, min(step, jaw_gap(JAW_G_MAX) - thickness - 0.01))
+    return [0.0] + [sign * k * s for k in range(1, tries) for sign in (1, -1)][:tries - 1]
+
+
 # ----------------------------------------------------------------------------------- forward kin.
 def _rpy(r, p, y):
     cr, sr, cp, sp, cy, sy = math.cos(r), math.sin(r), math.cos(p), math.sin(p), math.cos(y), math.sin(y)
@@ -356,8 +364,9 @@ class GraspPlanner:
             return [p for p in self.PITCHES if p > self.NEAR_DOWN]
         raise PlanError(f'grasp_mode ไม่รู้จัก: {mode!r} (ใช้ auto / top / side)', 9, 'FAILED')
 
-    def picks(self, obj, current=None, mode='auto', errors=None, target=None):
-        """All fully checked ways to pick `obj`, best first (generator)."""
+    def picks(self, obj, current=None, mode='auto', errors=None, target=None, wide=False):
+        """All fully checked ways to pick `obj`, best first (generator). wide: the jaws open fully
+        (JAW_G_MAX) instead of the object plus the margins (a bag part whose place is known only roughly)."""
         k = self.k
         errors = [] if errors is None else errors
         prefer = (current or {}).get('wrist_roll', 0.0)
@@ -378,8 +387,8 @@ class GraspPlanner:
                             f'ของกว้าง {extent * 100:.1f} ซม. เกินก้าม (สูงสุด {MAX_OBJECT * 100:.1f})', 1))
                         continue
                     try:
-                        yield self._pick_part(obj, pitch, branch, centre, close_dir, extent, opening_for(extent),
-                                              prefer)
+                        gap = jaw_gap(JAW_G_MAX) if wide else opening_for(extent)
+                        yield self._pick_part(obj, pitch, branch, centre, close_dir, extent, gap, prefer)
                     except PlanError as exc:
                         errors.append(exc)
 
@@ -391,10 +400,10 @@ class GraspPlanner:
     def _join(held, place):
         return {**held, **place, 'steps': {**held['steps'], **place['steps']}}
 
-    def plan_pick(self, obj, current=None, mode='auto'):
-        """Pick only (Pick action / voice 'carry')."""
+    def plan_pick(self, obj, current=None, mode='auto', wide=False):
+        """Pick only (Pick action / voice 'carry'; wide: see picks)."""
         errors = []
-        for held in self.picks(obj, current, mode, errors):
+        for held in self.picks(obj, current, mode, errors, wide=wide):
             return held
         raise self._best(errors)
 

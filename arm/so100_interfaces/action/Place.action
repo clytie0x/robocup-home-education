@@ -4,7 +4,7 @@
 geometry_msgs/PoseStamped target_pose
 ---
 bool success
-string error_code           # SUCCESS UNREACHABLE NOT_HOLDING COLLISION BUSY HOT STOPPED FAILED
+string error_code           # SUCCESS UNREACHABLE NOT_HOLDING COLLISION BUSY HOT STOPPED REPLACED FAILED
 string message
 ---
 string step

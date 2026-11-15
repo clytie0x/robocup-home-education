@@ -10,3 +10,5 @@ string task             # running task: "pick" "place" "pick_place" "home" "rest
 string step             # current step of that task
 string last_error_code  # result of the last task (SUCCESS, UNREACHABLE, ...)
 string last_message
+float32 gripper_pos     # rad, gripper angle now (larger = wider open)
+float32 gripper_load    # %, gripper servo load from so100/status (1 Hz); NaN = no reading

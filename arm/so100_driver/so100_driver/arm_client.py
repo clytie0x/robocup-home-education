@@ -32,7 +32,7 @@ from so100_interfaces.action import Home, Pick, PickBag, PickPlace, Place, Rest
 from so100_interfaces.msg import ArmState
 
 PAN_AXIS = (0.0, -0.0452)      # arm pan axis in the base frame (URDF); "forward" = base -y
-FLOOR_Z = -0.31                # floor below the arm base with the arm on the robot (launch floor_z)
+FLOOR_Z = -0.331               # floor below the arm base with the arm on the robot (launch floor_z)
 
 
 def user_xy(forward, left):
@@ -147,7 +147,7 @@ def main():
       place FWD LEFT
       pick_place FWD LEFT FWD2 LEFT2 --size D W H
       pick_bag FWD LEFT TOP [--floor Z] [--along DEG] [--thick M]
-          TOP = height of the bag's top above the floor (floor default -0.31)
+          TOP = height of the bag's top above the floor (floor default -0.331)
           --along: direction the gripped part runs, deg from straight ahead towards the left
                    (0 = a ridge running away from the robot, 90 = across the robot's front; default 90)
           --thick: how wide the jaws must take it (m, default 0.02; 0.04 = open wide for a rough position)

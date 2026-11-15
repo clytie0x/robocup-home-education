@@ -142,8 +142,12 @@ def generate_launch_description():
         DeclareLaunchArgument('mount', default_value='table', choices=['table', 'robot'],
                               description='robot = arm on the robot top deck: picks from the floor (floor_z), '
                                           'robot body (deck) kept clear, /arm/pick_bag'),
-        DeclareLaunchArgument('floor_z', default_value='-0.31',
-                              description='floor below the arm base (m): deck 24.2 cm + platform 6.8 cm, 2026-11-14'),
+        # -0.331: on the robot the real arm sits 0.026 m higher than its model (z_offset, measured 1.9 to 3.4 cm;
+        # base/docs/floor-pick.md "Frames"), so with the base 0.305 m above the floor the floor is 0.331 m below
+        # the base in the arm frame. Tape alone (2026-11-14): deck 24.2 cm + platform 6.8 cm = 0.31.
+        DeclareLaunchArgument('floor_z', default_value='-0.331',
+                              description='floor below the arm base in the arm frame (m), mount:=robot: base_z 0.305 '
+                                          '+ z_offset 0.026 (base/docs/floor-pick.md, Frames)'),
         DeclareLaunchArgument('deck', default_value='0.18,0.22,0.18,0.22',
                               description='deck edges from the pan axis, m: front,back,left,right (back is a guess)'),
         DeclareLaunchArgument('deck_z', default_value='-0.068', description='deck top below the arm base (m)'),

@@ -6,7 +6,7 @@ geometry_msgs/PoseStamped target_pose
 string grasp_mode           # "auto" / "top" / "side"
 ---
 bool success
-string error_code           # SUCCESS UNREACHABLE TOO_WIDE MISSED COLLISION BUSY HOLDING HOT STOPPED FAILED
+string error_code           # SUCCESS UNREACHABLE TOO_WIDE MISSED COLLISION BUSY HOLDING HOT STOPPED REPLACED FAILED
 string message
 ---
 string step

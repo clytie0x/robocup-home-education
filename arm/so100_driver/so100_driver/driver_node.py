@@ -9,6 +9,14 @@ Services    /so100/enable  (std_srvs/SetBool)  torque on (holds current pose) / 
             /so100/stop    (std_srvs/Trigger)  cancel motion, hold where it is
 
 Torque starts OFF; any command (trajectory, gripper, joint_command) turns it on at the current pose.
+While a servo is hot every command is refused except opening the gripper. A fault holds the arm joints
+where they are; the gripper keeps its goal (a held bag stays squeezed).
+
+One commander at a time: while an arm trajectory runs, a goal from another commander is answered with
+error_string "arm busy: another program has it" and the running move goes on. The commander is the goal's
+trajectory.header.frame_id (rclpy does not tell which client sent a goal): pick_place_node sends
+"so100_pick_place" and always may take the arm, MoveIt sends its planning frame ("base"), most scripts "".
+A trajectory's error_code says why it ended, as a value (task_rules: HOT, REPLACED, STOPPED, BUSY, ...).
 """
 import math
 import threading
@@ -28,6 +36,10 @@ from std_srvs.srv import SetBool, Trigger
 from .calib import ARM_JOINTS, DEFAULT_PATH, JOINTS, Calibration
 from .hardware import RealArm, SimArm
 from .motion import Motion, Trajectory, ids_to_names, names_to_ids
+from .task_rules import (ARM_BUSY, ARM_FAULT, ARM_HOT, ARM_REPLACED, ARM_STOPPED, BUSY_TEXT,
+                         GOAL_TOLERANCE_VIOLATED, PATH_TOLERANCE_VIOLATED, allowed_while_hot, may_take_arm)
+
+END_TEXT = {ARM_REPLACED: 'replaced by another command', ARM_STOPPED: 'stopped (so100/stop or torque off)'}
 
 
 def urdf_limits(urdf_xml):
@@ -96,6 +108,7 @@ class Driver(Node):
         self.health = {}
         self.read_errors = 0
         self.grip = None   # active gripper goal state
+        self.running = None  # (trajectory, commander) of the arm goal exec_traj follows now
         self.hot_count = 0
         self.last_errors = {}
         self.max_temp = p('max_temp', 60).value
@@ -132,14 +145,15 @@ class Driver(Node):
             except Exception as exc:  # noqa: BLE001 - one lost packet must not kill the arm
                 self.read_errors += 1
                 if self.read_errors == 10:
-                    self.set_fault(f'lost contact with servos: {exc}')
+                    self.set_fault(f'lost contact with servos: {exc}', ARM_FAULT)
                 return
             if self.enabled and self.fault is None:
+                traj = self.motion.traj
                 goals = self.motion.step(now, self.present, dt)
                 if self.motion.fault:
-                    self.set_fault(self.motion.fault)
+                    self.set_fault(self.motion.fault, PATH_TOLERANCE_VIOLATED, traj)
                     self.motion.fault = None
-                    goals = {n: float(self.present[n]) for n in JOINTS}
+                    goals = self.motion.fault_goals(self.present)   # arm where it is, the gripper squeezing
                 speeds = None if self.fault else names_to_ids(self.motion.speeds)
                 self.arm.write_goals(names_to_ids(goals), speeds)
                 self.update_grip(now)
@@ -177,7 +191,7 @@ class Driver(Node):
         if hot and self.hot_count == 1:
             self.get_logger().warn(f'servo {hot} reads {max(temps)}C (checking again)')
         if self.hot_count >= 3 and self.enabled and self.fault is None:
-            self.set_fault(f'servo {hot} temperature {max(temps)}C too high, letting it cool')
+            self.set_fault(f'servo {hot} temperature {max(temps)}C too high, letting it cool', ARM_HOT)
         # Servo error bits, and torque the servo switched off by itself (built-in overload protection).
         errors = {i: [name for bit, name in self.STATUS_BITS.items() if h.get('status', 0) >> bit & 1]
                   for i, h in good.items()}
@@ -190,17 +204,27 @@ class Driver(Node):
         if dropped and self.fault is None:
             detail = f' {errors}' if errors else ''
             self.set_fault(f'servo {dropped} switched its torque OFF by itself{detail} '
-                           '(overload/heat protection). Support the arm; the next command re-enables it.')
+                           '(overload/heat protection). Support the arm; the next command re-enables it.',
+                           ARM_FAULT)
         txt = (f'torque={"ON" if self.enabled else "OFF"} voltage={min(volts):.1f}-{max(volts):.1f}V '
                f'temp_max={max(temps)}C max_lag={lag:.1f}deg '
                f'fault={self.fault or "none"} '
                f'load%={[round(self.health[i]["load"]) for i in sorted(self.health)]}')
         self.status_pub.publish(String(data=txt))
 
-    def set_fault(self, reason):
+    def set_fault(self, reason, code, traj=None):
+        """code: the error_code a running arm goal ends with (task_rules); traj: that goal's trajectory
+        when the motion core already let go of it."""
+        self.end_traj(code, traj)
         self.fault = reason
-        self.motion.hold(self.present)
+        self.motion.hold(self.present, keep_gripper=True)   # hold the arm joints, the jaws keep squeezing
         self.get_logger().error(reason)
+
+    def end_traj(self, code, traj=None):
+        """Note why the running trajectory ends (the first reason counts); its exec_traj reports it."""
+        t = traj if traj is not None else self.motion.traj
+        if t is not None and t.end is None:
+            t.end = code
 
     def on_params(self, params):
         """Live servo tuning: ros2 param set /so100_driver servo_d "[64,64,64,32,32,32]"."""
@@ -222,10 +246,11 @@ class Driver(Node):
         return SetParametersResult(successful=True)
 
     # ------------------------------------------------------------ helpers
-    def ensure_enabled(self):
-        """Torque on at the current pose. Raises RuntimeError (command refused) while a servo is hot."""
+    def ensure_enabled(self, allow_hot=False):
+        """Torque on at the current pose. Raises RuntimeError (command refused) while a servo is hot,
+        unless allow_hot (opening the gripper: it lowers the load)."""
         with self.lock:
-            if self.hot_count > 0:
+            if self.hot_count > 0 and not allow_hot:
                 hot = {i: h['temp'] for i, h in self.health.items() if h['temp'] >= self.max_temp}
                 raise RuntimeError(f'servo too hot {hot} C: wait until it cools below {self.max_temp} C')
             if self.fault:
@@ -251,6 +276,7 @@ class Driver(Node):
                     res.success, res.message = False, str(exc)
                     return res
             else:
+                self.end_traj(ARM_STOPPED)
                 self.motion.hold(self.present)
                 self.grip = None
                 self.arm.set_torque(False)
@@ -260,6 +286,7 @@ class Driver(Node):
 
     def on_stop(self, _req, res):
         with self.lock:
+            self.end_traj(ARM_STOPPED)
             self.motion.freeze()
             self.grip = None
         res.success, res.message = True, 'holding current pose'
@@ -281,6 +308,7 @@ class Driver(Node):
             self.get_logger().warn(str(exc), throttle_duration_sec=2.0)
             return
         with self.lock:
+            self.end_traj(ARM_REPLACED)
             self.motion.traj = None
             for n in self.cmd_live & set(cmd):
                 self.motion.set_target(n, cmd[n])
@@ -296,17 +324,24 @@ class Driver(Node):
     def exec_traj(self, handle):
         jt = handle.request.trajectory
         names = list(jt.joint_names)
+        who = jt.header.frame_id     # the commander (module docstring)
         pts = [(p.time_from_start.sec + p.time_from_start.nanosec * 1e-9, list(p.positions)) for p in jt.points]
         result = FollowJointTrajectory.Result()
-        try:
-            self.ensure_enabled()
-        except RuntimeError as exc:
-            handle.abort()
-            result.error_code = result.INVALID_GOAL
-            result.error_string = str(exc)
-            self.get_logger().error(result.error_string)
-            return result
         with self.lock:
+            running = self.running[1] if self.running is not None else None
+            if not may_take_arm(running, who):
+                handle.abort()
+                result.error_code, result.error_string = ARM_BUSY, BUSY_TEXT
+                self.get_logger().warn(f'{BUSY_TEXT}: refused a goal from {who!r} while {running!r} moves the arm')
+                return result
+            try:
+                self.ensure_enabled()
+            except RuntimeError as exc:
+                handle.abort()
+                result.error_code = ARM_HOT
+                result.error_string = str(exc)
+                self.get_logger().error(result.error_string)
+                return result
             if not pts or pts[0][0] > 0.0:
                 # Start from where the arm really is, so the first segment is interpolated too.
                 pts.insert(0, (0.0, [self.calib.to_rad(n, self.present[n]) for n in names]))
@@ -317,17 +352,27 @@ class Driver(Node):
             if traj.retimed:
                 self.get_logger().info('no-creep retime: ' + ', '.join(
                     f'{n} {math.degrees(abs(b - a)):.1f}deg' for n, (a, b, _, _) in traj.retimed.items()))
+            self.end_traj(ARM_REPLACED)
             self.motion.set_trajectory(traj)
+            self.running = (traj, who)
+        try:
+            return self.follow(handle, traj, names, result)
+        finally:
+            with self.lock:
+                if self.running is not None and self.running[0] is traj:
+                    self.running = None
+
+    def follow(self, handle, traj, names, result):
         tolerance = 0.06  # rad (~3.4 deg) final error accepted
         deadline = traj.start + traj.duration + 2.0
         while rclpy.ok():
             time.sleep(0.02)
             with self.lock:
                 if self.motion.traj is not traj:
-                    reason = self.fault or 'stopped / replaced by another command'
+                    code = traj.end if traj.end is not None else ARM_STOPPED
                     handle.abort()
-                    result.error_code = result.PATH_TOLERANCE_VIOLATED
-                    result.error_string = reason
+                    result.error_code = code
+                    result.error_string = END_TEXT.get(code) or self.fault or 'stopped'
                     return result
                 if handle.is_cancel_requested:
                     self.motion.freeze()
@@ -347,7 +392,7 @@ class Driver(Node):
                     if now > deadline:
                         worst = max(err, key=err.get)
                         handle.abort()
-                        result.error_code = result.GOAL_TOLERANCE_VIOLATED
+                        result.error_code = GOAL_TOLERANCE_VIOLATED
                         result.error_string = f'{worst} stopped {math.degrees(err[worst]):.1f} deg short'
                         self.get_logger().warn(result.error_string)
                         return result
@@ -358,7 +403,9 @@ class Driver(Node):
         target = handle.request.command.position
         result = GripperCommand.Result()
         try:
-            self.ensure_enabled()
+            with self.lock:
+                opening = allowed_while_hot(target, self.calib.to_rad('gripper', self.present['gripper']))
+            self.ensure_enabled(allow_hot=opening)
         except RuntimeError as exc:
             self.get_logger().error(str(exc))
             handle.abort()
@@ -383,14 +430,23 @@ class Driver(Node):
                 result.effort = abs(self.health.get(6, {}).get('load', 0.0))
                 if err < 0.05:
                     result.reached_goal = True
+                    result.effort = self.grip_load()
                     handle.succeed()
                     return result
                 if g['stalled'] or time.monotonic() - start > 5.0:
                     # Holding something: keep squeezing with the limited gripper torque.
                     result.stalled = True
+                    result.effort = self.grip_load()
                     handle.succeed()
                     return result
         return result
+
+    def grip_load(self):
+        """Gripper load % read now (call with the lock held); the 1 Hz health value if the read fails."""
+        try:
+            return float(self.arm.gripper_load())
+        except Exception:  # noqa: BLE001 - one lost packet must not fail the grasp
+            return abs(self.health.get(6, {}).get('load', 0.0))
 
     def update_grip(self, now):
         g = self.grip

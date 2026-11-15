@@ -47,6 +47,7 @@ class Trajectory:
             raise ValueError('empty trajectory')
         self.names, self.points, self.start = list(names), points, start
         self.duration = points[-1][0]
+        self.end = None          # why the driver let go of it (task_rules error code), None = still runs
         self.retimed = {}
         if min_speed > 0 and self.duration > 0:
             for k, n in enumerate(self.names):
@@ -110,13 +111,26 @@ class Motion:
         lo, hi = self.limits(name)
         return min(max(rad, lo), hi)
 
-    def hold(self, present_raw):
-        """Stop everything and hold the measured pose (used at torque-on and after faults)."""
+    def hold(self, present_raw, keep_gripper=False):
+        """Stop everything and hold the measured pose (used at torque-on and after faults).
+        keep_gripper (faults): the gripper keeps its goal, so jaws squeezing a bag go on squeezing."""
+        grip = None
+        if keep_gripper and 'gripper' in self.goal:
+            grip = self.goal['gripper'], self.target.get('gripper', self.goal['gripper'])
         self.traj = None
         self.goal = {n: float(present_raw[n]) for n in JOINTS}
         self.target = dict(self.goal)
+        if grip:
+            self.goal['gripper'], self.target['gripper'] = grip
         self.offset = {n: 0.0 for n in JOINTS}
         self._lag_since = None
+
+    def fault_goals(self, present_raw):
+        """Goals to send once on a fault: the arm joints where they are, the gripper its kept goal."""
+        goals = {n: float(present_raw[n]) for n in JOINTS}
+        if 'gripper' in self.goal:
+            goals['gripper'] = float(self.goal['gripper'])
+        return goals
 
     def freeze(self):
         """Stop moving: keep the current reference (and sag compensation) where it is."""
@@ -217,7 +231,7 @@ class Motion:
             self.fault = (f'{bad} cannot reach its goal (off by '
                           f'{math.degrees(abs(present_raw[bad] - self.goal[bad]) / COUNTS_PER_RAD):.0f} deg): '
                           'blocked/collision, overloaded or power too weak. Holding current pose.')
-            self.hold(present_raw)
+            self.hold(present_raw, keep_gripper=True)
 
     def joint_error(self, present_raw, names):
         return {n: abs(present_raw[n] - self.target.get(n, present_raw[n])) / COUNTS_PER_RAD for n in names}

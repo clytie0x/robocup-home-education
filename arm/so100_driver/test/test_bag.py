@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))
-from so100_driver.ik import Box, GraspPlanner, PlanError, deck_box  # noqa: E402
+from so100_driver.ik import JAW_G_MAX, Box, GraspPlanner, PlanError, bag_shifts, deck_box, jaw_gap  # noqa: E402
 from so100_driver.tabletop import find_objects, grasp_top  # noqa: E402
 from test_ik import kin  # noqa: E402
 
@@ -116,6 +116,42 @@ class BagPlan(unittest.TestCase):
         # put down: the bag bottom ends up just above the floor
         down = self.pl.held_point(place['steps']['lower'][-1], held)
         self.assertAlmostEqual(down[2] - hang - FLOOR, 0.005, delta=0.004)
+
+    def test_bag_jaws_open_fully_and_still_carry(self):
+        obj = self.part(0.28, 0.0, 0.27)
+        held = self.pl.plan_pick(obj, None, 'top', wide=True)
+        self.assertAlmostEqual(held['jaw_open'], JAW_G_MAX, places=6)
+        self.assertAlmostEqual(held['gap'], jaw_gap(JAW_G_MAX), places=6)       # 7.5 cm, not thickness + 2.4
+        self.assertLess(self.pl.plan_pick(obj, None, 'top')['gap'], 0.05)        # other picks unchanged
+        hang = held['grasp_centre'][2] - FLOOR
+        held['carry'] = self.pl.plan_carry(held, hang, math.pi / 2, 0.36)
+        place = self.pl.plan_bag_put(obj, held, self.part(0.28, 0.06, 0.27))
+        self.assertTrue(self.pl.plan_bag_place(held, place, hang))
+
+    def test_wide_jaws_reach_as_much_in_front(self):
+        ok = 0
+        for fwd in (0.24, 0.27, 0.30):
+            for top in (0.22, 0.27, 0.32):
+                try:
+                    held = self.pl.plan_pick(self.part(fwd, 0.0, top), None, 'top', wide=True)
+                    self.pl.plan_carry(held, held['grasp_centre'][2] - FLOOR, math.pi / 2, 0.36)
+                    ok += 1
+                except PlanError:
+                    pass
+        self.assertGreaterEqual(ok, 8)
+
+    def test_retries_overlap(self):
+        thick = 0.02
+        shifts = bag_shifts(thick, 0.05, 3)
+        cover = jaw_gap(JAW_G_MAX) - thick          # where a 2 cm part fits between the open jaws: 5.5 cm
+        self.assertEqual(len(shifts), 3)
+        self.assertEqual(shifts[0], 0.0)
+        self.assertAlmostEqual(shifts[1], -shifts[2])
+        xs = sorted(shifts)
+        for a, b in zip(xs, xs[1:]):
+            self.assertLessEqual(b - a, cover - 0.01 + 1e-9)    # neighbouring tries overlap by 1 cm or more
+        self.assertEqual(bag_shifts(thick, 0.03, 3), [0.0, 0.03, -0.03])   # a smaller step is kept
+        self.assertEqual(bag_shifts(thick, 0.05, 1), [0.0])
 
     def test_body_blocks_reaching_under_the_deck(self):
         # 15 cm in front of the axis is above the deck: the arm cannot go down to a 22 cm top there

@@ -7,7 +7,7 @@ float32[3] object_size      # [depth (own x), width (own y), height] in metres
 string grasp_mode           # "auto" (default, ""), "top" or "side"
 ---
 bool success
-string error_code           # SUCCESS UNREACHABLE TOO_WIDE MISSED COLLISION BUSY HOLDING HOT STOPPED FAILED
+string error_code           # SUCCESS UNREACHABLE TOO_WIDE MISSED COLLISION BUSY HOLDING HOT STOPPED REPLACED FAILED
 string message              # English, can be spoken
 ---
 string step                 # e.g. "approach"
