@@ -16,6 +16,12 @@ restarts the console after 2 s. The unit and `tools/run_console.sh` use the same
 (`/tmp/hmc-console.lock`), so a copy started by the crontab script and the service can never
 run together.
 
+`deploy.sh --restart` works with either: on the Pi it ends the console (`.venv/bin/python -X
+faulthandler -u console.py`, the same command line in both) and the keeper starts it again; on
+the Jetson it runs `systemctl --user restart hmc-agent.service` when that unit is enabled, else
+it starts a nohup copy as before. Both units restart without a start limit
+(`StartLimitIntervalSec=0`).
+
 ## Install
 
 `deploy.sh` does not carry this folder (it deploys `base/pi` and `base/jetson` only). Copy

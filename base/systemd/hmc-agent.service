@@ -2,6 +2,8 @@
 Description=Jetson agent for the robot console (port 8090)
 Wants=network-online.target
 After=network-online.target
+# Restart=always for good: without this, 5 starts in 10 s (a held lock, a busy port) stop the unit for good.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
