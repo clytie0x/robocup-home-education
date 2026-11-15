@@ -103,27 +103,30 @@ def descent_loads(status):
     return tuple(float(loads[i - 1]) for i in PROBE_SERVOS) if len(loads) == 6 else nan
 
 
-def probe_contact(samples, base_steps, load_jump, error_jump):
+def probe_contact(samples, base_steps, load_jump, error_jump, skip=0):
     """First probe step (index into samples) at which the closed jaws touched something, or None.
     samples: one (loads, errors) per step, read with the arm standing still at the end of the step: load %
-    and tracking error (rad, |commanded - present|) of each PROBE_JOINT. The first base_steps steps are in
-    free air (the probe starts above the tallest bag); their mean per joint is the baseline. Contact: a
-    joint's load is more than load_jump % away from its baseline (either sign: a push from below takes weight
-    off a joint), or its tracking error is more than error_jump rad above its baseline. A threshold <= 0
-    switches that check off. NaN readings never count; the baseline steps themselves are not judged."""
-    base_steps = max(1, int(base_steps))
-    if len(samples) <= base_steps:
+    and tracking error (rad, |commanded - present|) of each PROBE_JOINT. The first `skip` steps are the arm
+    still settling after the MoveIt move to the start (real run 2026-11-15: shoulder 13, 12, then 2-4 %); the
+    next base_steps steps are in free air (the probe starts above the tallest bag) and their mean per joint is
+    the baseline. Contact: a joint's load is more than load_jump % away from its baseline (either sign: a push
+    from below takes weight off a joint), or its tracking error is more than error_jump rad above its baseline.
+    A threshold <= 0 switches that check off. NaN readings never count; skipped and baseline steps are not
+    judged."""
+    skip, base_steps = max(0, int(skip)), max(1, int(base_steps))
+    first = skip + base_steps
+    if len(samples) <= first:
         return None
 
     def baseline(kind):
         out = []
         for j in range(len(samples[0][kind])):
-            vals = [s[kind][j] for s in samples[:base_steps] if math.isfinite(s[kind][j])]
+            vals = [s[kind][j] for s in samples[skip:first] if math.isfinite(s[kind][j])]
             out.append(sum(vals) / len(vals) if vals else math.nan)
         return out
 
     base_load, base_err = baseline(0), baseline(1)
-    for i in range(base_steps, len(samples)):
+    for i in range(first, len(samples)):
         loads, errors = samples[i]
         for j in range(len(loads)):
             if load_jump > 0 and abs(loads[j] - base_load[j]) > load_jump:
@@ -131,3 +134,12 @@ def probe_contact(samples, base_steps, load_jump, error_jump):
             if error_jump > 0 and errors[j] - base_err[j] > error_jump:
                 return i
     return None
+
+
+def held_by_weight(free, loaded, load_jump):
+    """Did a bag grasp whose jaws read closed (a thin rim) lift the bag? free / loaded: PROBE_JOINTS loads %
+    at the same pose, jaws empty before going down and closed after coming back up. Held = some joint's load
+    changed by more than load_jump % (the bag's weight on its lever). NaN never counts, load_jump <= 0 = off.
+    Returns (held, per-joint change)."""
+    change = tuple(abs(b - a) for a, b in zip(free, loaded))
+    return load_jump > 0 and any(math.isfinite(c) and c > load_jump for c in change), change

@@ -60,8 +60,8 @@ from so100_interfaces.msg import ArmState
 
 from .calib import Calibration
 from .ik import ARM, GRASP_Y, TIP_Y, Box, GraspPlanner, Kinematics, PlanError, bag_shifts, deck_box
-from .task_rules import (PICK_PLACE, PROBE_JOINTS, Failed, api_code, descent_loads, gripper_load, probe_contact,
-                         still_held, top_unknown)
+from .task_rules import (PICK_PLACE, PROBE_JOINTS, Failed, api_code, descent_loads, gripper_load, held_by_weight,
+                         probe_contact, still_held, top_unknown)
 
 READY = {'shoulder_pan': 0.0, 'shoulder_lift': 1.2, 'elbow_flex': -1.2, 'wrist_flex': 0.3, 'wrist_roll': 0.0}
 REST = {'shoulder_pan': 0.0, 'shoulder_lift': 0.04, 'elbow_flex': -0.04, 'wrist_flex': 0.0, 'wrist_roll': 0.0}  # SRDF 'rest'
@@ -127,7 +127,10 @@ class PickPlace(Node):
         self.declare_parameter('bag_probe_bottom', 0.12)  # m above the floor: the tips go no lower
         self.declare_parameter('bag_probe_step', 0.01)    # m per step = the most it goes into a bag before a reading
         self.declare_parameter('bag_probe_speed', 0.02)   # m/s on a probe step
-        self.declare_parameter('bag_probe_base_steps', 3)  # first steps (free air): their readings are the baseline
+        # first steps not used: the arm still settles after the MoveIt move (real run 2026-11-15: shoulder +13,
+        # +12, then +2..+4 %)
+        self.declare_parameter('bag_probe_settle_steps', 2)
+        self.declare_parameter('bag_probe_base_steps', 3)  # next steps (free air): their readings are the baseline
         # % change of the shoulder_lift / elbow_flex load = contact (0 = off). 8 % of the 12 V STS3215's 30 kg.cm
         # would be about 1 N up on the tips at the shoulder's 25 cm lever, if load % is that share of the torque.
         self.declare_parameter('bag_probe_load_jump', 8.0)
@@ -135,6 +138,17 @@ class PickPlace(Node):
         # at 0.06 rad short at the end or 0.14 rad behind on the way (follow_error).
         self.declare_parameter('bag_probe_error_jump', 0.02)
         self.declare_parameter('bag_probe_backoff', 0.02)  # m back up after the contact
+        # finger tips this far below a probed top (the bag grasp uses ik.GRIP_DEPTH = 2.8 cm, fingers ~3 cm long)
+        self.declare_parameter('bag_probe_grip_depth', 0.028)
+        # Held by weight: a bag grasp whose jaws read closed (a thin paper rim reads like an empty close,
+        # 0.043-0.051 rad on 2026-11-15) goes back up the approach with the jaws closed; if the shoulder_lift /
+        # elbow_flex load there changed by more than this % from the empty-jaws reading at the same pose before
+        # going down, it holds the bag (0 = off, the old miss rule only). First guess: 0.1 kg = 0.98 N at the
+        # approach pose levers (model, 24-34 cm in front: shoulder 21-28.5 cm, elbow 12-18.5 cm) is 0.21-0.28 N.m
+        # = 7-9.5 % shoulder, 4-6 % elbow of the STS3215's 2.94 N.m (30 kg.cm); 0.3 kg three times that. Free air
+        # on 2026-11-15 spread 2-6 % (shoulder), 2-5 % (elbow).
+        self.declare_parameter('bag_weight_load', 5.0)
+        self.declare_parameter('bag_weight_settle_reads', 2)  # status lines (1 Hz) skipped before a weight reading
         p = lambda n: self.get_parameter(n).value
         self.table_z = float(p('table_z'))
         self.sim = bool(p('sim'))
@@ -674,12 +688,13 @@ class PickPlace(Node):
         HOLDING instead of opening the jaws, and /arm/place can put it down). Otherwise forget it."""
         held = self.holding or self.grasped
         pos = self.joints.get('gripper')
-        if held is not None and still_held(pos, held.get('miss_below') or self.MISS_DEFAULT, held.get('jaw_open')):
+        if held is not None and (held.get('by_weight')       # its jaws read closed on a thin rim from the start
+                                 or still_held(pos, held.get('miss_below') or self.MISS_DEFAULT, held.get('jaw_open'))):
             if 'carry' in held and all(n in self.joints for n in ARM):
                 # a bag: the put-down path starts where the arm stopped, not at the carry pose
                 held['carry'] = dict(held['carry'], q={n: float(self.joints[n]) for n in ARM})
             self.holding = held
-            self.say(f'ยังถือของอยู่ (ก้าม {pos:.3f} rad): ไม่ลืม สั่งวางได้')
+            self.say(f'ยังถือของอยู่ (ก้าม {pos if pos is None else round(pos, 3)} rad): ไม่ลืม สั่งวางได้')
             return
         self.release_scene()
 
@@ -792,9 +807,11 @@ class PickPlace(Node):
         obj height NaN (grasp_pose z NaN): the top is found by touch first (probe_bag)."""
         if self.holding:
             raise Failed('ถือของอยู่แล้ว: สั่งวางก่อน', 'HOLDING')
+        probed = False
         if top_unknown(obj.size[2]):
-            obj = self.probe_bag(obj)
+            obj, probed = self.probe_bag(obj), True
         p = lambda n: float(self.get_parameter(n).value)
+        depth = p('bag_probe_grip_depth') if probed else None
         # The jaws open fully (JAW_G_MAX, 7.5 cm) over the part; a miss (jaws close on nothing) is tried again
         # shifted across the part (yaw + 90 deg): 0, +step, -step, +2 step, ... (bag_tries in all), the step
         # at most what the open jaws cover minus 1 cm so the tries overlap (ik.bag_shifts). The position of a
@@ -806,7 +823,7 @@ class PickPlace(Node):
         for i, d in enumerate(shifts):
             part = Box(obj.x + d * across[0], obj.y + d * across[1], obj.yaw, obj.size)
             try:
-                plan = self.planner.plan_pick(part, self.joints or None, 'top', wide=True)
+                plan = self.planner.plan_pick(part, self.joints or None, 'top', wide=True, grip_depth=depth)
                 hang = float(plan['grasp_centre'][2] - self.table_z)
                 carry = self.planner.plan_carry(plan, hang, math.radians(p('bag_carry_side')),
                                                 p('bag_bottom_min'))
@@ -833,7 +850,8 @@ class PickPlace(Node):
         self.progress(6, 6, 'carry', 'ยกถุงไปถือไว้ข้างตัว...')
         self.line(carry['path'], 'ยกถุงไปถือ', p('bag_speed'), self.planner.CARRY_STEP)
         bottom = self.planner.held_point(carry['q'], plan)[2] - hang - self.table_z
-        return f'ถือถุงอยู่ ({plan["mode"]}) ก้นถุงสูงจากพื้นประมาณ {bottom * 100:.0f} ซม.'
+        how = ' ถือด้วยน้ำหนัก ก้ามอ่านว่าหุบ (held by weight, jaws read closed)' if plan.get('by_weight') else ''
+        return f'ถือถุงอยู่ ({plan["mode"]}) ก้นถุงสูงจากพื้นประมาณ {bottom * 100:.0f} ซม.{how}'
 
     PROBE_SETTLE = 0.15   # s the arm stands still after a probe step before a load reading counts
 
@@ -846,13 +864,14 @@ class PickPlace(Node):
         part's top = the measured tip height there. No contact: back up, MISSED. Every step is logged."""
         p = lambda n: float(self.get_parameter(n).value)
         base, step, speed = max(1, int(p('bag_probe_base_steps'))), p('bag_probe_step'), p('bag_probe_speed')
+        skip = max(0, int(p('bag_probe_settle_steps')))
         load_jump, error_jump = p('bag_probe_load_jump'), p('bag_probe_error_jump')
         pr = self.planner.plan_probe(obj.x, obj.y, p('bag_probe_top'), p('bag_probe_bottom'), step,
-                                     self.joints or None, min_steps=base + 1)
+                                     self.joints or None, min_steps=skip + base + 1)
         tips, n = pr['tip_h'], len(pr['tip_h'])
         start_h = tips[0] + step
         self.get_logger().info(f'probe plan: tips {start_h * 100:.0f} -> {tips[-1] * 100:.0f} cm above the floor in '
-                               f'{n} steps, pitch {math.degrees(pr["pitch"]):.0f} deg; base {base} steps, load_jump '
+                               f'{n} steps, pitch {math.degrees(pr["pitch"]):.0f} deg; skip {skip}, base {base} steps, load_jump '
                                f'{load_jump} %, error_jump {error_jump} rad, joints {PROBE_JOINTS}')
         # MoveIt does not know the bag: its column below the start stands in for it on the way there
         self.show_object(Box(obj.x, obj.y, obj.yaw, (obj.size[0], obj.size[1], start_h - 0.02)))
@@ -873,7 +892,7 @@ class PickPlace(Node):
             done += qs
             loads, errors, measured = self.probe_reading(qs[-1], blocked)
             samples.append((loads, errors))
-            hit = probe_contact(samples, base, load_jump, error_jump)
+            hit = probe_contact(samples, base, load_jump, error_jump, skip)
             self.get_logger().info(
                 f'probe {k + 1}/{n}: tip {tip * 100:.1f} cm (measured {measured * 100:.1f}) above the floor, '
                 f'load% {PROBE_JOINTS[0]} {loads[0]:+.0f} {PROBE_JOINTS[1]} {loads[1]:+.0f}, '
@@ -898,23 +917,50 @@ class PickPlace(Node):
         """(PROBE_JOINTS loads %, their tracking errors rad, measured tip height above the floor) with the arm
         standing still PROBE_SETTLE s: waits for the next so100/status line (1 Hz, its loads are read just
         before it is sent). A fault stops the probe, unless the step was blocked (the driver faults then)."""
-        settled = time.monotonic() + self.PROBE_SETTLE
-        end = settled + 2.5
-        while self.driver_seen < settled:
-            if self.cancel_requested:
-                raise Failed('แตะหาความสูงถุง: ถูกสั่งหยุด', 'STOPPED')
-            if time.monotonic() > end:
-                raise Failed('แตะหาความสูงถุง: ไม่ได้ค่าภาระมอเตอร์จาก so100/status', 'FAILED')
-            time.sleep(0.02)
-        fault = self.driver_flags()[1]
-        if fault and not blocked:
-            raise Failed(f'แตะหาความสูงถุง: มอเตอร์ขัดข้อง ({fault})', 'FAILED')
+        self.fresh_status('แตะหาความสูงถุง', self.PROBE_SETTLE, allow_fault=bool(blocked))
         now = dict(self.joints)
         errors = tuple(abs(q_cmd[j] - now[j]) if j in now else math.nan for j in PROBE_JOINTS)
         tip = math.nan
         if all(j in now for j in ARM):
             tip = float(self.kin.gripper_point({j: now[j] for j in ARM}, (0.0, TIP_Y, 0))[2]) - self.table_z
         return descent_loads(self.driver_status), errors, tip
+
+    def fresh_status(self, what, after, allow_fault=False):
+        """Wait for the next so100/status line sent `after` s from now or later (1 Hz, its loads are read just
+        before it is sent). /arm/stop -> STOPPED; a fault -> FAILED unless allow_fault."""
+        settled = time.monotonic() + after
+        end = settled + 2.5
+        while self.driver_seen < settled:
+            if self.cancel_requested:
+                raise Failed(f'{what}: ถูกสั่งหยุด', 'STOPPED')
+            if time.monotonic() > end:
+                raise Failed(f'{what}: ไม่ได้ค่าภาระมอเตอร์จาก so100/status', 'FAILED')
+            time.sleep(0.02)
+        fault = self.driver_flags()[1]
+        if fault and not allow_fault:
+            raise Failed(f'{what}: มอเตอร์ขัดข้อง ({fault})', 'FAILED')
+
+    def weight_loads(self, what):
+        """PROBE_JOINTS loads % with the arm standing still, after bag_weight_settle_reads status lines."""
+        reads = []
+        for _ in range(max(0, int(self.get_parameter('bag_weight_settle_reads').value)) + 1):
+            self.fresh_status(what, self.PROBE_SETTLE)
+            reads.append(descent_loads(self.driver_status))
+        self.get_logger().info(f'weight check {what}: load% {PROBE_JOINTS} readings {reads} | {self.driver_status}')
+        return reads[-1]
+
+    def weigh_bag(self, plan, free, i, n):
+        """The bag jaws closed to a miss reading: go back up the approach to the pre-grasp pose with the jaws
+        closed and compare the loads with `free` (empty jaws, same pose). True = the bag hangs in the jaws."""
+        s = plan['steps']
+        self.progress(i, n, 'weigh', 'ก้ามหุบเกือบสุด: ยกขึ้นดูน้ำหนักถุงก่อน...')
+        self.line(list(reversed(s['approach'][:-1])) + [s['pre']], 'ยกขึ้นดูน้ำหนัก')
+        loaded = self.weight_loads('closed jaws back up')
+        limit = float(self.get_parameter('bag_weight_load').value)
+        held, change = held_by_weight(free, loaded, limit)
+        self.get_logger().info(f'weight check: free {free} -> closed {loaded}, change {change} % (limit {limit}): '
+                               + ('held by weight, jaws read closed' if held else 'nothing held'))
+        return held
 
     def do_pick_place(self, obj, target, mode='auto'):
         if self.holding:
@@ -941,6 +987,9 @@ class PickPlace(Node):
         self.moveit_to(s['pre'], 'ไปเหนือของ')
         self.progress(2, n, 'open', 'อ้าก้าม...')
         self.gripper(plan['jaw_open'], 'อ้าก้าม')
+        free = None          # bag: empty-jaws loads here, to weigh a grasp whose jaws read closed (weigh_bag)
+        if 'hang' in plan and not self.sim and float(self.get_parameter('bag_weight_load').value) > 0:
+            free = self.weight_loads('empty jaws above the bag')
         self.progress(3, n, 'approach', 'ลงไปที่ของ...')
         self.line(s['approach'], 'ลงไปที่ของ')
         self.progress(4, n, 'grasp', 'หนีบ...')
@@ -952,15 +1001,22 @@ class PickPlace(Node):
         if miss is None:
             self.say('ของบาง (ผนังถุง/หูหิ้ว): ก้ามหุบเกือบสุดเสมอ บอกไม่ได้ว่าหนีบโดน — ยกขึ้นต่อ')
         elif not self.sim and (r.reached_goal or r.position < miss):
-            self.say('✘ จับพลาด (ก้ามหุบสุด) — กำลังถอยขึ้น')
-            self.gripper(plan['jaw_open'], 'อ้าก้าม')
-            self.line(list(reversed(s['approach'][:-1])) + [s['pre']], 'ถอยขึ้น')
-            raise Failed('จับพลาด: ลองเลื่อนกล่องสีฟ้าให้ตรงของจริง หรือเช็กขนาด', 'MISSED')
+            if free is None or not self.weigh_bag(plan, free, 4, n):
+                self.say('✘ จับพลาด (ก้ามหุบสุด) — กำลังถอยขึ้น')
+                self.gripper(plan['jaw_open'], 'อ้าก้าม')
+                if free is None:          # (weigh_bag already went back up)
+                    self.line(list(reversed(s['approach'][:-1])) + [s['pre']], 'ถอยขึ้น')
+                raise Failed('จับพลาด: ลองเลื่อนกล่องสีฟ้าให้ตรงของจริง หรือเช็กขนาด', 'MISSED')
+            plan['by_weight'] = True
+            self.say('ก้ามอ่านว่าหุบ แต่ยกถุงขึ้นมาด้วย (น้ำหนักถึง): ถือต่อ')
         self.grasped = plan
         self.attach(obj, top_part=0.04 if 'hang' in plan else None)
         self.attached = True
         self.progress(5, n, 'lift', 'ยกขึ้น...')
-        self.line(s['lift'], 'ยกขึ้น')
+        if plan.get('by_weight'):        # at the pre-grasp pose already: on to the lift's end, where the carry starts
+            self.line(self.planner.joint_path(s['pre'], s['lift'][-1], plan), 'ยกขึ้น', None, self.planner.CARRY_STEP)
+        else:
+            self.line(s['lift'], 'ยกขึ้น')
         if self.on_lifted:
             self.on_lifted()
 

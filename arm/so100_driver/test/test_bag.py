@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))
-from so100_driver.ik import JAW_G_MAX, TIP_Y, Box, GraspPlanner, PlanError, bag_shifts, deck_box, jaw_gap  # noqa: E402
+from so100_driver.ik import GRASP_Y, GRIP_DEPTH, JAW_G_MAX, TIP_Y, Box, GraspPlanner, PlanError, bag_shifts, deck_box, jaw_gap  # noqa: E402
 from so100_driver.tabletop import find_objects, grasp_top  # noqa: E402
 from test_ik import kin  # noqa: E402
 
@@ -169,6 +169,14 @@ class BagPlan(unittest.TestCase):
                 except PlanError:
                     pass
         self.assertGreaterEqual(ok, 8)
+
+    def test_grip_depth_below_a_found_top(self):
+        # the bag grasp puts the tips GRIP_DEPTH (2.8 cm) below the top; a probed top may ask for more
+        obj = self.part(0.28, 0.0, 0.27)
+        for depth, want in ((None, GRIP_DEPTH), (0.028, 0.028), (0.04, 0.04)):
+            held = self.pl.plan_pick(obj, None, 'top', wide=True, grip_depth=depth)
+            tips = held['grasp_centre'][2] - (GRASP_Y - TIP_Y) * math.sin(-held['pitch'])
+            self.assertAlmostEqual(FLOOR + 0.27 - tips, want, delta=0.0015)
 
     def test_probe_goes_straight_down_in_steps(self):
         x, y = self.k.from_user(0.28, 0.0)
