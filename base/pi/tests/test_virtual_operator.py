@@ -348,7 +348,9 @@ class Safety(unittest.TestCase):
         import run_follow
         import safety
         real = room(wall=3.0)
-        sensed, shown, _ = vo.inject(real, [(0.45, 0.09), (0.45, -0.09)], P)  # 0.25 m ahead of the front edge
+        # 0.13 m ahead of the front edge: inside the braking strip at 0.1 m/s (0.163 m with decel 0.14 since
+        # 2026-11-15; the 0.25 m used before was inside only with the old 0.064)
+        sensed, shown, _ = vo.inject(real, [(0.33, 0.09), (0.33, -0.09)], P)
         self.assertGreater(shown, 0)
         self.assertTrue(safety.must_stop(run_follow.scan_points(sensed, P), 0.1, 0.0, P))
         self.assertFalse(safety.must_stop(run_follow.scan_points(real, P), 0.1, 0.0, P))

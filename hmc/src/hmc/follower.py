@@ -28,7 +28,7 @@ VIEW_NEAR, VIEW_FAR, VIEW_HALF_ANGLE = 0.7, 3.0, math.radians(25)
 # Re-identification by look (see appearance.py).
 OPERATOR_LEARN = 20  # frames of the operator's look we learn at the start
 OPERATOR_MATCH = 0.65  # a detection must look at least this much like the operator
-# Pace.
+# Pace. These are the simulation's, set for its 1 m/s base; the real base passes its own (Follower).
 WAIT_GAP = 4.0  # metres; further behind than this, we ask the operator to wait
 GO_ON_GAP = 2.5  # metres; once we are this close again, we ask them to go on
 # Losing the operator while following (Deus ex Machina in the rulebook).
@@ -64,10 +64,17 @@ class Mode(Enum):
 
 class Follower:
     def __init__(self, body, speech, follow_distance: float = navigation.FOLLOW_DISTANCE,
-                 search_again_every: float | None = None):  # fmt: skip
+                 search_again_every: float | None = None, restart_gap: float = 0.0,
+                 wait_gap: float = WAIT_GAP, go_on_gap: float = GO_ON_GAP):  # fmt: skip
         self.body = body
         self.speech = speech
         self.follow_distance = follow_distance
+        # Once stopped at the follow distance, start again only when the operator is this much further.
+        # 0 (the simulation) starts at once; the real base started at 1.31 m and stopped at 1.30 m,
+        # 4.8 to 13.1 start-stops a minute (logs of 2026-11-15), and passes 0.25.
+        self.restart_gap = restart_gap
+        self.standing = False  # stopped at the follow distance, until the operator is past restart_gap
+        self.wait_gap, self.go_on_gap = wait_gap, go_on_gap
         # After asking the operator back, turn on the spot again every this many
         # seconds. None (the simulation) stands still instead. The robot passes 10.0.
         self.search_again_every = search_again_every
@@ -148,22 +155,33 @@ class Follower:
             self.mode = Mode.SEARCH
             # no brake here: one cycle keeps the last command, as the sim always did (byte-identical refactor); the Pi's must_stop covers it
             return
-        near = navigation.follow_step(
-            self.navigator, self.body, self.last_operator_pos,
-            self.shapes(senses), senses.time, dt, self.follow_distance,
-        )  # fmt: skip
+        turning = getattr(self.body, "turn_speed", None)  # the simulation's RobotView has none: as before
+        gap = distance(self.body.pos, self.last_operator_pos)
+        if self.restart_gap > 0 and self.standing and gap <= self.follow_distance + self.restart_gap:
+            near = True  # stopped at the follow distance: stay until they are restart_gap further
+            self.body.brake(dt)
+        else:
+            near = navigation.follow_step(
+                self.navigator, self.body, self.last_operator_pos,
+                self.shapes(senses), senses.time, dt, self.follow_distance,
+            )  # fmt: skip
+        self.standing = near
         if near:
-            # Waiting behind the operator: face them, so the camera keeps them in view.
+            # Waiting behind the operator: face them, so the camera keeps them in view. brake() stops the
+            # turn at once, so go on from the turn so far: from 0 every cycle it only ever reached one step
+            # of turn_accel (0.07 rad/s on the real base, 273 of 319 such cycles on 2026-11-15).
+            if turning is not None:
+                self.body.turn_speed = turning
             self.body.turn_toward(self.last_operator_pos, dt)
 
         # Too far behind (a detour around the crowd): ask the operator to wait for us.
         # Without a path (the operator stands in a door we need) they must go on instead.
         gap = distance(self.body.pos, self.last_operator_pos)
         has_path = bool(self.navigator.path)
-        if not self.asked_to_wait and gap > WAIT_GAP and has_path:
+        if not self.asked_to_wait and gap > self.wait_gap and has_path:
             self.speech.say(senses.time, hri.WAIT_TEXT)
             self.asked_to_wait = True
-        elif self.asked_to_wait and (gap < GO_ON_GAP or not has_path):
+        elif self.asked_to_wait and (gap < self.go_on_gap or not has_path):
             self.speech.say(senses.time, hri.GO_ON_TEXT)
             self.asked_to_wait = False
 

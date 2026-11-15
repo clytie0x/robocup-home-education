@@ -50,6 +50,7 @@ STEP = 0.05  # m between two points of the post's path
 SIMPLIFY = 0.05  # m, Douglas-Peucker tolerance
 NEAR = 0.6  # m of the cable next to the robot: it moves with the robot and would trap it
 SPACING, RADIUS = 0.1, 0.03  # m: the circles the planner gets
+POINT_STEP = 0.02  # m between two points of the whole lay for the rear checks (points)
 CROSS_HOLD = 5.0  # s planned over the cable once no way beside it was found, then beside it is tried again
 CROSS_SPEED = 0.06  # m/s near the cable while planned over it
 CROSS_NEAR = 0.3  # m from the robot's circle to the cable: near
@@ -170,6 +171,19 @@ class Lay:
                     out.append(Circle(*to_frame((a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k)), RADIUS))
                 at += SPACING
             base += d
+        return out
+
+    def points(self, pose):
+        """The whole lay, the NEAR part next to the post included, as points every POINT_STEP in the base frame
+        of `pose` (odometry): backing must not drive over any of it (escape.rear_clear; cable review major 3)."""
+        if self.pose is None:
+            return []
+        cable = self._cable(pose)
+        out = [geometry.odom_to_base(cable[0], pose)]
+        for a, b in zip(cable, cable[1:]):
+            n = max(1, math.ceil(math.dist(a, b) / POINT_STEP))
+            out += [geometry.odom_to_base((a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n), pose)
+                    for k in range(1, n + 1)]
         return out
 
     def refresh(self, pose, to_frame, now):
@@ -293,6 +307,11 @@ class Cable:
                 self.why = "the other way round"
                 return self._hard(-w, now)
         return self._hard(w, now)
+
+    def check(self, w, now):
+        """steer's last rule again, for a turn made larger after steer (wheels.least): w, unless it and its run-on
+        after a stop take the net past LIMIT_DEG (then 0, and the robot is held for the cable)."""
+        return self._hard(w, now) if w else w
 
     def _hard(self, w, now):
         """w, unless it and its run-on after a stop would take the net past LIMIT_DEG."""

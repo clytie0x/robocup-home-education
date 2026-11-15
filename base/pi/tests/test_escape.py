@@ -153,5 +153,39 @@ class Escapes(unittest.TestCase):
         self.assertEqual(command, (0.0, escape.TURN_W))
 
 
+    def drive(self, poses):
+        for i, pose in enumerate(poses):
+            self.cable.update(pose[2], 0.1 * i, pose)
+        return poses[-1]
+
+    def test_the_escape_never_backs_over_the_cable_lying_behind(self):
+        # Cable review major 3: drive 2 m, turn right 90 deg on the spot: the cable runs from the post round
+        # the back of the robot and on along its right. Stuck in a dead end, backing would drive over it.
+        pose = self.drive([(0.02 * i, 0.0, 0.0) for i in range(101)] + [(2.0, 0.0, -math.pi / 60 * k) for k in range(1, 31)])
+        lay = self.cable.lay.points(pose)
+        self.assertTrue(any(x < -0.2 and abs(y) < 0.2 for x, y in lay))  # behind the rear edge
+        self.assertTrue(safety_rear_clear(DEAD_END))  # the walls alone would let it back
+        self.assertEqual(self.first(self.stand(DEAD_END, escape.STUCK_S, pose=pose)), (None, None))
+        self.assertEqual(self.escape.event["start"], "none")  # stuck at STUCK_S, and no move is safe
+
+    def test_a_cable_beside_the_robot_still_lets_it_back(self):
+        pose = self.drive([(0.02 * i, 0.0, 0.0) for i in range(101)])  # straight: the cable lies along its left
+        t, command = self.first(self.stand(DEAD_END, 5.0, pose=pose))
+        self.assertEqual(command, (-escape.BACK_SPEED, 0.0))
+
+    def test_backing_stops_when_the_cable_turns_up_behind(self):
+        pose = self.drive([(0.02 * i, 0.0, 0.0) for i in range(101)])
+        t, command = self.first(self.stand(DEAD_END, 5.0, pose=pose))
+        self.assertEqual(command, (-escape.BACK_SPEED, 0.0))
+        self.cable.lay.trail = [(pose[0] - 0.24, -1.0), (pose[0] - 0.24, -0.1)]  # now it lies behind
+        self.assertEqual(self.cycle(t + 0.1, pose, DEAD_END), (0.0, 0.0))
+        self.assertEqual(self.escape.event, {"end": "back", "result": "rear blocked"})
+
+
+def safety_rear_clear(points):
+    import safety
+    return safety.rear_clear(points, escape.BACK_SPEED, P, escape.BACK_M)
+
+
 if __name__ == "__main__":
     unittest.main()

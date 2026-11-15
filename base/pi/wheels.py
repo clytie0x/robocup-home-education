@@ -29,6 +29,12 @@ STALL_W = 0.15  # rad/s
 STALL_TIME = 1.0  # s
 STALL_MOVE = 0.01  # m
 STALL_TURN = math.radians(2.0)
+# The smallest commands that move the wheels (base/docs/hardware-assessment-2026-11-13.md, "Lowest speeds that
+# turn the wheels", 2026-11-15): forward they move from 0.01 m/s; on the spot 0.05 rad/s did nothing, 0.10 turned.
+# In the four logs of 2026-11-15, 19 to 58 % of the turns on the spot were below 0.10: they never moved.
+MIN_V = 0.01  # m/s
+MIN_TURN = 0.10  # rad/s, on the spot
+TURN_DEADBAND = math.radians(2.0)  # a heading error this small on the spot turns nothing, rather than crawl
 NOT_SAFE_RUN = ("start it through tools/safe_run.py, which sends S# however it ends (the new firmware also stops by"
                 " itself 0.3 s after the last command; the old one did not): python tools/safe_run.py .venv/bin/python"
                 " <program> <arguments>")
@@ -43,6 +49,24 @@ def _digits(value):
     # the epsilon keeps 0.27 * 100 from truncating to 26
     n = int(abs(value) * 100 + 1e-9)
     return f"{n // 100 % 10}{n // 10 % 10}{n % 10}"
+
+
+def least(v, w, error=None):
+    """(v, w) with a command too small to move the wheels made one that moves them, or 0 (run_follow, just before
+    its stops: they judge what is sent).
+
+    Forward, 0 < v < MIN_V becomes MIN_V; an arc (v at least MIN_V) keeps its w. On the spot (v 0, or backing),
+    a heading error within TURN_DEADBAND (rad; None: the turn has no heading of its own) turns nothing, and any
+    other turn below MIN_TURN becomes MIN_TURN its way. A NaN stays NaN: the stops stop for it.
+    """
+    if 0 < v < MIN_V:
+        v = MIN_V
+    if not v >= MIN_V and w:  # on the spot or backing (a NaN v too: it stays NaN, the stops stop for it)
+        if error is not None and abs(error) < TURN_DEADBAND:
+            return v, 0.0
+        if abs(w) < MIN_TURN:
+            w = math.copysign(MIN_TURN, w)
+    return v, w
 
 
 def packet(v, w, p):

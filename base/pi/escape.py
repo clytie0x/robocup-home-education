@@ -6,8 +6,9 @@ drives to) is known and farther than the follow gap. Then, from the 360 deg LiDA
 the freest direction is the one whose corridor (robot width + 0.1 m wide, CORRIDOR_LEN past the front edge)
 is clear and longest (up to FREE_CAP), nearest the goal on a tie. If a turn on the spot toward it sweeps
 clear (footprint.sweep_clear, the run-on included) and the cable allows it (cable.Cable.turns: the long way
-round when that is the one allowed), turn at TURN_W; else, if the rear is clear (safety.rear_clear), back
-straight up to BACK_M at wheels.REVERSE_MAX, checked again every cycle as tools/back_up.py does. Then replan.
+round when that is the one allowed), turn at TURN_W; else, if the rear is clear (rear_clear: the obstacles and
+the cable lying on the floor, cable.Lay), back straight up to BACK_M at wheels.REVERSE_MAX, checked again every
+cycle as tools/back_up.py does. Then replan.
 
 At most MAX_ESCAPES in WINDOW s. Never while held (the page's Wait or pause, the client's wait or silence,
 the wheel latch): a hold also ends a running escape. run_follow's obstacle stop still checks every command
@@ -43,6 +44,9 @@ DONE_BACK = 0.01  # m
 TIME_SLACK = 2.0  # s on top of the time a move should take
 CYCLE = 0.4  # s a command may run (run_follow.SLOW_CYCLE), for the run-on of a planned turn
 MAX_ESCAPES, WINDOW = 2, 30.0  # escapes, s
+# Backing keeps the real outline this far from the cable's lay: beside it is fine (it lies 4 cm out from the left
+# side after a straight drive), over it is not (cable review major 3: after a turn on the spot it runs behind).
+CABLE_MARGIN = 0.02  # m
 RECOVERED_M = 0.3  # m driven after an escape: it helped
 HELP_TEXT = "I am stuck. Please help me."
 
@@ -91,6 +95,12 @@ def freest(points, p, bearing):
     return float(heads[best])
 
 
+def rear_clear(points, lay, speed, p, distance):
+    """True when backing `distance` m at `speed` keeps the outline safety.rear_clear's margin from the points and
+    CABLE_MARGIN from the cable's lay (cable.Lay.points, base frame): never back over the cable."""
+    return safety.rear_clear(points, speed, p, distance) and safety.rear_clear(lay, speed, p, distance, CABLE_MARGIN)
+
+
 def turn_clear(points, angle, p):
     """True when turning on the spot by `angle` rad, then the run-on after S#, keeps the outline clear."""
     n = max(1, math.ceil(abs(angle) / SWEEP_STEP))
@@ -126,7 +136,7 @@ class Escape:
             self._watch_from(now, pose)
             return None
         if self.move is not None:
-            return self._drive(now, pose, points)
+            return self._drive(now, pose, points, cable)
         if bearing is None:
             self._watch_from(now, pose)
             return None
@@ -164,7 +174,7 @@ class Escape:
         else:
             start["m"] = self.move["m"]
         self.event = start
-        return self._drive(now, pose, points)
+        return self._drive(now, pose, points, cable)
 
     def note(self, record):
         """After the cycle's stops: put the event in its record, end a running escape the obstacle stop held,
@@ -197,12 +207,13 @@ class Escape:
                 if turn_clear(points, angle, self.p):
                     return {"kind": "turn", "angle": angle, "turned": 0.0, "yaw": pose[2],
                             "until": now + abs(angle) / TURN_W + TIME_SLACK}
+        lay = cable.lay.points(pose)
         for m in BACK_TRIES:
-            if safety.rear_clear(points, BACK_SPEED, self.p, m):
+            if rear_clear(points, lay, BACK_SPEED, self.p, m):
                 return {"kind": "back", "m": m, "start": tuple(pose), "until": now + m / BACK_SPEED + TIME_SLACK}
         return None
 
-    def _drive(self, now, pose, points):
+    def _drive(self, now, pose, points, cable):
         move = self.move
         if now > move["until"] + 1e-6:
             return self._end(now, pose, "time", failed=True)
@@ -218,7 +229,7 @@ class Escape:
             left = move["m"] - back
             if left <= DONE_BACK:
                 return self._end(now, pose, "done")
-            if not safety.rear_clear(points, BACK_SPEED, self.p, left):
+            if not rear_clear(points, cable.lay.points(pose), BACK_SPEED, self.p, left):
                 return self._end(now, pose, "rear blocked", failed=True)
             command = (-BACK_SPEED, 0.0)
         self.robot.speed = self.robot.turn_speed = 0.0

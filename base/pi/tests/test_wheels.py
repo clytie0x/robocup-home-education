@@ -288,5 +288,36 @@ class Stall(unittest.TestCase):
         self.assertFalse(watch.update(10.0, (0.2, 0.0), dead[0]))  # reset: a new window
 
 
+class Least(unittest.TestCase):
+    """The smallest commands that move the wheels (hardware assessment, "Lowest speeds that turn the wheels")."""
+
+    def test_measured_numbers(self):
+        self.assertEqual((wheels.MIN_V, wheels.MIN_TURN), (0.01, 0.10))
+        self.assertAlmostEqual(math.degrees(wheels.TURN_DEADBAND), 2.0)
+
+    def test_a_turn_on_the_spot_is_0_or_at_least_min_turn(self):
+        self.assertEqual(wheels.least(0.0, 0.07, math.radians(44)), (0.0, 0.10))
+        self.assertEqual(wheels.least(0.0, -0.05, None), (0.0, -0.10))  # no heading of its own: still turns
+        self.assertEqual(wheels.least(0.0, 0.3, math.radians(44)), (0.0, 0.3))
+        self.assertEqual(wheels.least(0.0, 0.0, math.radians(44)), (0.0, 0.0))
+
+    def test_a_small_heading_error_on_the_spot_turns_nothing(self):
+        self.assertEqual(wheels.least(0.0, 0.07, math.radians(1.9)), (0.0, 0.0))
+        self.assertEqual(wheels.least(0.0, 0.4, math.radians(-1.0)), (0.0, 0.0))
+        self.assertEqual(wheels.least(0.0, 0.07, math.radians(2.1)), (0.0, 0.10))
+
+    def test_forward_is_0_or_at_least_min_v_and_an_arc_keeps_its_turn(self):
+        self.assertEqual(wheels.least(0.004, 0.0, None), (0.01, 0.0))
+        self.assertEqual(wheels.least(0.004, 0.03, math.radians(1.0)), (0.01, 0.03))  # driving: an arc
+        self.assertEqual(wheels.least(0.05, 0.02, None), (0.05, 0.02))
+        self.assertEqual(wheels.least(-0.06, 0.0, None), (-0.06, 0.0))  # backing (an escape) is left alone
+
+    def test_nan_stays_nan_for_the_stops(self):
+        v, w = wheels.least(float("nan"), 0.05, None)
+        self.assertTrue(math.isnan(v))
+        v, w = wheels.least(0.0, float("nan"), None)
+        self.assertTrue(math.isnan(w))
+
+
 if __name__ == "__main__":
     unittest.main()

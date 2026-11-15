@@ -135,6 +135,11 @@ SLOW_CYCLE = 0.4  # s; a longer cycle stops the wheels and ends the run
 PLAN_PORT = 5603  # plan_server.py
 SAVE_EVERY = 10  # save every 10th JPEG; every scan is saved, so a lost track can be replayed
 SEARCH_AGAIN_EVERY = 10.0  # s; after asking the operator back, turn on the spot again (hmc.follower)
+# hmc.follower's pace and stop-and-go for this base (the simulation keeps its own, set for 1 m/s). It started at
+# 1.31 m and stopped at 1.30 m, 4.8 to 13.1 start-stops a minute (logs of 2026-11-15): start again only past
+# RESTART_GAP more. hmc's WAIT_GAP 4.0 and GO_ON_GAP 2.5 m were set for the simulation's 1 m/s base, not 0.12 m/s.
+RESTART_GAP = 0.25  # m past the follow distance
+WAIT_GAP, GO_ON_GAP = 2.0, 1.2  # m
 # Finding the operator before the first lock (Task 7): turn on the spot while every frame goes to the
 # detector, and stop the moment a person is near the middle of the image, so enrol can lock onto them.
 SEARCH_TURN = 0.3  # rad/s, slow enough for the camera answers (about 0.3 s old) to stop it in time
@@ -227,7 +232,8 @@ class State:
         # follow_gap is measured from the robot's front edge, so add the centre-to-front length.
         self.speech = Speech(log)
         self.follower = Follower(self.body.robot, self.speech, follow_distance=p["follow_gap"] + safety.FRONT,
-                                 search_again_every=SEARCH_AGAIN_EVERY)
+                                 search_again_every=SEARCH_AGAIN_EVERY, restart_gap=RESTART_GAP,
+                                 wait_gap=WAIT_GAP, go_on_gap=GO_ON_GAP)
         self.remote = remote  # command_server.CommandServer (--remote), or None: Enter and --return-after only
         self.phase = FOLLOW if remote is None else IDLE
         self.waiting = False  # --remote "wait": hold still, the senses and the brain keep running
@@ -616,6 +622,13 @@ def _search(state, follower, pose, answer, link_alive, now):
     return (0.0, SEARCH_TURN) if state.searched < SEARCH_MAX else (0.0, 0.0)
 
 
+def _looking_around(state):
+    """True while the brain turns on the spot looking for the lost operator (hmc Follower._search after the drive)."""
+    follower = state.follower
+    return (state.phase == FOLLOW and getattr(follower, "mode", None) is Mode.SEARCH
+            and getattr(follower, "look_since", None) is not None)
+
+
 def _spot(standing, pos):
     """The place record someone at pos stands on, or None (hmc.task.Task._spot)."""
     near = [s for s in standing if math.dist(pos, s[1]) <= STAND_STILL]
@@ -847,16 +860,23 @@ def cycle(state, now):
     escaped = state.escape.command(now, pose, escape_module.goal(state, believed), held, lidar_points, points, state.cable)
     if escaped is not None:
         v, w = escaped
-    w = state.cable.steer(v, w, None if search is not None else turn_error, now, planned=escaped is not None)
+    # A turn with no heading of its own: run_follow's search, or the brain's look-around (Mode.SEARCH aims a quarter
+    # turn left every cycle: its +90 deg is no heading, and the cable took it for a headed turn: review major 2).
+    error = None if search is not None or _looking_around(state) else turn_error
+    w = state.cable.steer(v, w, error, now, planned=escaped is not None)
     if state.velocity is not None and state.measured is not None and escaped is None and state.phase != BAG:
         v, w = state.velocity.command(v, w, state.measured, state.body.robot.max_speed)  # 0 stays 0
+    # The smallest commands that move the wheels, here only: the stops below judge this final command. A turn made
+    # larger meets the cable's limit again. An escape's turn has no heading error of the brain's.
+    v, least_w = wheels_module.least(v, w, None if escaped is not None else error)
+    w = state.cable.check(least_w, now) if abs(least_w) > abs(w) else least_w
     # SLOW_CYCLE: the next cycle may come that late (a later one ends the run), so the command runs that long.
     # BAG creeping: the locked bag's own points are left out, only they may come closer than the clearance.
     checked = state.bag.safety_points(points) if state.phase == BAG else points
     if stop is None and any(safety.must_stop(checked, mv, mw, p, cycle=SLOW_CYCLE) for mv, mw in state.coast.motions(v, w, now)):
         stop = "obstacle"
-    if stop is None and v < 0 and not safety.rear_clear(points, -v, p, -v * SLOW_CYCLE):
-        stop = "obstacle"  # backing (an escape): the rear's sweep is its obstacle stop
+    if stop is None and v < 0 and not escape_module.rear_clear(points, state.cable.lay.points(pose), -v, p, -v * SLOW_CYCLE):
+        stop = "obstacle"  # backing (an escape): the rear's sweep, the cable's lay included, is its obstacle stop
     if stop is None and not scan:
         stop = "no scan"  # the LiDAR went quiet: blind, so do not move
     if stop is None and switches["paused"]:

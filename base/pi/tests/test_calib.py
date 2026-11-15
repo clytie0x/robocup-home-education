@@ -39,7 +39,9 @@ def drive(est, commands, gain=1.0, turn_gain=1.0, lag=0.0, decel=None, delay=0.0
 
 class EstimatesTest(unittest.TestCase):
     def test_a_speed_averaged_over_a_command_change_is_not_a_gain_sample(self):
-        est = calib.BaseEstimates(P)
+        # The times below were worked out for a 0.17 s latency (params.json's until 2026-11-15, now 0.40): with
+        # 0.40 the old command still acts at 1.2 s, so the made-up 0.075 there would be a fair sample.
+        est = calib.BaseEstimates(dict(P, command_latency=0.17))
         for k in range(10):
             est.observe(MotionState(0.1 * k, (0, 0, 0), 0.05, 0.0, True, 0.9), (0.05, 0.0), 0.1 * k)
         samples = est._avg["speed_gain"].samples
