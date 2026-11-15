@@ -1,0 +1,17 @@
+[Unit]
+Description=Press the agent's Start all once it answers (optional)
+# Off by default: install.sh does not enable this unit. Enable it only after the paths at the
+# top of agent.py (VOICE_ROOT, VOICE_WS) are checked on the robot and Start all works by hand.
+Requires=hmc-agent.service
+After=hmc-agent.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=180
+# Wait up to 120 s for GET /status (the agent binds at once), then POST /start-all. The agent
+# starts the programs in the background, so this unit only presses the console's Start all.
+ExecStart=/bin/bash -lc 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8090/status >/dev/null 2>&1 && break; sleep 2; done; exec curl -fsS -X POST -H "Content-Type: application/json" -d "{}" http://127.0.0.1:8090/start-all'
+
+[Install]
+WantedBy=default.target

@@ -26,7 +26,7 @@ Look: style 4 "Swiss minimal" (white, black rules, no rounded corners; red only 
 - **Overview**: the state in one word, the power bank estimate, Pi °C and Jetson W, Start and Wheel test, then each fault as a red-ruled block (what was measured, then what to do), then the health list for the Pi (temperature, load, disk, uptime), LiDAR, Xtion camera, wheels and motor power (last wheel test), Jetson link (TCP to 10.0.0.2 and 192.168.31.137, ms), Jetson programs, arm webcam: black dot OK, black ring check, red dot fault. The power bank block shows `telemetry.estimate` (percent, its range, hours since the last full mark, minutes driven, a warning under 30 %) with "charged to full" and "reading from the display" (0 to 100) buttons.
 - **Live**: Xtion camera, LiDAR from above, the arm team's webcam (relayed from the Jetson's port 8082; theirs, never started or stopped here). During a task run the camera and LiDAR come from run_follow itself (relayed from its page, with the operator as a red ring and label, other people as hollow black circles, and the stop reason); during a check the page says the view is paused and shows the job's status instead. The camera stream has no detection box, so the camera shows the operator's distance as a red label instead of a box.
 - **Task**: start run_follow (Dry run or Drive, 0.08 or 0.12 m/s, never above params.json `max_speed`, 2 to 20 min, always `--remote`; with "คนเสมือน" also `--virtual-operator 5610 --virtual-allow <PC>`, PIN needed, see [virtual-operator.md](virtual-operator.md)), then Follow, Wait, Resume, Go back, and STOP. A Drive run asks "The robot will move. Is the area clear and the cable safe?" first. Shows phase, lock, operator distance, nearest obstacle, Jetson link, wheels, stop reason from run_follow's own `GET :8080/status` 3 times a second, and the last 30 lines of the run's output.
-- **Jetson**: start, stop, restart each program the agent lists (detector, whisper, voice, bridge, arm, flow); Start all (in that order); uptime and last log lines.
+- **Jetson**: start, stop, restart each program the agent lists (detector, whisper, voice, bridge, armstack, arm, flow); Start all (in that order); uptime and last log lines.
 - **Checks**: Wheel test (4 cm at 0.05 m/s), Camera pitch check (`tools/sensor_check.py --floor`, needs 1.5 m of empty floor), Link test.
 - **Data**: 1 hour, today, 7 days or one run; charts (power bank estimate with the 30 % line, Pi and Jetson temperature, Jetson VDD_IN W, link ms cable and Wi-Fi, commanded and measured speed of the picked run), drawn as SVG by the page itself; tap or hover for the value and time. A runs table (date, length, distance, end reason) and a CSV of the chosen window. Read only, from telemetry.py's `data/robot.db`; before the file exists the charts are empty, and without telemetry.py the tab says so.
 - **Logs**: the newest `~/hmc-base/logs/<start time>/` runs with length and end reason; download `log.jsonl`.
@@ -56,17 +56,19 @@ cd ~/hmc-follow
 python3 agent.py                       # port 8090; programs' logs in ~/hmc-follow/logs/<name>.log
 ```
 
-The agent starts, from `~/hmc-follow`, `python3 server.py`, the whisper server (`/opt/robot_voice/src/whisper.cpp/build/bin/whisper-server` on 127.0.0.1:8080, as `voice/scripts/servers.sh start-stt` does, in the foreground), `ros2 launch voice_assistant hmc_voice.launch.py` (with `~/ros2_ws/install/setup.bash`), `python3 base_bridge.py --pi-host 10.0.0.1,192.168.31.21`, `python3 bag_arm.py` (with `~/so100_ws/install/setup.bash`) and `python3 hmc_flow.py --ros-args -p use_arm:=true -p grab_timeout:=240.0 -p drop_timeout:=60.0` (the ROS ones with `/opt/ros/jazzy/setup.bash` and `ROS_DOMAIN_ID=42`), each in its own process group. The two voice paths are `VOICE_ROOT` and `VOICE_WS` at the top of agent.py: check them on the robot before the first Start all. A whisper server started by hand is used by Start all as it is. It only ever signals what it started; copies started by hand are listed as "outside" and left alone. Stopping the agent stops what it started.
+The agent starts, from `~/hmc-follow`, `python3 server.py`, the whisper server (`/opt/robot_voice/src/whisper.cpp/build/bin/whisper-server` on 127.0.0.1:8080, as `voice/scripts/servers.sh start-stt` does, in the foreground), `ros2 launch voice_assistant hmc_voice.launch.py` (with `~/ros2_ws/install/setup.bash`), `python3 base_bridge.py --pi-host 10.0.0.1,192.168.31.21`, the arm stack (`ros2 launch so100_moveit_config arm.launch.py mount:=robot rviz:=false`), `python3 bag_arm.py` and `python3 hmc_flow.py --ros-args -p use_arm:=true -p grab_timeout:=240.0 -p drop_timeout:=60.0` (the last five with `/opt/ros/jazzy/setup.bash` and `ROS_DOMAIN_ID=42`; the arm stack and bag_arm also with `~/so100_ws/install/setup.bash`), each in its own process group. The two voice paths are `VOICE_ROOT` and `VOICE_WS` at the top of agent.py: check them on the robot before the first Start all. A whisper server or an arm stack started by hand is used by Start all as it is. It only ever signals what it started; copies started by hand are listed as "outside" and left alone. Stopping the agent stops what it started.
 
 ## Autostart (user crontab, no sudo)
 
-Not installed yet: ask the owner first. Add with `crontab -e` on each machine.
+Installed in each user's crontab. Both jobs start only the console and the agent: the agent waits for Start all, the console for Start task.
 
 Pi:
 
 ```cron
-@reboot sleep 20 && cd "$HOME/hmc-base" && mkdir -p logs/console && .venv/bin/python console.py >> logs/console/console.out 2>&1
+@reboot sleep 20 && /home/xohm/hmc-base/tools/run_console.sh
 ```
+
+`tools/run_console.sh` starts `console.py` from `~/hmc-base`, appends to `logs/console/console.out`, and starts it again 2 s after it ends. A lock file allows one copy.
 
 Jetson (a login shell, so the CUDA and TensorRT paths of `~/.profile` are there as when started by hand):
 
@@ -74,16 +76,16 @@ Jetson (a login shell, so the CUDA and TensorRT paths of `~/.profile` are there 
 @reboot sleep 30 && bash -lc 'cd "$HOME/hmc-follow" && mkdir -p logs && exec python3 agent.py >> logs/agent.out 2>&1'
 ```
 
-Neither starts a task or a program by itself: the agent waits for Start all, the console for Start task.
-
 Remove (on that machine):
 
 ```bash
-crontab -l | grep -v 'console.py' | crontab -     # Pi
-crontab -l | grep -v 'agent.py' | crontab -       # Jetson
+crontab -l | grep -v 'run_console.sh' | crontab -     # Pi
+crontab -l | grep -v 'agent.py' | crontab -           # Jetson
 ```
 
-Then stop the running one: `pkill -f 'console.py'` on the Pi (it stops its job first), `pkill -f 'agent.py'` on the Jetson (it stops its programs first).
+Then stop the running one: `pkill -f '[r]un_console.sh'` and then `pkill -f 'console.py'` on the Pi (the wrapper starts the console again until the wrapper is gone; it stops its job first), `pkill -f 'agent.py'` on the Jetson (it stops its programs first).
+
+[`base/systemd/`](../systemd/README.md) holds user units for the same two jobs, with the same log files. Use one or the other, not both: the console's lock file keeps the second copy from running. `deploy.sh` does not copy that folder; install it once on the machine.
 
 ## Who can use it
 

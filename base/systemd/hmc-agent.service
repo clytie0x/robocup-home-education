@@ -1,0 +1,19 @@
+[Unit]
+Description=Jetson agent for the robot console (port 8090)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/hmc-follow
+# A login shell like the crontab line: ~/.profile puts the CUDA and TensorRT paths on PATH.
+ExecStartPre=-/usr/bin/mkdir -p %h/hmc-follow/logs
+ExecStart=/bin/bash -lc 'exec python3 agent.py'
+StandardInput=null
+StandardOutput=append:%h/hmc-follow/logs/agent.out
+StandardError=inherit
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
