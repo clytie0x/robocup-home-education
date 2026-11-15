@@ -39,7 +39,8 @@ States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, t
   at_car     standing at the car, no bag task: say "Please point at the bag, then say ready." (again after
              reask_s of silence). "ready" / "done" / "okay" / "take it back" -> pointing.
              "follow me" -> following (Pi resume)
-  picking    sent pick_bag {"x", "y"} (robot frame, from bag_reached) to the arm, timeout grab_timeout (90 s).
+  picking    sent pick_bag {"x", "y"[, "top", "yaw"]} (robot frame, from bag_reached; a remeasure keeps the
+             earlier top, not the yaw) to the arm, timeout grab_timeout (90 s).
              grab_success (or grab_failed HOLDING) -> returning. grab_failed MISSED or NOT_FOUND, the first
              time: find_bag {"again": true} (the Pi measures and approaches the same bag once more) ->
              pointing, whose bag_reached picks again. Other grab_failed, a second miss, or timeout -> error.
@@ -59,15 +60,16 @@ States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, t
 
 Commands on /robot/command (JSON {"action","params","stamp","source"}):
   follow_me, wait, resume, go_back, end (Pi stop), stop, find_bag {"again"} -> base_bridge
-  pick_bag {"x", "y"}, drop_bag {"x", "y"}, stop                          -> bag_arm (arm_action_bridge)
+  pick_bag {"x", "y"[, "top", "yaw"]}, drop_bag {"x", "y"}, stop         -> bag_arm (arm_action_bridge)
 Events read: see_person, lost_person, base_link_ok, base_link_lost, at_start, bag_chosen|SIDE|text,
-  bag_reached|CODE|x,y, bag_failed|CODE|message (base_bridge); grab_success, grab_failed|CODE|message,
-  drop_done, drop_failed|CODE|message (the arm). /base/status (base_bridge): "link", "locked", "search".
+  bag_reached|CODE|x,y[,top=T][,yaw=Y], bag_failed|CODE|message (base_bridge); grab_success,
+  grab_failed|CODE|message, drop_done, drop_failed|CODE|message (the arm). /base/status (base_bridge): "link", "locked", "search".
 
 Run: source /opt/ros/jazzy/setup.bash && ROS_DOMAIN_ID=42 python3 hmc_flow.py [--ros-args -p use_arm:=true]
 """
 
 import json
+import math
 import re
 import time
 
@@ -158,6 +160,7 @@ class HmcFlow:
         self.bag_tries = 0  # bag_failed in a row answered with find_bag again
         self.remeasured = False  # this bag was measured again after a missed grab
         self.bag_at = None  # (x, y) robot frame from the last bag_reached
+        self.bag_top = self.bag_yaw = None  # m and rad (robot frame) from it, when the Pi's look measured them
         self.state = None
         self.deadline = None  # arm timeout of the current state
         self.carrying = False
@@ -196,7 +199,8 @@ class HmcFlow:
             out.append(self._cmd("find_bag", again=True) if again else self._cmd("find_bag"))
         elif state == PICKING:
             self.deadline = now + self.grab_timeout
-            out.append(self._cmd("pick_bag", x=self.bag_at[0], y=self.bag_at[1]))
+            more = {k: v for k, v in (("top", self.bag_top), ("yaw", self.bag_yaw)) if v is not None}
+            out.append(self._cmd("pick_bag", x=self.bag_at[0], y=self.bag_at[1], **more))
         elif state == RETURNING:
             self.paused = False
             out += [("say", "I will go back to the start now."), self._cmd("go_back")]
@@ -373,11 +377,25 @@ class HmcFlow:
         if name == "bag_chosen":
             return [("say", text)] if text else []
         if name == "bag_reached":
+            parts = text.split(",")
             try:
-                x, y = (float(v) for v in text.split(","))
+                x, y = (float(v) for v in parts[:2])
             except ValueError:
                 return [self._cmd("wait")] + self._goto(
                     AT_CAR, now, "Sorry, I could not find the bag.")
+            extra = {}
+            for item in parts[2:]:  # top=T, yaw=Y: what the Pi's look measured (base/docs/bag-sensing.md)
+                key, _, value = item.partition("=")
+                try:
+                    value = float(value)
+                except ValueError:
+                    continue
+                if key.strip() in ("top", "yaw") and math.isfinite(value):
+                    extra[key.strip()] = value
+            # a remeasure after a miss (bag_again) stands too near to look again: the bag's top stays what it was;
+            # its yaw does not (the miss may have turned the bag)
+            self.bag_top = extra.get("top", self.bag_top if self.remeasured else None)
+            self.bag_yaw = extra.get("yaw")
             self.bag_at, self.bag_tries = (x, y), 0
             if self.use_arm:
                 return self._goto(PICKING, now)

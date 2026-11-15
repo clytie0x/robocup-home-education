@@ -902,6 +902,20 @@ class BagTests(unittest.TestCase):
         self.assertEqual(events(logic.on_status(status(phase="FOLLOW", waiting=True, held="wait", bag=done), 30.2)), [])
         self.assertEqual(sent(out), [])  # BAG and after: nothing restored
 
+    def test_a_measured_top_and_yaw_ride_along(self):
+        logic = self.waiting()
+        logic.on_command({"action": "find_bag", "params": {}}, 2.0)
+        logic.on_status(status(phase="BAG", waiting=True, held=None, bag=bag(2.2, "turn", CHOSEN)), 2.2)
+        done = bag(2.2, "reached", CHOSEN, {"ok": True, "code": "OK", "x": 0.31, "y": 0.015, "odometry_m": 0.07,
+                                            "top": 0.2861, "top_by": "depth", "yaw": -1.2004})
+        out = logic.on_status(status(phase="FOLLOW", waiting=True, held="wait", bag=done), 30.0)
+        self.assertEqual(events(out), ["bag_reached|OK|0.310,0.015,top=0.286,yaw=-1.200"])
+        logic = self.waiting()  # the yaw alone (no top measured)
+        logic.on_command({"action": "find_bag", "params": {}}, 2.0)
+        done = bag(2.3, "reached", CHOSEN, {"ok": True, "code": "OK", "x": 0.31, "y": 0.015, "yaw": 0.5})
+        self.assertEqual(events(logic.on_status(status(phase="FOLLOW", waiting=True, held="wait", bag=done), 30.0))[-1],
+                         "bag_reached|OK|0.310,0.015,yaw=0.500")
+
     def test_a_result_in_the_first_status_and_a_single_bag(self):
         logic = self.waiting()
         logic.on_command({"action": "find_bag", "params": {}}, 2.0)

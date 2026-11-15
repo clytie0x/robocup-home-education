@@ -18,10 +18,16 @@ command it returns through the usual safety stop and the cable rules, and tells 
              clearance: the points within EXCLUDE_R of it are left out of the stop, anything else in the front
              strip stops it (BLOCKED). A virtual bag leaves nothing out: there is nothing real to come close to.
   settle     stand SETTLE_S, measure the bag from the LiDAR, then decide: turn, far, creep, reached or failed.
+  look       (look=True) once, at a settle with the bag LOOK_RANGE from the cameras (a far drive from farther stops
+             at LOOK_AT for it): the top from the Xtion depth (bag_depth.measure_top, against the local floor),
+             else (rgb=True) from the Jetson's front camera (Look -> base/jetson/front_camera.py), else none (the
+             arm's default top); the yaw from the bag's LiDAR points (bag_depth.cluster_yaw). Nothing sees the
+             bag at the pick distance, so this is the only measurement (base/docs/bag-sensing.md).
 
 Results (status and record "bag"): reached with the bag centre measured after the last stop (code OK from the
-LiDAR, ESTIMATED from odometry when the LiDAR never saw it), or failed with NOT_POINTED, NO_BAG, BLOCKED,
-TIMEOUT, LOST_BAG or CANCELLED (a wait, resume, follow or return came).
+LiDAR, ESTIMATED from odometry when the LiDAR never saw it), with "top" (m, "top_by" depth or rgb) and "yaw" (rad,
+base frame at the end, the long axis as a line in [-pi/2, pi/2)) when the look measured them, or failed with
+NOT_POINTED, NO_BAG, BLOCKED, TIMEOUT, LOST_BAG or CANCELLED (a wait, resume, follow or return came).
 
 The bag centre: the LiDAR sees the side facing it; the centre is taken BAG_HALF_DEPTH behind the middle of those
 points, along the ray from the laser (an assumption: a gift bag about 0.10 m deep side-on; measure it).
@@ -29,12 +35,16 @@ Frames: base (x ahead, y left, origin at the turning centre) for everything give
 in the odometry frame, which never jumps, so the robot's own motion moves it in the base frame.
 """
 import importlib.util
+import json
 import math
+import socket
 import sys
+import threading
 from pathlib import Path
 
 import numpy
 
+import bag_depth
 import geometry
 import legs
 import safety
@@ -84,6 +94,16 @@ BLIND_MARGIN = 0.03  # m: a bag predicted this near SIGHT_MIN is not lost when i
 AGAIN_R = 0.25  # m: bag_again looks for the last bag this close to where it was
 LAY_KEEP = 0.05  # m beside the body's half width: the cable on the floor nearer the drive line blocks it
 VIRTUAL_R = 0.1  # m, a bag this close to a virtual bag is the virtual one
+# The look (base/docs/bag-sensing.md)
+LOOK_CAM_X = 0.205  # m: both cameras stand about this far ahead of the turning centre (params camera_x; the
+                    # front camera "about 0.2 m"), so ranges to the bag are counted from there
+LOOK_RANGE = (0.7, 1.5)  # m from there to the bag centre: the Xtion has no depth nearer than about 0.5 m, the
+                         # front camera sees the bag whole from 0.7 m
+LOOK_AT = 1.1  # m: a far drive from farther stops here to look
+LOOK_DEPTH_S = 1.0  # s at the look stop waiting for a depth frame
+LOOK_RGB_S = 3.0  # s waiting for the Jetson's front camera answer (a frame over HTTP and the segmentation)
+YAW_OK = 0.5  # cluster_yaw confidence for a yaw to be passed on
+LOOK_PORT = 5606  # TCP on the Jetson: front_camera.serve (started by bag_arm.py)
 POINTING, TURN_STATE, FAR, CREEP_STATE, SETTLE, REACHED, FAILED = (
     "pointing", "turn", "far", "creep", "settle", "reached", "failed")
 
@@ -115,11 +135,12 @@ class View:
     operator: (x, y) or None. found: a pointing.Pointing this cycle, or None. boxes: bag boxes [x1, y1, x2, y2]
     in the frame's pixels, frame (width, height). virtual_bags: centres of the virtual bags. lay: (x, y) circles of
     the cable on the floor. speed_cap: m/s the body may drive this cycle. cable_holding: the cable rules stopped
-    the last turn."""
+    the last turn. depth: the camera's depth image of this cycle, or None."""
 
     def __init__(self, now, pose, seen=None, clusters=(), operator=None, found=None, boxes=(), frame=(320, 240),
-                 virtual_bags=(), lay=(), speed_cap=FAR_SPEED, cable_holding=False, real=None):
+                 virtual_bags=(), lay=(), speed_cap=FAR_SPEED, cable_holding=False, real=None, depth=None):
         self.now, self.pose = now, tuple(pose)
+        self.depth = depth  # this cycle's depth image (uint16 mm) or None: only the look reads it
         self.seen = numpy.zeros((0, 2)) if seen is None else numpy.asarray(seen, dtype=float).reshape(-1, 2)
         self.real = self.seen if real is None else numpy.asarray(real, dtype=float).reshape(-1, 2)
         self.clusters, self.operator, self.found = [tuple(c) for c in clusters], operator, found
@@ -207,8 +228,9 @@ def camera_pointing(answer, operator, frame, p):
 class BagTask:
     """One "bag" (mode "point") or "bag_again" (mode "again": the last bag, measured and approached once more)."""
 
-    def __init__(self, p, now, seq, mode="point", last=None):
+    def __init__(self, p, now, seq, mode="point", last=None, look=False, rgb=False):
         self.p, self.seq, self.mode = p, seq, mode
+        self.look, self.rgb = look, rgb  # measure the bag in the far stage; ask the Jetson when depth fails
         self.id = round(now, 3)  # tells this task's status from an earlier one (the bridge reads it)
         self.t0 = now
         self.state = POINTING
@@ -233,6 +255,10 @@ class BagTask:
         self.sent = (0.0, 0.0)
         self.why = None  # what the last step did, for the log
         self.wants_pose = mode == "point"  # ask the Jetson for keypoints (only while looking for the pointing)
+        self.measured = None  # the look's outcome {"top", "top_by", "yaw_odom"}; {} when not looked; None: not yet
+        self.look_state = None  # {"stage", "since", "pose", "range", "centre", "points", "yaw", ...} once looking
+        self.look_request = None  # {"id", "points"} for the Jetson's front camera (Look sends it)
+        self.rgb_answer = None
 
     # ------------------------------------------------------------ outputs
     @property
@@ -241,8 +267,21 @@ class BagTask:
 
     def status(self):
         """For the status line and the record: base-frame chosen bag and the result."""
-        return {"id": self.id, "seq": self.seq, "mode": self.mode, "state": self.state, "chosen": self.chosen,
-                "result": self.result}
+        out = {"id": self.id, "seq": self.seq, "mode": self.mode, "state": self.state, "chosen": self.chosen,
+               "result": self.result}
+        if self.look_state is not None:
+            out["look"] = {k: v for k, v in self.look_state.items() if k not in ("points", "since")}
+        return out
+
+    @property
+    def wants_depth(self):
+        """True while the look waits for a depth frame (run_follow passes every frame's depth anyway)."""
+        return self.look_state is not None and self.look_state["stage"] == "depth" and not self.done
+
+    def looked(self, answer):
+        """The Jetson's front camera answer for look_request (Look calls it; another id is ignored)."""
+        if self.look_request is not None and isinstance(answer, dict) and answer.get("id") == self.look_request["id"]:
+            self.rgb_answer = answer
 
     def odom_bag(self):
         return None if self.bag is None else [round(self.bag[0], 3), round(self.bag[1], 3)]
@@ -388,14 +427,19 @@ class BagTask:
             return self._fail("BLOCKED", "my cable lies on the way to the bag")
         return self._decide(view)
 
-    def _sighting(self, view, predicted):
-        """The bag centre from the points near `predicted` (base frame), or None."""
+    def _near(self, view, predicted):
+        """The seen points within TRACK_R of `predicted` (base frame), the operator's left out."""
         pts = view.seen
         if not len(pts):
-            return None
+            return pts
         near = pts[numpy.hypot(pts[:, 0] - predicted[0], pts[:, 1] - predicted[1]) <= TRACK_R]
         if view.operator is not None and len(near):
             near = near[numpy.hypot(near[:, 0] - view.operator[0], near[:, 1] - view.operator[1]) > OPERATOR_KEEP]
+        return near
+
+    def _sighting(self, view, predicted):
+        """The bag centre from the points near `predicted` (base frame), or None."""
+        near = self._near(view, predicted)
         if len(near) < MIN_POINTS:
             return None
         face = (float(near[:, 0].mean()), float(near[:, 1].mean()))
@@ -441,6 +485,10 @@ class BagTask:
             dead = None if self.seen_travel is None else round(self.travelled - self.seen_travel, 3)
             self.result = {"ok": True, "code": "OK" if self.lidar else "ESTIMATED", "x": round(bx, 3), "y": round(by, 3),
                            "odometry_m": dead}  # m driven since the last LiDAR sighting (None: never seen by it)
+            if self.measured and self.measured.get("top") is not None:
+                self.result["top"], self.result["top_by"] = self.measured["top"], self.measured["top_by"]
+            if self.measured and self.measured.get("yaw_odom") is not None:
+                self.result["yaw"] = round(bag_depth.wrap_line(self.measured["yaw_odom"] - view.pose[2]), 3)
             self.state = REACHED
             self.why = "reached (%.3f, %.3f)" % (bx, by)
             return self._stand()
@@ -477,6 +525,10 @@ class BagTask:
         v = min(FAR_SPEED, view.speed_cap)
         if bx - run_on(v, self.p) <= TARGET_X + CREEP_DIST:
             return self._to_settle()
+        if self._look_pending():
+            r = math.hypot(bx - LOOK_CAM_X, by)
+            if LOOK_RANGE[0] < r and r - run_on(v, self.p) <= LOOK_AT:
+                return self._to_settle()  # stand to look on the way
         err = turn_for((bx, by))
         w = max(-FAR_TURN, min(FAR_TURN, FAR_STEER * err))
         self.why = "far, %.2f m to go" % (bx - TARGET_X)
@@ -518,6 +570,65 @@ class BagTask:
             return self._stand()
         if self.lidar and view.now - self.seen_at > LOST_S / 2:
             return self._stand()  # the LiDAR has not seen it lately: wait for a sighting (or LOST_BAG)
+        if self._look_pending():
+            bx, by = self._base(view)
+            r = math.hypot(bx - LOOK_CAM_X, by)
+            if self.look_state is not None or LOOK_RANGE[0] <= r <= LOOK_RANGE[1]:
+                return self._look(view, r)
+            if r < LOOK_RANGE[0]:
+                self.look_state = {"stage": "done", "range": round(r, 3),
+                                   "why": "the bag was nearer than %.1f m at the first stop: not looked at"
+                                   % LOOK_RANGE[0]}
+                self.measured = {}
+        return self._decide(view)
+
+    # ------------------------------------------------------------ the look
+    def _look_pending(self):
+        return self.look and self.measured is None and not self.virtual
+
+    def _look(self, view, r):
+        """Stand while the bag is measured (depth, then the front camera), then decide as always."""
+        now, ls = view.now, self.look_state
+        if ls is None:
+            bx, by = self._base(view)
+            pts = self._near(view, (bx, by))
+            yaw, conf, why = bag_depth.cluster_yaw(pts)
+            ls = self.look_state = {"stage": "depth", "since": now, "pose": [round(c, 4) for c in view.pose],
+                                    "range": round(r, 3), "centre": [round(bx, 3), round(by, 3)],
+                                    "points": [[round(float(x), 3), round(float(y), 3)] for x, y in pts],
+                                    "yaw": None if yaw is None else round(yaw, 3), "yaw_conf": conf, "yaw_why": why,
+                                    "depth": None, "rgb": None, "why": None}
+        if ls["stage"] == "depth":
+            if view.depth is not None:
+                ls["depth"] = bag_depth.measure_top(view.depth, ls["centre"], self.p)
+            elif now - ls["since"] >= LOOK_DEPTH_S:
+                ls["depth"] = {"ok": False, "why": "no depth frame in %.1f s" % LOOK_DEPTH_S}
+            else:
+                return self._stand()
+            if ls["depth"]["ok"]:
+                return self._look_done(view, ls["depth"]["top"], "depth")
+            if not self.rgb:
+                return self._look_done(view, None, None, "depth: %s" % ls["depth"]["why"])
+            ls["stage"], ls["since"] = "rgb", now
+            self.look_request = {"id": "%s-%d" % (self.id, self.seq), "points": ls["points"]}
+        answer = self.rgb_answer
+        if answer is not None:
+            ls["rgb"] = {k: answer.get(k) for k in ("ok", "top", "top_by", "conf", "handle", "why")}
+            if answer.get("ok") and answer.get("top") is not None:
+                return self._look_done(view, float(answer["top"]), "rgb")
+            return self._look_done(view, None, None, "front camera: %s" % answer.get("why"))
+        if now - ls["since"] >= LOOK_RGB_S:
+            return self._look_done(view, None, None, "front camera: no answer in %.1f s" % LOOK_RGB_S)
+        return self._stand()
+
+    def _look_done(self, view, top, by, why=None):
+        ls = self.look_state
+        ls["stage"], ls["why"] = "done", why
+        yaw_odom = None
+        if ls["yaw"] is not None and ls["yaw_conf"] >= YAW_OK:
+            yaw_odom = ls["yaw"] + ls["pose"][2]
+        self.measured = {"top": None if top is None else round(top, 3), "top_by": by, "yaw_odom": yaw_odom}
+        self.why = "looked: top %s (%s), yaw %s" % (top, by or why, ls["yaw"])
         return self._decide(view)
 
     def _fail(self, code, message):
@@ -525,3 +636,51 @@ class BagTask:
         self.result = {"ok": False, "code": code, "message": message}
         self.why = "%s: %s" % (code, message)
         return self._stand()
+
+
+class Look:
+    """The one part of this module with a socket: hands a task's look_request to the Jetson's front camera
+    service (front_camera.serve, TCP LOOK_PORT, one JSON line each way) on a thread, and its answer back to the
+    task. run_follow calls serve(task, now) every BAG cycle; it never blocks the cycle. No service, or no
+    answer: an answer {"ok": false, "why"} (the task gives up after LOOK_RGB_S anyway)."""
+
+    def __init__(self, hosts, port=LOOK_PORT, connect_s=0.5, answer_s=LOOK_RGB_S):
+        self.hosts, self.port = list(hosts), port
+        self.connect_s, self.answer_s = connect_s, answer_s
+        self.asked = None
+        self.answer = None
+        self.lock = threading.Lock()
+
+    def serve(self, task, now):
+        req = getattr(task, "look_request", None)
+        if req is None:
+            return
+        if req["id"] != self.asked:
+            self.asked = req["id"]
+            with self.lock:
+                self.answer = None
+            threading.Thread(target=self._ask, args=(req,), daemon=True).start()
+        with self.lock:
+            answer = self.answer
+        if answer is not None and answer.get("id") == req["id"]:
+            task.looked(answer)
+
+    def _ask(self, req):
+        answer, why = None, []
+        for host in self.hosts:
+            try:
+                with socket.create_connection((host, self.port), timeout=self.connect_s) as s:
+                    s.settimeout(self.answer_s)
+                    s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+                    line = s.makefile("rb").readline(65536)
+                answer = json.loads(line.decode("utf-8"))
+                if isinstance(answer, dict):
+                    break
+                answer = None
+            except (OSError, ValueError) as exc:
+                why.append("%s: %s" % (host, exc))
+        if answer is None:
+            answer = {"ok": False, "why": "no front camera answer (%s)" % "; ".join(why)}
+        answer["id"] = req["id"]
+        with self.lock:
+            self.answer = answer

@@ -40,6 +40,8 @@ class World:
         self.seen_bags = self.bags if seen_bags is None else seen_bags  # the bags the LiDAR sees
         self.extra = lambda world: []  # more odometry points to block with, per step
         self.sent = []
+        self.depth_of = None  # (world, task) -> a depth image for the cycle, or None
+        self.look = None  # a bag.Look (or a fake) served every cycle
 
     def view(self, boxes=(), frame=(320, 240)):
         scan = scan_at(self.pose, self.seen_bags)
@@ -57,6 +59,10 @@ class World:
         """Cycle the task like run_follow: its command, the stop on its safety points, the base moves."""
         while self.t < seconds and not task.done:
             view = self.view(boxes(self))
+            if self.depth_of is not None:
+                view.depth = self.depth_of(self, task)
+            if self.look is not None:
+                self.look.serve(task, self.t)
             v, w, _ = task.step(view)
             stop = "obstacle" if (v or w) and safety.must_stop(task.safety_points(view.real), v, w, P) else None
             if stop:
@@ -72,8 +78,8 @@ class World:
         return geometry.odom_to_base(self.bags[i], self.pose)
 
 
-def new_task(mode="point", last=None):
-    return bag.BagTask(P, 0.0, 1, mode, last=last)
+def new_task(mode="point", last=None, **kw):
+    return bag.BagTask(P, 0.0, 1, mode, last=last, **kw)
 
 
 class Geometry(unittest.TestCase):
@@ -321,6 +327,161 @@ class CameraPointing(unittest.TestCase):
         self.assertIsNone(bag.camera_pointing(answer, None, (320, 240), P))
 
 
+class FakeLook:
+    """Answers a task's front camera request at once with `answer` (None: never answers)."""
+
+    def __init__(self, answer):
+        self.answer, self.requests = answer, []
+
+    def serve(self, task, now):
+        req = task.look_request
+        if req is None:
+            return
+        if not self.requests or self.requests[-1]["id"] != req["id"]:
+            self.requests.append(req)
+        if self.answer is not None:
+            task.looked(dict(self.answer, id=req["id"]))
+
+
+class Look(unittest.TestCase):
+    """The far stage measures the bag (base/docs/bag-sensing.md): depth first, the Jetson's front camera next."""
+
+    BAG = (2.6, 0.3)  # odometry: chosen from about 2.6 m, so the far drive must stop to look
+    HIGH, YAW = 0.30, math.radians(25)
+
+    def world(self, depth=True, dark=False):
+        from test_bag_depth import render
+        world = World([self.BAG], operator=(3.0, -0.4), point=self.BAG)
+        if depth:
+            def depth_of(w, task):
+                centre = geometry.odom_to_base(self.BAG, w.pose)
+                box = {"centre": centre, "yaw": self.YAW - w.pose[2], "size": (0.26, 0.11, self.HIGH)}
+                return render(box, dark=dark) if task.wants_depth else None
+            world.depth_of = depth_of
+        return world
+
+    def test_the_far_drive_stops_to_look_and_the_depth_top_reaches_the_result(self):
+        world = self.world()
+        task = world.run(new_task(look=True))
+        self.assertEqual(task.state, bag.REACHED, task.result)
+        self.assertEqual(task.result["top_by"], "depth")
+        self.assertLess(abs(task.result["top"] - self.HIGH), 0.015, task.result)
+        m = task.status()["look"]
+        self.assertTrue(bag.LOOK_RANGE[0] <= m["range"] <= bag.LOOK_RANGE[1], m)
+        self.assertLess(abs(m["range"] - bag.LOOK_AT), 0.1, m)  # stopped there on the way, not at the first stop
+        self.assertTrue(m["depth"]["ok"])
+
+    def test_the_yaw_is_given_in_the_base_frame_at_the_end(self):
+        from unittest import mock
+        with mock.patch.object(bag.bag_depth, "cluster_yaw", lambda pts: (0.4, 1.0, "test")):
+            world = self.world()
+            world.pose = (0.0, 0.0, 0.7)  # odometry yaw far from zero: an odometry-frame yaw would show
+            world.bags = world.seen_bags = [geometry.base_to_odom(self.BAG, world.pose)]
+            world.point = world.bags[0]
+            world.operator = geometry.base_to_odom((3.0, -0.4), world.pose)
+            self.BAG = world.bags[0]
+            task = world.run(new_task(look=True))
+        self.assertEqual(task.state, bag.REACHED, task.result)
+        look_yaw = task.status()["look"]["pose"][2]
+        want = bag.bag_depth.wrap_line(0.4 + look_yaw - world.pose[2])
+        self.assertAlmostEqual(task.result["yaw"], want, places=3)
+        self.assertLess(abs(task.result["yaw"] - 0.4), 0.05)  # about the look's base-frame yaw, not 0.4 + 0.7
+
+    def test_a_low_confidence_yaw_is_left_out(self):
+        from unittest import mock
+        with mock.patch.object(bag.bag_depth, "cluster_yaw", lambda pts: (0.4, 0.2, "short")):
+            task = self.world().run(new_task(look=True))
+        self.assertNotIn("yaw", task.result)
+
+    def test_no_depth_on_the_bag_asks_the_front_camera(self):
+        world = self.world(dark=True)
+        world.look = FakeLook({"ok": True, "top": 0.33, "conf": 0.8, "top_by": "range"})
+        task = world.run(new_task(look=True, rgb=True))
+        self.assertEqual(task.state, bag.REACHED, task.result)
+        self.assertEqual((task.result["top"], task.result["top_by"]), (0.33, "rgb"))
+        self.assertEqual(len(world.look.requests), 1)
+        pts = numpy.array(world.look.requests[0]["points"])
+        self.assertGreaterEqual(len(pts), bag.MIN_POINTS)
+        self.assertFalse(task.status()["look"]["depth"]["ok"])
+
+    def test_no_answer_goes_on_without_a_top(self):
+        world = self.world(depth=False)
+        world.look = FakeLook(None)
+        task = world.run(new_task(look=True, rgb=True))
+        self.assertEqual(task.state, bag.REACHED, task.result)
+        self.assertNotIn("top", task.result)
+        self.assertIn("no answer", task.status()["look"]["why"])
+
+    def test_a_refused_front_camera_answer_is_not_used(self):
+        world = self.world(dark=True)
+        world.look = FakeLook({"ok": False, "top": 0.5, "why": "the two ways disagree"})
+        task = world.run(new_task(look=True, rgb=True))
+        self.assertNotIn("top", task.result)
+
+    def test_without_look_nothing_is_asked(self):
+        world = self.world()
+        world.look = FakeLook({"ok": True, "top": 0.33})
+        task = world.run(new_task())
+        self.assertEqual(task.state, bag.REACHED, task.result)
+        self.assertNotIn("top", task.result)
+        self.assertEqual(world.look.requests, [])
+
+    def test_a_bag_first_seen_too_near_is_not_looked_at(self):
+        world = World([(0.85, 0.0145)], operator=(1.2, 0.8), point=(0.85, 0.0145))
+        task = world.run(new_task(look=True))
+        self.assertEqual(task.state, bag.REACHED, task.result)
+        self.assertNotIn("top", task.result)
+        self.assertIn("nearer than", task.status()["look"]["why"])
+
+
+class LookClient(unittest.TestCase):
+    def ask(self, port, request):
+        import time
+
+        class Task:
+            look_request = request
+            answer = None
+
+            def looked(self, a):
+                self.answer = a
+        task, look = Task(), bag.Look(["127.0.0.1"], port)
+        for _ in range(200):
+            look.serve(task, 0.0)
+            if task.answer:
+                break
+            time.sleep(0.02)
+        return task.answer
+
+    def test_it_asks_the_service_on_a_thread_and_hands_the_answer_over(self):
+        import socket
+        import threading
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        got = []
+
+        def answer():
+            c, _ = srv.accept()
+            req = json.loads(c.makefile().readline())
+            got.append(req)
+            c.sendall((json.dumps({"id": req["id"], "ok": True, "top": 0.31}) + "\n").encode())
+            c.close()
+        threading.Thread(target=answer, daemon=True).start()
+        a = self.ask(srv.getsockname()[1], {"id": "1-1", "points": [[1.0, 0.0]]})
+        srv.close()
+        self.assertEqual(a["top"], 0.31)
+        self.assertEqual(got[0]["id"], "1-1")
+
+    def test_nobody_listening_is_an_answer_too(self):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()  # nothing listens there now
+        a = self.ask(port, {"id": "2-1", "points": []})
+        self.assertFalse(a["ok"])
+        self.assertEqual(a["id"], "2-1")
+
 class Phase(Logged):
     """run_follow's BAG phase over --remote, with the virtual operator and a virtual bag."""
 
@@ -475,6 +636,32 @@ class Phase(Logged):
         self.tick(3)
         self.assertEqual(link.poses[-3:], [True, True, True])
 
+
+    def test_the_bag_task_looks_with_the_frames_depth_and_the_jetson_only_with_a_look_client(self):
+        self.assertIsNone(self.state.bag_look)
+        self.at_the_car()
+        self.jetson.cmd("bag")
+        self.tick(2)
+        self.assertTrue(self.state.bag.look)
+        self.assertFalse(self.state.bag.rgb)  # no Jetson: depth only
+        views = []
+        step = self.state.bag.step
+        self.state.bag.step = lambda view: (views.append(view), step(view))[1]
+        self.tick(2)
+        self.assertTrue(views and all(v.depth is not None for v in views))  # the Camera's frames carry depth
+        self.jetson.cmd("wait")
+        self.tick(2)
+
+        served = []
+
+        class Look:
+            def serve(self, task, now):
+                served.append(task)
+        self.state.bag_look = Look()
+        self.jetson.cmd("bag")
+        self.tick(3)
+        self.assertTrue(self.state.bag.rgb)
+        self.assertIs(served[-1], self.state.bag)
 
 if __name__ == "__main__":
     unittest.main()

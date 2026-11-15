@@ -157,6 +157,64 @@ class PlaceTest(unittest.TestCase):
         self.assertEqual(arm.sent, ["drop_failed|NOT_HOLDING|/arm/place: nothing held"])
 
 
+class YawTest(unittest.TestCase):
+    """The bag's long axis comes in the robot frame (base/pi/bag.py); the arm team's pick_bag wants it in the arm
+    frame, where forward is -y and left is +x (API.md)."""
+
+    def test_robot_directions_in_the_arm_frame(self):
+        m = Mount()
+        self.assertAlmostEqual(bag_arm.arm_yaw(math.pi / 2, m), 0.0)  # across the robot = along the arm's +x (left)
+        self.assertAlmostEqual(bag_arm.arm_yaw(0.0, m), -math.pi / 2)  # along the robot's forward = the arm's -y
+        self.assertAlmostEqual(bag_arm.arm_yaw(0.3, m), 0.3 - math.pi / 2)
+        self.assertAlmostEqual(bag_arm.arm_yaw(0.3 + math.pi, m), 0.3 - math.pi / 2)  # a line: no front or back
+
+    def test_it_matches_the_mount_for_any_direction_and_mount_yaw(self):
+        for mount_yaw in (0.0, 0.2, -0.5):
+            m = Mount(yaw=mount_yaw)
+            for phi in np.linspace(-3.0, 3.0, 13):
+                p = np.array([0.31, 0.02, 0.0])
+                d = m.to_arm(p + 0.1 * np.array([math.cos(phi), math.sin(phi), 0.0])) - m.to_arm(p)
+                want = math.atan2(d[1], d[0])
+                got = bag_arm.arm_yaw(phi, m)
+                self.assertAlmostEqual(math.sin(2 * (got - want)), 0.0, places=9)
+                self.assertTrue(-math.pi / 2 <= got < math.pi / 2)
+
+    def test_their_default_is_across_the_line_from_the_arm(self):
+        # all-zero quaternion: "the part runs across the arm's view"; for a bag straight ahead that is the arm's
+        # x axis (yaw 0 in the arm frame), the same as a measured yaw across the robot
+        pan = (0.0, -0.0452)
+        target = Mount().to_arm([0.31, 0.0145, 0.0])
+        default = math.atan2(target[1] - pan[1], target[0] - pan[0]) + math.pi / 2
+        self.assertAlmostEqual(math.sin(2 * (default - bag_arm.arm_yaw(math.pi / 2, Mount()))), 0.0, places=6)
+
+    def test_pick_sends_the_arm_frame_yaw_and_none_without_one(self):
+        arm = ApiArm()
+        make(arm).pick(0.31, 0.0, top=0.28, yaw=0.3)
+        self.assertAlmostEqual(arm.tasks[-1][1]["yaw"], 0.3 - math.pi / 2)
+        arm = ApiArm()
+        make(arm).pick(0.31, 0.0, top=0.28)
+        self.assertIsNone(arm.tasks[-1][1]["yaw"])
+
+    def test_the_command_carries_top_and_yaw(self):
+        arm = ApiArm()
+        jobs = bag_arm.Jobs(make(arm), log=lambda _s: None)
+        jobs.on_command(json.dumps({"action": "pick_bag", "params": {"x": 0.31, "y": 0.0, "top": 0.29, "yaw": 1.0}}))
+        jobs.thread.join(10)
+        goal = arm.tasks[-1][1]
+        self.assertAlmostEqual(goal["grasp"][2], 0.29 - 0.331, places=6)
+        self.assertAlmostEqual(goal["yaw"], 1.0 - math.pi / 2)
+        arm = ApiArm()
+        jobs = bag_arm.Jobs(make(arm), log=lambda _s: None)
+        jobs.on_command(json.dumps({"action": "pick_bag", "params": {"x": 0.31, "y": 0.0, "yaw": "x"}}))
+        if jobs.thread is not None:
+            jobs.thread.join(10)
+        self.assertEqual(arm.sent[0].split("|")[:2], ["grab_failed", "FAILED"])
+
+    def test_bag_miss_below_and_the_default_top_stay(self):
+        self.assertEqual(bag_arm.DEFAULT_TOP, 0.26)
+        self.assertFalse(hasattr(bag_arm, "bag_miss_below"))
+
+
 class JobsTest(unittest.TestCase):
     def run_job(self, jobs, text):
         jobs.on_command(text)
