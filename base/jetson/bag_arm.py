@@ -7,8 +7,9 @@ Ours is what they need as input:
     camera when it is calibrated (floor_pick.py --calibrate-self);
   - how high its top is: measured by the Pi from a distance ("top": Xtion depth or the front camera,
     base/docs/bag-sensing.md), else triangulated from 3 gripper camera views (gripper_camera.triangulate), else
-    DEFAULT_TOP. Too low is safe (the jaws close lower on the handles or the gathered mouth),
-    too high closes on air (MISSED), so the fallback is just above the LiDAR plane the bag crossed.
+    found by touch (z NaN: their pick_bag lowers its closed jaws until the joint loads change; PROBE_UNKNOWN),
+    or, with probe=False, DEFAULT_TOP: too low is safe (the jaws close lower on the handles or the gathered
+    mouth), too high closes on air (MISSED), so that fallback is just above the LiDAR plane the bag crossed.
   - which way its handles run: the Pi's "yaw" (robot frame, the long axis of its LiDAR points), turned into the
     arm frame by arm_yaw; without it their default (the part across the arm's view).
 Before anything moves, /arm/home (an API task) restarts the arm team's idle timer: their auto rest
@@ -45,6 +46,8 @@ from floor_pick import JAW_OPEN, READY, Failure, FloorPick, Planner, Result
 from so100_ik import Kinematics, Mount, Unreachable, load_limits
 
 DEFAULT_TOP = 0.26        # m above the floor: just above the LiDAR plane (0.24 to 0.25) the bag crossed
+PROBE_UNKNOWN = True      # top neither measured nor triangulated: z = NaN, their pick_bag finds it by touch
+                          # (arm-system def69dc); False = DEFAULT_TOP as before
 ARM_FLOOR_Z = -0.331      # floor in the arm frame = their launch floor_z for mount:=robot (arm.launch.py,
                           # base_z 0.305 + z_offset 0.026, base/docs/floor-pick.md Frames)
 TOP_RANGE = (0.15, 0.50)  # a triangulated top outside this is a wrong match
@@ -92,8 +95,9 @@ def look_poses(plan, kin, target, count=3):
 class BagArm:
     """Pick and place jobs over a transport with arm_task / arm_state / moving / stop (floor_pick.RosArm)."""
 
-    def __init__(self, kin, transport, camera=None, detector=None, log=print, event=None):
+    def __init__(self, kin, transport, camera=None, detector=None, log=print, event=None, probe=PROBE_UNKNOWN):
         self.k, self.t = kin, transport
+        self.probe = probe
         self.fp = FloorPick(kin, transport, Planner(kin), log=log)
         self.camera, self.detector = camera, detector or gc.BagHandleDetector()
         self.log = log
@@ -171,11 +175,14 @@ class BagArm:
                 if p is not None:
                     where, top = p[:2], float(p[2])
                     self.fp._goto("back to ready", READY, JAW_OPEN)
+                elif self.probe:
+                    top = math.nan  # their pick_bag lowers its closed jaws until they touch the top
                 else:
                     top = DEFAULT_TOP
             grasp = np.array([*self.k.mount.to_arm([where[0], where[1], 0.0])[:2], ARM_FLOOR_Z + top])
-            self.log("pick_bag at robot (%.3f, %.3f), top %.3f m -> arm (%.3f, %.3f, %.3f)"
-                     % (where[0], where[1], top, grasp[0], grasp[1], grasp[2]))
+            self.log("pick_bag at robot (%.3f, %.3f), top %s -> arm (%.3f, %.3f, %s)"
+                     % (where[0], where[1], "unknown (found by touch)" if math.isnan(top) else "%.3f m" % top,
+                        grasp[0], grasp[1], "NaN" if math.isnan(grasp[2]) else "%.3f" % grasp[2]))
             ayaw = None if yaw is None else arm_yaw(yaw, self.k.mount)
             if ayaw is not None:
                 self.log("yaw %.1f deg robot -> %.1f deg arm" % (math.degrees(yaw), math.degrees(ayaw)))

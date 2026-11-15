@@ -42,8 +42,8 @@ class ApiArm(FakeArm):
         self.sent.append(text)
 
 
-def make(arm, camera=None, detector=None):
-    return bag_arm.BagArm(KIN, arm, camera, detector, log=lambda _s: None)
+def make(arm, camera=None, detector=None, probe=False):
+    return bag_arm.BagArm(KIN, arm, camera, detector, log=lambda _s: None, probe=probe)
 
 
 class PickTest(unittest.TestCase):
@@ -58,6 +58,21 @@ class PickTest(unittest.TestCase):
         self.assertAlmostEqual(grasp[1], -0.0452 - (0.31 - 0.012), places=6)
         self.assertAlmostEqual(grasp[2], bag_arm.DEFAULT_TOP - 0.331, places=6)
         self.assertEqual(arm.sent, ["grab_success"])
+
+    def test_an_unknown_top_is_found_by_touch_by_default(self):
+        """Nothing measured the top and no gripper camera: z NaN, so their pick_bag probes (arm-system def69dc)."""
+        self.assertTrue(bag_arm.PROBE_UNKNOWN)
+        arm = ApiArm()
+        res = bag_arm.BagArm(KIN, arm, log=lambda _s: None).pick(0.31, 0.0)
+        self.assertTrue(res.ok, res)
+        grasp = np.array(arm.tasks[-1][1]["grasp"])
+        self.assertTrue(math.isnan(grasp[2]))
+        np.testing.assert_allclose(grasp[:2], KIN.mount.to_arm([0.31, 0.0, 0.0])[:2], atol=1e-9)
+
+    def test_a_measured_top_never_probes(self):
+        arm = ApiArm()
+        bag_arm.BagArm(KIN, arm, log=lambda _s: None).pick(0.31, 0.0, top=0.30)
+        self.assertAlmostEqual(arm.tasks[-1][1]["grasp"][2], 0.30 - 0.331, places=6)
 
     def test_the_top_goes_in_the_arm_frame_of_their_floor_not_our_mount_offset(self):
         # their launch floor_z for mount:=robot is -0.331 (arm.launch.py); our Mount's z_offset (camera work)
