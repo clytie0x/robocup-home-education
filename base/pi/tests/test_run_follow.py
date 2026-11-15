@@ -458,6 +458,21 @@ class Loop(Logged):
         self.assertEqual((record["v"], record["w"], record["stop"]), (0.0, 0.0, "ambiguous"))
         self.assertEqual(base.sent[-1], (0.0, 0.0))
 
+    def test_the_senses_get_the_camera_frame_for_the_depth_at_the_people(self):
+        class Recording(Crowded):
+            def read(self, now, *rest):
+                got.append(rest)
+                return super().read(now, *rest)
+
+        got = []
+        state = self.state(FakeBase())
+        state.senses = Recording()
+        self.cycle(state, 0.0)
+        self.assertEqual(got[0][-1].depth.shape, (240, 320))  # the Xtion frame, depth and all
+        state.virtual = SimpleNamespace(apply=lambda now, pose, scan, answer, alive: (scan, answer, alive), report={})
+        self.cycle(state, 0.1)
+        self.assertIsNone(got[1][-1])  # a simulated person has no depth: the real image would lie about them
+
     def test_drive_is_refused_above_0_15_with_closed_gates(self):
         closed = dict(P, max_speed=0.3, decel=None)
         self.assertIn("needs", run_follow.refusal(True, 0.16, closed))
