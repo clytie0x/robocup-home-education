@@ -1,0 +1,24 @@
+[Unit]
+Description=Robot console on the Pi (port 8081)
+# The console prints the robot's addresses and reads the Jetson link, so give the network time.
+Wants=network-online.target
+After=network-online.target
+# Restart=always for good: without this, 5 starts in 10 s (a held lock, a busy port) stop the unit for good.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/hmc-base
+# This is run_console.sh's job without its while loop: systemd does the restart. The same lock
+# file keeps a copy started by run_console.sh from running beside this one.
+ExecStartPre=-/usr/bin/mkdir -p %h/hmc-base/logs/console
+# The relative .venv path gives the same command line as run_console.sh's, which deploy.sh --restart looks for.
+ExecStart=/usr/bin/flock -n /tmp/hmc-console.lock .venv/bin/python -X faulthandler -u console.py
+StandardInput=null
+StandardOutput=append:%h/hmc-base/logs/console/console.out
+StandardError=inherit
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

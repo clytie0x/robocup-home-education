@@ -163,13 +163,16 @@ if [ $ARM = 1 ]; then  # the arm packages from their own branch; calibration and
 fi
 
 if [ $RESTART = 1 ]; then
-  # Pi: the run_console.sh keeper starts the console again 2 s after it ends; only when no job runs.
+  # Pi: the run_console.sh keeper (or base/systemd's hmc-console unit) starts the console again 2 s after it ends;
+  # only when no job runs. Jetson: through systemd when hmc-agent.service is installed, else a nohup copy.
   ssh "$PI" 'busy=$(curl -s -m 4 http://127.0.0.1:8081/api/state | python3 -c "import sys,json; print(json.load(sys.stdin)[\"job\"][\"running\"])" 2>/dev/null || echo unknown)
     if [ "$busy" = False ]; then pid=$(pgrep -f "^.venv/bin/python -X faulthandler -u console.py"); [ -n "$pid" ] && kill $pid && echo "Pi console restarted (keeper)"; else echo "Pi console NOT restarted: job running = $busy"; fi'
   # Jetson: stop the programs, start the new agent, start the programs again.
   ssh "$JETSON" 'cd ~/hmc-follow && curl -s -m 30 -X POST http://127.0.0.1:8090/stop-all >/dev/null || true
-    pid=$(pgrep -f "^python3 agent.py"); [ -n "$pid" ] && kill $pid && sleep 2
-    mkdir -p logs && setsid nohup python3 agent.py >> logs/agent.out 2>&1 < /dev/null &
+    if systemctl --user is-enabled hmc-agent.service >/dev/null 2>&1; then systemctl --user restart hmc-agent.service
+    else pid=$(pgrep -f "^python3 agent.py"); [ -n "$pid" ] && kill $pid && sleep 2
+      mkdir -p logs && setsid nohup python3 agent.py >> logs/agent.out 2>&1 < /dev/null &
+    fi
     for i in $(seq 1 20); do curl -s -m 2 http://127.0.0.1:8090/status >/dev/null && break; sleep 0.5; done
     curl -s -m 120 -X POST http://127.0.0.1:8090/start-all | head -c 300; echo'
 fi
