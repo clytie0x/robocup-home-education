@@ -67,6 +67,20 @@ class Replay(unittest.TestCase):
         s = replay.summary([cycle(0.0, True), cycle(0.1, False), cycle(1.1, False)])
         self.assertAlmostEqual(s["longest_gap"], 1.0)
 
+    def test_the_camera_health_is_summed_up(self):
+        def cam(t, age, replies):
+            return dict(cycle(t, True), cam={"age": age, "people": 0, "replies_per_s": replies})
+
+        records = [cam(0.0, 0.1, 3), cam(0.1, 0.2, 3), cam(0.2, None, 2), cam(0.3, 0.4, 2), cam(0.4, 0.5, 2)]
+        s = replay.summary(records)
+        self.assertAlmostEqual(s["cam_age_median"], 0.3)  # 0.2 and 0.4
+        self.assertAlmostEqual(s["cam_age_p95"], 0.5)  # 4 ages: the nearest rank to 95 % is the last
+        self.assertAlmostEqual(s["cam_replies_mean"], 12 / 5)  # a missing age still counts its replies
+
+    def test_an_old_log_without_camera_fields(self):
+        s = replay.summary([cycle(0.0, True), cycle(0.1, True)])
+        self.assertEqual((s["cam_age_median"], s["cam_age_p95"], s["cam_replies_mean"]), (None, None, None))
+
 
 if __name__ == "__main__":
     unittest.main()

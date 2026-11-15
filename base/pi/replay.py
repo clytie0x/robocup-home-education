@@ -4,12 +4,14 @@
 
 Prints the share of cycles locked, the longest time without a lock, the closest obstacle
 (from the base centre), the stops by reason and the cycle time (cycle start to
-wheel send) median and worst. For the way back: the breadcrumbs dropped, the keyframe
-matches used and skipped by reason, the largest correction used, the time behind the
-queue, and the seconds standing still on the way back (blocked).
+wheel send) median and worst. For the camera: the age of its answers median and p95, and
+the mean answers per second, when the log has them. For the way back: the breadcrumbs
+dropped, the keyframe matches used and skipped by reason, the largest correction used,
+the time behind the queue, and the seconds standing still on the way back (blocked).
 """
 import argparse
 import json
+import math
 import statistics
 from collections import Counter
 from pathlib import Path
@@ -35,6 +37,9 @@ def summary(records):
     times = [r["cycle_time"] for r in cycles if r["cycle_time"] is not None]
     matches = [r["keyframe"] for r in cycles if r.get("keyframe")]
     crumbs = [r["breadcrumbs"] for r in cycles if r.get("breadcrumbs") is not None]
+    cam = [r["cam"] for r in cycles if isinstance(r.get("cam"), dict)]
+    ages = [c["age"] for c in cam if c.get("age") is not None]
+    replies = [c["replies_per_s"] for c in cam if c.get("replies_per_s") is not None]
     return {
         "cycles": len(cycles),
         "locked_share": sum(r["locked"] for r in cycles) / len(cycles) if cycles else 0.0,
@@ -43,6 +48,9 @@ def summary(records):
         "stops": dict(Counter(r["stop"] for r in records if r.get("stop"))),
         "cycle_median": statistics.median(times) if times else None,
         "cycle_worst": max(times) if times else None,
+        "cam_age_median": statistics.median(ages) if ages else None,
+        "cam_age_p95": _p95(ages),
+        "cam_replies_mean": statistics.fmean(replies) if replies else None,
         "breadcrumbs": max(crumbs) if crumbs else None,  # a loop cut shortens the route: the most it had
         "keyframes": dict(Counter(m["why"] for m in matches if m["why"] != "far")),  # "far": nothing to match
         "largest_correction": max((m["shift"] for m in matches if m["used"]), default=None),
@@ -56,6 +64,14 @@ def _number(value, unit):
     return "none" if value is None else "%.3f %s" % (value, unit)
 
 
+def _p95(values):
+    """The nearest-rank 95th percentile: the value at rank ceil(0.95 * n)."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("logdir", type=Path)
@@ -67,6 +83,12 @@ def main(argv=None):
     print("stops           %s" % (", ".join("%s %d" % kv for kv in sorted(s["stops"].items())) or "none"))
     print("cycle median    %s" % _number(s["cycle_median"], "s"))
     print("cycle worst     %s" % _number(s["cycle_worst"], "s"))
+    if s["cam_age_median"] is not None:
+        print("cam age median  %s" % _number(s["cam_age_median"], "s"))
+    if s["cam_age_p95"] is not None:
+        print("cam age p95     %s" % _number(s["cam_age_p95"], "s"))
+    if s["cam_replies_mean"] is not None:
+        print("cam replies     %.2f /s" % s["cam_replies_mean"])
     print("breadcrumbs     %s" % ("none" if s["breadcrumbs"] is None else s["breadcrumbs"]))
     print("keyframes       %s" % (", ".join("%s %d" % kv for kv in sorted(s["keyframes"].items())) or "none"))
     print("largest fix     %s" % _number(s["largest_correction"], "m"))

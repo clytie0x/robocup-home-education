@@ -9,6 +9,7 @@ import socket
 import struct
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 
@@ -58,6 +59,7 @@ RETRY_PRIMARY_S = 10.0  # while on a backup host, how often to try the primary a
 PROBE_TIMEOUT_S = 0.2  # that try: the cable answers in ~1 ms, and a frame waits at most this long
 BAD_WITHIN_S = 5.0  # a link lost this soon after connecting (or by a reply timeout) marks its host bad
 BAD_FOR_S = 30.0  # a bad host is tried only after the others, and not tried again from a backup
+REPLY_WINDOW_S = 1.0  # answers counted by replies_per_s: those of the last second
 
 
 def hosts(p):
@@ -114,6 +116,7 @@ class JetsonLink:
         self._pending_pose = False
         self._answer = None
         self._last_reply = None
+        self.reply_times = deque()  # clock times of the answers kept for replies_per_s
         self._seq = 0
         self._thread = None
         self.error = None  # text of the last problem, for logs
@@ -137,6 +140,11 @@ class JetsonLink:
     def alive(self, now, silence):
         with self._lock:
             return self._last_reply is not None and now - self._last_reply <= silence
+
+    def replies_per_s(self, now):
+        """How many answers arrived in the last REPLY_WINDOW_S seconds (one second)."""
+        with self._lock:
+            return sum(1 for t in self.reply_times if now - t < REPLY_WINDOW_S)
 
     def stop(self):
         self._stop.set()
@@ -235,3 +243,6 @@ class JetsonLink:
         with self._lock:
             self._answer = Answer(reply["t"], people, objects)
             self._last_reply = self._clock()
+            self.reply_times.append(self._last_reply)
+            while self.reply_times and self.reply_times[0] <= self._last_reply - REPLY_WINDOW_S:
+                self.reply_times.popleft()  # older answers are not counted any more
