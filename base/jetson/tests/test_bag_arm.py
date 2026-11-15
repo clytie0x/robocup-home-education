@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bag_arm  # noqa: E402
 from floor_pick import JAW_OPEN, READY  # noqa: E402
+from so100_ik import Kinematics, Mount  # noqa: E402
 from test_floor_pick import KIN, PLANNER, FakeArm, ProjectingDetector, true_camera  # noqa: E402
 
 
@@ -57,6 +58,31 @@ class PickTest(unittest.TestCase):
         self.assertAlmostEqual(grasp[1], -0.0452 - (0.31 - 0.012), places=6)
         self.assertAlmostEqual(grasp[2], bag_arm.DEFAULT_TOP - 0.331, places=6)
         self.assertEqual(arm.sent, ["grab_success"])
+
+    def test_the_top_goes_in_the_arm_frame_of_their_floor_not_our_mount_offset(self):
+        # their launch floor_z for mount:=robot is -0.331 (arm.launch.py); our Mount's z_offset (camera work)
+        # must not shift the height we send
+        kin = Kinematics(Mount(z_offset=0.0), KIN.limits)
+        arm = ApiArm()
+        bag_arm.BagArm(kin, arm, log=lambda _s: None).pick(0.31, 0.0, top=0.30)
+        grasp = np.array(arm.tasks[-1][1]["grasp"])
+        self.assertAlmostEqual(bag_arm.ARM_FLOOR_Z, -0.331)
+        self.assertAlmostEqual(grasp[2], 0.30 - 0.331, places=6)
+        np.testing.assert_allclose(grasp[:2], kin.mount.to_arm([0.31, 0.0, 0.0])[:2], atol=1e-9)
+
+    def test_the_grasp_reading_goes_into_the_event(self):
+        arm = ApiArm(results={"pick_bag": (True, "SUCCESS", "holding", {"gripper_pos": 0.123, "gripper_load": 25.0})})
+        make(arm).pick(0.31, 0.0, top=0.30)
+        self.assertEqual(arm.sent, ["grab_success|SUCCESS|gripper_pos=0.123 gripper_load=25.0"])
+        arm = ApiArm(results={"pick_bag": (False, "MISSED", "closed on air 3 times",
+                                           {"gripper_pos": 0.041, "gripper_load": 3.0})})
+        make(arm).pick(0.31, 0.0, top=0.30)
+        self.assertEqual(arm.sent, ["grab_failed|MISSED|/arm/pick_bag: closed on air 3 times "
+                                    "[gripper_pos=0.041 gripper_load=3.0]"])
+        arm = ApiArm(results={"pick_bag": (True, "SUCCESS", "holding", {"gripper_pos": float("nan"),
+                                                                         "gripper_load": float("nan")})})
+        make(arm).pick(0.31, 0.0, top=0.30)
+        self.assertEqual(arm.sent, ["grab_success"])        # no grasp reading: the plain event
 
     def test_the_camera_measures_the_top_and_the_grasp_moves_to_it(self):
         cam = true_camera()

@@ -10,9 +10,13 @@ Ours is what they need as input:
     too high closes on air (MISSED), so the fallback is just above the LiDAR plane the bag crossed.
 Before anything moves, /arm/home (an API task) restarts the arm team's idle timer: their auto rest
 fires 120 s after their last task and would replace our camera moves (seen 2026-11-15 04:15).
+The top goes to them in the arm frame of their floor: z = ARM_FLOOR_Z + top (their floor_z for mount:=robot
+is the measured -0.331 itself, so no offset of ours is added); x, y go through Mount.to_arm.
 
 /robot/command (JSON {"action", "params"}):
   pick_bag {"x", "y"[, "top"]}   robot frame, metres -> grab_success | grab_failed|CODE|message
+                                 (with their grasp reading: grab_success|SUCCESS|gripper_pos=R gripper_load=L,
+                                 grab_failed|CODE|message [gripper_pos=R gripper_load=L])
   drop_bag {"x", "y"}            floor point, robot frame -> drop_done | drop_failed|CODE|message
   stop                           while a job runs: /arm/stop (the arm holds where it is)
 Events go out on /robot/event, the names hmc_flow.py reads.
@@ -36,6 +40,8 @@ from floor_pick import JAW_OPEN, READY, Failure, FloorPick, Planner, Result
 from so100_ik import Kinematics, Mount, Unreachable, load_limits
 
 DEFAULT_TOP = 0.26        # m above the floor: just above the LiDAR plane (0.24 to 0.25) the bag crossed
+ARM_FLOOR_Z = -0.331      # floor in the arm frame = their launch floor_z for mount:=robot (arm.launch.py,
+                          # base_z 0.305 + z_offset 0.026, base/docs/floor-pick.md Frames)
 TOP_RANGE = (0.15, 0.50)  # a triangulated top outside this is a wrong match
 MAX_SPREAD = 0.02         # m, RMS distance of the triangulated point from the view rays
 MAX_SHIFT = 0.08          # m, the camera may move the grasp point this far from the LiDAR's bag centre
@@ -79,6 +85,7 @@ class BagArm:
         self.camera, self.detector = camera, detector or gc.BagHandleDetector()
         self.log = log
         self.event = event or getattr(transport, "event", lambda _e: None)
+        self.reading = {}          # the last API result's grasp reading (gripper_pos rad, gripper_load %)
 
     def _ready(self):
         st = self.t.arm_state()
@@ -93,7 +100,9 @@ class BagArm:
             raise Failure("BUSY", "someone else is moving the arm")
 
     def _task(self, name, timeout, **goal):
-        ok, code, msg = self.t.arm_task(name, timeout, **goal)
+        res = self.t.arm_task(name, timeout, **goal)
+        ok, code, msg = res[:3]
+        self.reading = res[3] if len(res) > 3 else {}     # their grasp reading (pick_bag), if they send one
         if not ok:
             raise Failure(code or "FAILED", "/arm/%s: %s" % (name, msg))
         return msg
@@ -128,8 +137,17 @@ class BagArm:
             return None
         return p
 
+    def _reading(self):
+        """'gripper_pos=R gripper_load=L' from the last pick_bag result, '' without a finite reading."""
+        pos, load = self.reading.get("gripper_pos"), self.reading.get("gripper_load")
+        if pos is None or load is None or not (math.isfinite(pos) and math.isfinite(load)):
+            return ""
+        return "gripper_pos=%.3f gripper_load=%.1f" % (pos, load)
+
     def pick(self, x, y, top=None):
-        """Pick the bag at robot (x, y). Sends grab_success or grab_failed|CODE|message."""
+        """Pick the bag at robot (x, y). Sends grab_success or grab_failed|CODE|message (with their grasp
+        reading when they send one, for the flow log)."""
+        self.reading = {}
         try:
             self._ready()
             self._task("home", HOME_TIMEOUT)
@@ -141,15 +159,18 @@ class BagArm:
                     self.fp._goto("back to ready", READY, JAW_OPEN)
                 else:
                     top = DEFAULT_TOP
-            grasp = self.k.mount.to_arm([where[0], where[1], top])
+            grasp = np.array([*self.k.mount.to_arm([where[0], where[1], 0.0])[:2], ARM_FLOOR_Z + top])
             self.log("pick_bag at robot (%.3f, %.3f), top %.3f m -> arm (%.3f, %.3f, %.3f)"
                      % (where[0], where[1], top, grasp[0], grasp[1], grasp[2]))
             msg = self._task("pick_bag", PICK_TIMEOUT, grasp=tuple(grasp), yaw=None)
         except Failure as exc:
             self.log("FAILED %s: %s" % (exc.code, exc.message))
-            self.event("grab_failed|%s|%s" % (exc.code, exc.message.replace("|", "/")))
+            note = self._reading()
+            self.event("grab_failed|%s|%s%s" % (exc.code, exc.message.replace("|", "/"),
+                                                " [%s]" % note if note else ""))
             return Result(False, exc.code, exc.message)
-        self.event("grab_success")
+        note = self._reading()
+        self.event("grab_success|SUCCESS|%s" % note if note else "grab_success")
         return Result(True, "SUCCESS", msg)
 
     def place(self, x, y):

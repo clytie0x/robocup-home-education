@@ -760,7 +760,9 @@ class RosArm:
     def arm_task(self, name, timeout, **goal):
         """Run one of the arm team's API tasks (/arm/home, /arm/pick_bag, /arm/place: API.md) and wait.
         goal: pick_bag -> grasp=(x, y, z) arm base frame, yaw (rad or None), thickness, length;
-        place -> target=(x, y). Returns (success, error_code, message)."""
+        place -> target=(x, y). Returns (success, error_code, message[, reading]): reading (only when the
+        arm answered) = the result's gripper_pos (rad) and gripper_load (%) after their last grasp, {} when
+        their result has no such fields."""
         from geometry_msgs.msg import PoseStamped  # noqa: PLC0415
         from rclpy.action import ActionClient  # noqa: PLC0415
         from so100_interfaces.action import Home, PickBag, Place  # noqa: PLC0415
@@ -794,7 +796,8 @@ class RosArm:
             handle.cancel_goal_async()
             return False, "TIMEOUT", "/arm/%s took longer than %.0f s" % (name, timeout)
         r = res.result
-        return bool(r.success), r.error_code, r.message
+        reading = {k: float(getattr(r, k)) for k in ("gripper_pos", "gripper_load") if hasattr(r, k)}
+        return bool(r.success), r.error_code, r.message, reading
 
     def arm_state(self, wait=3.0):
         end = time.monotonic() + wait
