@@ -969,3 +969,21 @@ Source: the arm stack log on the Jetson (`~/hmc-follow/logs/armstack.log`, pick_
 - Xtion: auto exposure true, auto white balance true (read back by camera.py), colour mean 45.4 in the dark room.
 - base/pi/tools/run_console.sh was 100644 in git, so the 11:06 deploy left it without +x on the Pi and the
   @reboot crontab could not have started the console. Fixed in git (07f01ec) and `chmod +x` on the Pi.
+
+## 2026-11-15 13:25 to 13:45: probe tries 2 and 3, the weight check
+
+Source: `~/hmc-follow/logs/armstack.log` (pick_place lines), console `/scan`, Xtion frames from `/stream`.
+- Try 2 (arm d139b3a, robot (0.336, 0.026), yaw 0.768 rad along the LiDAR line): contact at 27.8 cm (elbow +11).
+  Grasp 0.051 rad, load 10.0 %. Weight check: empty above the bag 14, 11, 8 (arriving from above, still falling),
+  closed 17, 16, 16 (from below) -> "held by weight" -> SUCCESS. Nothing was lifted: the LiDAR points and the
+  Xtion image of the object were unchanged. Put down with /arm/place (0.30, 0.18) -> SUCCESS ((0.05, 0.40) was
+  unreachable).
+- Try 3 (arm e088345: both readings from below, settled pairs): contact at 24.8 cm (elbow +11). Try 1/3 unplannable,
+  try 2/3 (+5 cm) grasp 0.048 rad, load 9.2 %. Empty readings 18, 12, 9, 6, 2, 4 -> 3; closed 18, 16 -> 17 ->
+  "held by weight" again, and again nothing lifted (LiDAR unchanged). The shoulder load decays for 5 to 6 s at
+  rest, so a quick reading looks like weight.
+- Result: 0 real picks out of 3 tries on this object. `bag_weight_load` set to 0 at runtime (ros2 param set) and as
+  the default (arm-system, after e088345). Put down again with /arm/place (0.30, 0.18) -> SUCCESS, arm idle.
+- Open: whether the red object 0.30 m ahead is the gift bag at all (it fills the Xtion view; the LiDAR sees a
+  straight 5 cm line at 0.245 m; the probe touched at 27.8 and 24.8 cm). The room is dark and no camera sees the
+  jaws, so why the grasps close on air is not known.
