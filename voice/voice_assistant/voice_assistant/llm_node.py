@@ -74,7 +74,7 @@ FEW_SHOT = [
 # Fast path: safety-critical / must-not-miss commands are matched by keyword and executed
 # immediately, without waiting for (or trusting) the LLM.
 NEGATION = re.compile(r"\b(don'?t|do not|never|not|no)\b", re.I)
-from voice_assistant.rule_node import STOP_ALIKE, FUZZY_REPLY, fuzzy_command   # shared with the rule brain
+from voice_assistant.rules import STOP_ALIKE, FUZZY_REPLY, fuzzy_command   # shared with the rule brain
 
 FAST_RULES = [
     ("stop", re.compile(r"^\W*(?:(?:hey\s+)?robot\W+|please\W+)*(stop|halt|freeze)\b", re.I),
