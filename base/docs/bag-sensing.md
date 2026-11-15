@@ -124,8 +124,9 @@ segmenter that finds nothing, a missing frame and a missing calibration are all 
 - `bag_depth.cluster_yaw`. With one straight side, the yaw is its direction. With two sides (an L, points more
   than 1 cm off one line), the points are split at the corner and the longer side is taken. The confidence is
   `min(1, extent / 0.20 m)` times the straightness.
-- **Limitation.** A bag seen end-on shows its short side, and the yaw is then 90 deg off. The confidence is low
-  only when that side is short.
+- **End on.** A bag seen end-on shows only its short side, whose direction is 90 deg off. So one straight side
+  shorter than `ONE_SIDE_MIN` 0.18 m, or an L whose longer side is not 1.3 times the other (`SIDE_RATIO`), gives
+  no yaw, and the arm keeps its default. A narrow end longer than 0.18 m (a bag deeper than that) still fools it.
 - The handles of a gift bag run along its long axis. The arm team's yaw is "the part's long direction, the jaws
   close across it" (PickBag.action).
 - `bag_arm.arm_yaw(yaw, mount) = yaw - mount.yaw - 90 deg`, wrapped to [-90, 90). The arm's forward is -y and its

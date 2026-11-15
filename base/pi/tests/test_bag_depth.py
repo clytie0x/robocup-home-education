@@ -137,6 +137,24 @@ class Yaw(unittest.TestCase):
         self.assertLess(conf, 0.3)
         self.assertEqual(bag_depth.cluster_yaw([(1.0, 0.0), (1.0, 0.01)])[0], None)
 
+    def test_one_short_side_may_be_the_narrow_end_so_no_yaw(self):
+        """Seen end on, the LiDAR gets only the bag's narrow side (0.12 m): its direction is the bag's SHORT axis,
+        90 deg off. A single side shorter than ONE_SIDE_MIN gives no yaw (the arm keeps its default)."""
+        yaw, conf, why = bag_depth.cluster_yaw(side((1.0, -0.06), (1.0, 0.06), 9))
+        self.assertIsNone(yaw)
+        self.assertEqual(conf, 0.0)
+        self.assertIn("narrow end", why)
+
+    def test_two_sides_of_about_the_same_length_give_no_yaw(self):
+        a = math.radians(30)
+        corner = np.array([1.0, 0.0])
+        one = corner + 0.20 * np.array([math.cos(a), math.sin(a)])
+        other = corner + 0.19 * np.array([-math.sin(a), math.cos(a)])
+        pts = np.vstack([side(other, corner, 12), side(corner, one, 12)[1:]])
+        yaw, conf, why = bag_depth.cluster_yaw(pts)
+        self.assertIsNone(yaw)
+        self.assertIn("same length", why)
+
     def test_the_yaw_is_a_line_in_minus_90_to_90_deg(self):
         for a in (-3.0, -1.6, 0.0, 1.5708, 2.0, 3.1):
             w = bag_depth.wrap_line(a)

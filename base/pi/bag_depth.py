@@ -38,6 +38,8 @@ SHARE_TOP = 0.245  # m: that box reaches up to the LiDAR plane, where the LiDAR 
 OK_CONF = 0.5  # a measurement under this confidence is not used
 YAW_EXTENT = 0.20  # m, a LiDAR side this long gives a full yaw confidence
 SIDE_RMS = 0.01  # m, points farther than this from one line are two sides (an L)
+ONE_SIDE_MIN = 0.18  # m, one straight side shorter than this may be the bag's narrow end (seen end on: 90 deg off)
+SIDE_RATIO = 1.3  # of an L, the longer side must be this much longer than the other to be the long axis
 
 
 def _pose(p):
@@ -187,8 +189,9 @@ def cluster_yaw(points):
     """The bag's long-axis yaw (rad, base frame, a line in [-pi/2, pi/2)) from its LiDAR points, with a confidence.
 
     One straight side: its direction. Two (an L: the points stray more than SIDE_RMS off one line): split at the
-    corner, the point farthest off the line between the two ends, and take the longer side. Returns
-    (yaw or None, conf 0 to 1, why)."""
+    corner, the point farthest off the line between the two ends, and take the longer side. No yaw when it may
+    be the short axis: one side under ONE_SIDE_MIN (the narrow end seen end on), or an L whose sides differ by
+    less than SIDE_RATIO. Returns (yaw or None, conf 0 to 1, why)."""
     pts = np.asarray(points, float).reshape(-1, 2)
     if len(pts) < 3:
         return None, 0.0, "fewer than 3 LiDAR points"
@@ -203,10 +206,14 @@ def cluster_yaw(points):
         corner = pts[np.argmax(off)]
         tc = (corner - pts.mean(axis=0)) @ d
         sides = [pts[t <= tc], pts[t >= tc]]
-        fits = [_line(s) for s in sides if len(s) >= 3]
+        fits = sorted((_line(s) for s in sides if len(s) >= 3), key=lambda f: f[1])
+        if len(fits) == 2 and fits[1][1] < SIDE_RATIO * fits[0][1]:
+            return None, 0.0, "two sides of about the same length (%.2f, %.2f m)" % (fits[0][1], fits[1][1])
         if fits:
-            d, extent, rms = max(fits, key=lambda f: f[1])
+            d, extent, rms = fits[-1]
             why = "two sides, the longer %.2f m" % extent
+    elif extent < ONE_SIDE_MIN:
+        return None, 0.0, "one side %.2f m: may be the narrow end" % extent
     straight = 1.0 - _ramp(rms, SIDE_RMS, 3 * SIDE_RMS)
     conf = round(min(1.0, extent / YAW_EXTENT) * straight, 2)
     return wrap_line(math.atan2(d[1], d[0])), conf, why

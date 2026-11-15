@@ -49,7 +49,8 @@ retries a miss shifted across the handle. `base/jetson/bag_arm.py` gives them th
   a height of 0.15 to 0.50 m and within 8 cm of the Pi's x, y. Else the top is `DEFAULT_TOP` 0.26 m (just
   above the LiDAR plane the bag crossed: too low only grips lower, too high closes on air).
 - The goal goes in the arm base frame through `Mount.to_arm`, so `z = top - 0.331` (base_z 0.305 plus our
-  measured z_offset 0.026, where their `table_z` is -0.31): their jaws then reach the real top.
+  measured z_offset 0.026, the same as their launch `floor_z` -0.331 for mount:=robot and `FLOOR_Z`
+  in their arm_client.py): their jaws then reach the real top.
 - `drop_bag {"x", "y"}`: `/arm/place` at that floor point.
 - Events: `grab_success`, `grab_failed|CODE|message`, `drop_done`, `drop_failed|CODE|message`.
   `stop` during a job calls `/arm/stop`.
@@ -162,9 +163,9 @@ jaws. If the jaws read closed, the result is NOT_HOLDING.
 most 0.05 m/s on average on straight lines. Moves use min-jerk timing, with the peak inside those
 limits. Every move's timeout is its duration + 5 s, every gripper command 10 s. In the dry run from
 the rest pose, a full pick takes about 41 s of motion: above the bag 14 s, descend 3.8 s, lift
-15.7 s, across 7.7 s, plus the gripper. **grab_success comes about 35 s after the start, but
-hmc_flow's default grab_timeout is 30 s.** Start hmc_flow with `-p grab_timeout:=60.0`, or start
-the pick from READY, before wiring it in.
+15.7 s, across 7.7 s, plus the gripper. grab_success comes about 35 s after the start; hmc_flow's
+grab_timeout default is 90 s and the agent starts it with `-p grab_timeout:=240.0`
+(`base/jetson/agent.py`, `FLOW_ARGS`).
 
 **Carry pose.** The planner searches for a pose that keeps the hanging bag inside the footprint and
 above the deck. The bag is modelled hanging 0.27 m below the grip (assessment line 559), half size
