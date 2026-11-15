@@ -1,6 +1,13 @@
-"""Colour and depth frames from the Xtion through OpenNI2, on a background thread."""
+"""Colour and depth frames from the Xtion through OpenNI2, on a background thread.
+
+Venue lighting: the colour stream's auto exposure and auto white balance are turned on when it starts and read
+back (auto_light); Camera.settings keeps what the driver answered. On the robot: python3 camera.py prints them
+with the colour frame's mean level (the check of lane light).
+"""
 
 import ctypes as C
+import inspect
+import json
 import threading
 import time
 from dataclasses import dataclass
@@ -28,6 +35,7 @@ class Camera:
         self._frame = None
         self._thread = None
         self.error = None
+        self.settings = None  # {"auto_exposure", "auto_white_balance"}: True, False or None (no answer)
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -40,9 +48,14 @@ class Camera:
         with self._lock:
             self._frame = frame
 
+    def _keep_settings(self, settings):
+        self.settings = dict(settings)
+
     def _run(self):
         try:
-            self._capture(365 * 24 * 3600, self._on_pair, self._stop.is_set)
+            takes = "on_settings" in inspect.signature(self._capture).parameters  # test captures may not
+            extra = {"on_settings": self._keep_settings} if takes else {}
+            self._capture(365 * 24 * 3600, self._on_pair, self._stop.is_set, **extra)
             if not self._stop.is_set():
                 raise RuntimeError("camera stream ended")
         except Exception as error:
@@ -59,9 +72,31 @@ class Camera:
             self._thread.join(5)
 
 
+AUTO_WHITE_BALANCE, AUTO_EXPOSURE = 100, 101  # ONI_STREAM_PROPERTY_* in OpenNI2's OniProperties.h, OniBool (int)
+
+
+def auto_light(library, stream):
+    """Turn the colour stream's auto exposure and auto white balance on, then read both back.
+
+    Returns {"auto_exposure": ..., "auto_white_balance": ...}, each True or False as the driver reads it back,
+    or None when it does not answer (then nothing is known: check on the robot with python3 camera.py).
+    """
+    found = {}
+    for name, prop in (("auto_exposure", AUTO_EXPOSURE), ("auto_white_balance", AUTO_WHITE_BALANCE)):
+        on = C.c_int(1)
+        library.oniStreamSetProperty(stream, prop, C.byref(on), C.sizeof(on))
+        value, size = C.c_int(-1), C.c_int(C.sizeof(C.c_int))
+        if library.oniStreamGetProperty(stream, prop, C.byref(value), C.byref(size)) != 0:
+            found[name] = None
+        else:
+            found[name] = bool(value.value)
+    return found
+
+
 # Taken from xohm@pi:~/pi-drive/person.py:_capture_color_and_depth on 2026-11-13; depth is now a
 # numpy array (frombuffer) instead of a struct.unpack tuple.
-def capture_color_and_depth(seconds, on_pair=None, should_stop=None):
+def capture_color_and_depth(seconds, on_pair=None, should_stop=None, on_settings=None):
+    """on_settings(dict), when given, gets auto_light's answer for the colour stream once it started."""
     library = C.CDLL("libOpenNI2.so.0")
 
     class DevInfo(C.Structure):
@@ -107,6 +142,11 @@ def capture_color_and_depth(seconds, on_pair=None, should_stop=None):
             if library.oniDeviceCreateStream(device, sensor, C.byref(handle)) != 0 or library.oniStreamStart(handle) != 0:
                 raise RuntimeError("stream_failed")
             handles.append(handle)
+        library.oniStreamSetProperty.argtypes = [C.c_void_p, C.c_int, C.c_void_p, C.c_int]
+        library.oniStreamGetProperty.argtypes = [C.c_void_p, C.c_int, C.c_void_p, C.POINTER(C.c_int)]
+        settings = auto_light(library, handles[0])  # sensor 2: colour
+        if on_settings is not None:
+            on_settings(settings)
         color = depth = None
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline and not (should_stop and should_stop()) and (color is None or depth is None):
@@ -147,3 +187,18 @@ def capture_color_and_depth(seconds, on_pair=None, should_stop=None):
         if device.value:
             library.oniDeviceClose(device)
         library.oniShutdown()
+
+
+def main():
+    """On the robot: open the Xtion, print the colour stream's auto exposure and white balance as the driver reads
+    them back, and the mean level of one colour frame."""
+    import numpy as np
+
+    got = {}
+    pair = capture_color_and_depth(5.0, on_settings=got.update)
+    rgb = None if pair is None else np.frombuffer(pair[0]["rgb"], np.uint8)
+    print(json.dumps(dict(got, rgb_mean=None if rgb is None else round(float(rgb.mean()), 1))))
+
+
+if __name__ == "__main__":
+    main()

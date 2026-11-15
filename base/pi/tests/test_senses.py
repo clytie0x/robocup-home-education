@@ -685,6 +685,21 @@ class Range(unittest.TestCase):
         self.assertAlmostEqual(ranges[1], camera_range(*front), delta=0.05)  # never farther apart than they look
 
 
+    def test_washed_out_depth_falls_back_instead_of_a_wrong_range(self):
+        # light_bench on the Xtion's own frames (depth30.npz): a strong infrared light makes holes, it never
+        # changes the readings that stay. Holes over most of the patch: no range (the 0.3 valid share).
+        at = (1.5, 0.0)
+        answer, frame = view(0.0, [(at, OPERATOR)])
+        box = answer.people[0].box
+        rows = slice(int(box[1] + (box[3] - box[1]) / 2), int(math.ceil(box[1] + (box[3] - box[1]) * 0.9)))
+        washed = frame.depth.copy()
+        washed[rows] = 0
+        self.assertIsNone(person_range(box, washed, P))
+        holes = frame.depth.copy()
+        holes[rows.start:rows.stop:2] = 0  # half the rows: the rest still gives the right range
+        self.assertAlmostEqual(person_range(box, holes, P), camera_range(*at), delta=0.05)
+
+
 class TwoAtTheTrack(unittest.TestCase):
     """Run 20261115-032329: 44 cycles 'two seen at the track', two camera people within MATCH_DEG of the
     track bearing, e.g. a second person behind the operator at a different range."""
@@ -891,3 +906,143 @@ class Looks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def lit(x, y, look, light):
+    """A camera person whose box had this mean luma (light.box_light on the Jetson)."""
+    return Seen(camera_bearing(x, y), 0.9, look, [0, 0, 1, 1], light=light)
+
+
+def bad(t, people, why="dark"):
+    """An answer for a frame the Jetson's light gate refused."""
+    return Answer(t, people, good=False, why=why)
+
+
+def learned_at(light, at=(1.5, 0.0)):
+    """Senses that learned the operator's 20 looks from frames where their box had this light, as the loop does
+    (senses.learned is the follower's count, one more each cycle with a look)."""
+    s = enrolled(*at)
+    for i in range(20):
+        s.learned = i
+        t = round(0.1 * (i + 1), 1)
+        got = read(s, t, scan_of(person(*at)), Answer(t, [lit(*at, OPERATOR, light)]))
+        assert got.operator_look == OPERATOR, i
+    s.learned = 20
+    return s
+
+
+class Lighting(unittest.TestCase):
+    """Venue lighting (lane light): a frame the Jetson refused (too dark, saturated, a flash) is no answer for
+    identity: no enrol, no re-lock, no look learned or compared, no veto of a fix; and no 'the camera saw nobody'
+    evidence. The LiDAR track goes on. A look whose box light is far from the operator's learned light is not
+    compared (a spotlight on the operator must not make them 'someone else')."""
+
+    def test_enrol_refuses_a_refused_frame(self):
+        s = RealSenses(P)
+        got = s.enrol(0.0, scan_of(person(1.5, 0.0)), bad(0.0, [seen(1.5, 0.0, OPERATOR)], "flash"))
+        self.assertEqual(got, "camera frame refused (flash): wait")
+        self.assertFalse(s.locked)
+
+    def test_a_refused_frame_never_re_locks(self):
+        scan = scan_of(person(1.5, 0.0))
+        s = ready()
+        got = read(s, 0.0, scan, bad(0.0, [seen(1.5, 0.0, OPERATOR)]))
+        self.assertIsNone(got.operator)
+        self.assertFalse(s.locked)
+        got = read(s, 0.1, scan, Answer(0.1, [seen(1.5, 0.0, OPERATOR)]))
+        self.assertTrue(s.locked)
+
+    def test_dark_or_flashing_frames_keep_the_lidar_track_and_never_switch(self):
+        # 3 s of refused frames while the operator walks off to the left and a stranger stands still at 1.2 m on
+        # the right; the refused frames even say the one at the track looks like someone else.
+        s = enrolled(1.5, 0.0)
+        stranger = (1.2, -0.9)
+        for i in range(30):
+            t = round(0.1 * (i + 1), 1)
+            op = (1.5 + 0.02 * i, 0.01 * i)
+            answer = bad(t, [seen(*op, OTHER), seen(*stranger, OPERATOR)], "dark" if i % 2 else "flash")
+            got = read(s, t, scan_of(person(*op) + person(*stranger)), answer)
+            self.assertTrue(s.locked, t)
+            self.assertAlmostEqual(got.operator[1], op[1], delta=0.05)
+            self.assertIsNone(got.operator_look)  # nothing learned or compared from those frames
+            self.assertEqual(got.looks, {})
+
+    def test_a_refused_frame_never_vetoes_a_fix_after_a_gap(self):
+        stranger = (1.5, -0.25)  # as Gaps.test_a_contradicting_look_after_a_gap_drops_the_track
+        s = enrolled()
+        read(s, 0.1, scan_of())
+        read(s, 0.2, scan_of(person(*stranger)), bad(0.2, [seen(*stranger, OTHER)]))
+        self.assertTrue(s.locked)  # a good frame would have dropped it; a refused one says nothing
+        s = enrolled()
+        read(s, 0.1, scan_of(), bad(0.1, [seen(1.5, 0.0, OTHER)]))  # nor is it kept for the veto later
+        read(s, 0.2, scan_of(person(1.5, -0.1)))
+        self.assertTrue(s.locked)
+
+    def test_good_frames_that_see_nobody_keep_the_lidar_track(self):
+        # the detector misses the operator for 5 s (a light the gate passed): the LiDAR track goes on
+        s = enrolled(1.5, 0.0)
+        for i in range(50):
+            t = round(0.1 * (i + 1), 1)
+            op = (1.5 + 0.02 * i, 0.0)  # walks off to 2.5 m
+            got = read(s, t, scan_of(person(*op)), Answer(t, []))
+            self.assertTrue(s.locked, t)
+            self.assertAlmostEqual(got.operator[0], op[0] + P["lidar_x"], delta=0.05)
+
+    def set_down(self, answer_for, frames):
+        """SetDown's scene (the operator puts a bag down 0.31 m beside them) with answer_for(i, t, op) per cycle.
+        Returns the senses and, per cycle, whether the robot holds."""
+        s = enrolled(1.5, 0.0)
+        held = []
+        for i in range(frames):
+            t = round(0.1 * (i + 1), 1)
+            op = (1.5 + 0.05 * i, 0.0) if i < 10 else SetDown.OP
+            things = person(*op) + ([SetDown.BAG] if i >= 10 and i % 3 else [])
+            read(s, t, scan_of(things), answer_for(i, t, op))
+            held.append(s.ambiguous or not s.locked)
+        return s, held
+
+    def test_an_object_needs_good_frames(self):
+        # all frames refused: nothing becomes an object, as with the link down (careful)
+        s, held = self.set_down(lambda i, t, op: bad(t, [seen(*op, OPERATOR)]), 60)
+        self.assertIn(True, held[10:])
+        self.assertFalse(any(track.object for track in s.tracks.tracks.values()))
+
+    def test_refused_frames_pause_the_object_evidence_and_do_not_break_it(self):
+        # every other frame refused (a flickering light): the bag needs 2 s of good frames, 4 s in all
+        s, held = self.set_down(lambda i, t, op: (bad if i % 2 else Answer)(t, [seen(*op, OPERATOR)]), 90)
+        self.assertTrue(s.locked)
+        self.assertEqual(held[-15:], [False] * 15, s.why)
+        self.assertIn(True, held[20:40])  # not after 2 s in all: only half of that was good frames
+
+    def test_a_look_in_very_different_light_is_not_compared(self):
+        s = learned_at(80.0)
+        at = (1.5, 0.0)
+        got = read(s, 2.1, scan_of(person(*at)), Answer(2.1, [lit(*at, OPERATOR, 200.0)]))  # a spotlight on them
+        self.assertIsNotNone(got.operator)
+        self.assertIsNone(got.operator_look)
+        got = read(s, 2.2, scan_of(person(*at)), Answer(2.2, [lit(*at, OPERATOR, 30.0)]))  # in a shadow
+        self.assertIsNone(got.operator_look)
+        got = read(s, 2.3, scan_of(person(*at)), Answer(2.3, [lit(*at, OPERATOR, 110.0)]))
+        self.assertEqual(got.operator_look, OPERATOR)
+        got = read(s, 2.4, scan_of(person(*at)), Answer(2.4, [seen(*at, OPERATOR)]))  # no light sent: compared
+        self.assertEqual(got.operator_look, OPERATOR)
+
+    def test_a_spotlit_look_never_vetoes_a_fix_or_re_locks(self):
+        s = learned_at(80.0)
+        read(s, 2.1, scan_of())  # gap
+        near = (1.5, -0.1)
+        read(s, 2.2, scan_of(person(*near)), Answer(2.2, [lit(*near, OTHER, 200.0)]))
+        self.assertTrue(s.locked)  # the spotlit operator scores low: not trusted, not a veto
+        s.tracker = s._new_tracker()  # lost
+        got = read(s, 2.3, scan_of(person(*near)), Answer(2.3, [lit(*near, OPERATOR, 200.0)]))
+        self.assertFalse(s.locked)  # nor does a spotlit look lock
+        self.assertIsNone(got.operator)
+        read(s, 2.4, scan_of(person(*near)), Answer(2.4, [lit(*near, OPERATOR, 90.0)]))
+        self.assertTrue(s.locked)
+
+    def test_the_operators_look_in_good_light_still_vetoes(self):
+        s = learned_at(80.0)
+        read(s, 2.1, scan_of())
+        near = (1.5, -0.25)
+        read(s, 2.2, scan_of(person(*near)), Answer(2.2, [lit(*near, OTHER, 85.0)]))
+        self.assertFalse(s.locked)

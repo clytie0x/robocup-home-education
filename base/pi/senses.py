@@ -99,6 +99,19 @@ RANGE_FAR = 0.6  # m
 # bearing alone the camera only says the operator is in that object, not that nobody else is. Scratch fuzz
 # (200 merge scenes, camera on, the stranger not in its answer, 20 looks learned; a model, not real data):
 # such re-locks drove on the stranger after the split in 42 scenes before, 0 now.
+# Venue light (base/jetson/light.py, tools/light_bench.py). An answer whose frame the Jetson's light gate refused
+# (link.Answer.good False: too dark, mostly saturated, or a flash) is no answer for who is who: no enrol, no
+# re-lock, no look learned, compared or kept for the veto after a gap. It is not "the camera saw nobody there"
+# either: an object's SET_DOWN_S evidence waits through such frames (it neither counts nor breaks), so a dark or
+# flashing frame never turns a person into an object. The LiDAR track goes on as with the link down.
+# A look counts only when the person's box was lit (link.Seen.light, its mean luma) within LIGHT_RATIO of the
+# median light of the operator's learned looks (once LIGHT_MIN of them are in). light_bench, real frames, a
+# colour-histogram stand-in for the look: a spotlight on the operator took the look from 1.0 to 0.33-0.35 at 2.4 to
+# 3.4 times the light; of 9 lighting changes that put a look under LOOK_MATCH, this rule kept 6 out (the 3 it
+# let in: a colour cast, noise of auto exposure at 0.1 of the light, a spotlight beside the body at 1.5 times).
+# A look not counted is None: it never drops the operator in the follower nor vetoes a fix nor locks.
+LIGHT_RATIO = 2.0  # light.LIGHT_RATIO
+LIGHT_MIN = 5  # learned looks with a light before the rule applies
 
 
 def person_range(box, depth, p):
@@ -153,6 +166,8 @@ class RealSenses:
         self._depths = []  # (frame time, depth image) of the latest camera frames
         self._ranges = {}  # answer time -> range of each of its people (None where unknown)
         self._merged = None  # [odometry point, last time seen, ids seen there] where the operator may be merged
+        self._lights = []  # box light of each look given while the brain learned (LIGHT_RATIO)
+        self.camera_refused = None  # why the Jetson refused this cycle's fresh frame ("dark", ...), for the log
 
     @property
     def locked(self):
@@ -165,6 +180,8 @@ class RealSenses:
         """
         if now - answer.t > FRESH:
             return "camera answer too old"
+        if not getattr(answer, "good", True):
+            return "camera frame refused (%s): wait" % getattr(answer, "why", None)
         if self.ambiguous:
             return "someone is right at the operator: wait"  # a fresh enrol has no look to check
         cands = candidates(scan)
@@ -178,9 +195,11 @@ class RealSenses:
             return "more than one person within 2.5 m"
         if not close:
             return "nobody in view"
-        c, (_, look, _) = close[0]
+        c, (_, look, _, _) = close[0]
         if self._merged_with(c) and not self._only_one_there(c, close[0][1], fresh):
             return "two people may be one object there: wait"
+        if look is None:
+            return "the operator is not in the light they were learned in: wait"
         if accept is not None and not accept(look):
             return "the person in view does not look like the operator"
         self.tracker = self._new_tracker()
@@ -195,12 +214,15 @@ class RealSenses:
         self._yaws = [s for s in self._yaws if now - s[0] <= YAW_KEEP] + [(now, pose[2])]
         if frame is not None and getattr(frame, "depth", None) is not None:
             self._depths = [d for d in self._depths if frame.time - d[0] <= DEPTH_KEEP] + [(frame.time, frame.depth)]
-        if link_alive and answer is not None:
+        good = answer is None or getattr(answer, "good", True)
+        if link_alive and answer is not None and good:
             self._answer = answer
-        seen = self._fresh(now, answer) if link_alive else []
-        self._camera_fresh = link_alive and answer is not None and now - answer.t <= FRESH
+        seen = self._fresh(now, answer) if link_alive and good else []
+        self._camera_fresh = link_alive and answer is not None and good and now - answer.t <= FRESH
+        refused = link_alive and answer is not None and not good and now - answer.t <= FRESH
+        self.camera_refused = getattr(answer, "why", None) or "refused" if refused else None
         cands = candidates(scan)
-        look = None
+        look = look_light = None
 
         self.tracker.predict(v, w, dt)
         if self.locked:
@@ -218,13 +240,14 @@ class RealSenses:
                     self._unsure_at = now
                     self.why = "crowded" if self._crowded(pos, cands) else "two seen at the track"
                 else:
-                    look = next((l for b, l, r in at_track if self._match(b, r, cands) == pos), None)
+                    hit = next((s for s in at_track if self._match(s[0], s[2], cands) == pos), None)
+                    look, look_light = (hit[1], hit[3]) if hit is not None else (None, None)
         unsure = now - self._unsure_at <= UNSURE_LATCH
         if not self.locked and not unsure and self.learned >= LEARNED:  # before that, only enrol may lock
-            for person in sorted(seen, key=lambda s: -score(s[1])):
-                bearing, l, rng = person
+            for person in sorted(seen, key=lambda s: -score(s[1]) if s[1] is not None else math.inf):
+                bearing, l, rng, _ = person
                 c = self._match(bearing, rng, cands)
-                if c is None or score(l) < LOOK_MATCH:
+                if c is None or l is None or score(l) < LOOK_MATCH:
                     continue
                 if rng is not None and abs(self._camera_range(c) - rng) > RANGE_FAR:
                     continue  # the depth says that camera person stands nearer or farther than anyone there
@@ -238,7 +261,7 @@ class RealSenses:
                     self.why = "no re-lock: merged"
                     break
                 self.tracker.update(scan, now, lock_at=c)
-                look = l
+                look, look_light = l, person[3]
                 break
 
         fixed = self.locked and self.tracker.seen_at == now
@@ -254,9 +277,9 @@ class RealSenses:
         # nearest-range rule, made for the operator: it hands a passer-by's look to whoever stands at the
         # operator's range), and never a look that scores as the operator (the operator coasting off the track).
         paired = []
-        for b, l, _ in seen:
+        for b, l, _, _ in seen:
             near = [c for c in cands if abs(self._camera_bearing(c) - b) <= MATCH_DEG]
-            if len(near) == 1 and near[0] in pid_of and score(l) < LOOK_MATCH:
+            if len(near) == 1 and near[0] in pid_of and l is not None and score(l) < LOOK_MATCH:
                 paired.append((near[0], l))
         twice = {c for c, _ in paired if sum(1 for d, _ in paired if d == c) > 1}
         looks = {pid_of[c]: l for c, l in paired if c not in twice}  # two camera people on one track: whose look is it?
@@ -276,6 +299,8 @@ class RealSenses:
         self._last_now = now
         if self.ambiguous:
             look, looks = None, {}  # never learn or score a look from a merged scene
+        if look is not None and look_light is not None and self.learned < LEARNED and len(self._lights) < LEARNED:
+            self._lights.append(look_light)  # the brain learns this look now: remember its light
         everyone = list(people.values()) + ([operator] if operator is not None else [])
         obstacles = self.memory.update(now, pose, scan, depth_points, everyone)
         return Senses(now, operator, look, people, obstacles, looks=looks)
@@ -334,6 +359,10 @@ class RealSenses:
         if track.far >= SET_DOWN_MOVED or camera or (pid in self._person and pid not in self._came_out):
             self._came_out.discard(pid)  # it moved, or the camera saw someone there: a person, for good
             self._watched.pop(pid, None)
+            return
+        if self.camera_refused:
+            if pid in self._watched and self._last_now is not None:
+                self._watched[pid] += now - self._last_now  # a refused frame: the evidence waits, no count, no break
             return
         if not self._in_clear_view(c, cands):
             self._watched.pop(pid, None)  # the evidence must be unbroken
@@ -452,9 +481,9 @@ class RealSenses:
             return True  # the previous cycle had a fix too: no gap
         if pos != min(cands, key=lambda c: math.dist(c, predicted)):
             return False
-        for bearing, l, _ in self._fresh(now, self._answer, LOOK_KEEP):
+        for bearing, l, _, _ in self._fresh(now, self._answer, LOOK_KEEP):
             # bearing only: a range up to LOOK_KEEP old says little about where someone is now
-            if abs(self._camera_bearing(pos) - bearing) <= MATCH_DEG and score(l) < LOOK_MATCH:
+            if l is not None and abs(self._camera_bearing(pos) - bearing) <= MATCH_DEG and score(l) < LOOK_MATCH:
                 return False  # the camera says the one at the track now is someone else
         return True
 
@@ -514,8 +543,16 @@ class RealSenses:
                 self._person.add(pid)
         return pid in self._person
 
+    def _light_ok(self, light):
+        """Was a look taken in about the light of the operator's learned looks (LIGHT_RATIO)? Unknown: yes."""
+        if light is None or len(self._lights) < LIGHT_MIN:
+            return True
+        ref = float(np.median(self._lights))
+        return ref <= 0 or 1 / LIGHT_RATIO <= max(light, 1e-6) / ref <= LIGHT_RATIO
+
     def _fresh(self, now, answer, max_age=FRESH):
-        """(bearing now, look, range or None) for each camera person, or [] when the answer is missing or late."""
+        """(bearing now, look, range or None, box light or None) for each camera person, or [] when the answer is
+        missing or late. The look is None when the box light is too far from the learned one (_light_ok)."""
         if answer is None or now - answer.t > max_age:
             return []
         # shortcut: only the turn is corrected, not the drive; fine for 0.5 s answers, rough for the 2 s look veto.
@@ -524,7 +561,11 @@ class RealSenses:
         turn = yaws[-1][1] - then[-1]
         turn = math.degrees(math.atan2(math.sin(turn), math.cos(turn)))
         ranges = self._ranges_of(answer)
-        return [(s.bearing_deg - turn, s.look, r) for s, r in zip(answer.people, ranges)]
+        out = []
+        for s, r in zip(answer.people, ranges):
+            light = getattr(s, "light", None)
+            out.append((s.bearing_deg - turn, s.look if self._light_ok(light) else None, r, light))
+        return out
 
     def _ranges_of(self, answer):
         """The range of each camera person of this answer, from the depth image of its frame (None: unknown)."""

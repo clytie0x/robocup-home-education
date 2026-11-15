@@ -166,6 +166,32 @@ class LinkTests(unittest.TestCase):
         self.assertEqual((bag.cls, bag.conf, bag.box), ("handbag", 0.6, [300, 200, 320, 230]))
         self.assertGreater(bag.bearing_deg, 20)  # image right is robot left, as for people
 
+    def light_reply(self, quality):
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        kp = [[float(i), 2.0 * i, 0.9] for i in range(17)]
+        reply = {"seq": 1, "t": 4.0, "quality": quality,
+                 "people": [{"box": [140, 0, 180, 240], "conf": 0.9, "look": [0.5], "kp": kp, "light": 182.5}]}
+        jl = self.make_link(raw_server([framed(reply)], stop))
+        jl.send(make_frame(4.0))
+        self.assertTrue(wait_for(lambda: jl.alive(time.monotonic(), 5)))
+        return jl.latest(), kp
+
+    def test_a_frame_the_jetson_judged_too_dark_is_marked_and_has_no_keypoints(self):
+        answer, _ = self.light_reply({"ok": False, "why": "dark", "luma": 3.1})
+        self.assertFalse(answer.good)
+        self.assertEqual(answer.why, "dark")
+        self.assertEqual(len(answer.people), 1)  # still there, the senses decide
+        self.assertIsNone(answer.people[0].kp)  # pointing never reads keypoints from a frame like that
+        self.assertEqual(answer.people[0].light, 182.5)
+
+    def test_a_good_frame_keeps_its_keypoints_and_box_light(self):
+        answer, kp = self.light_reply({"ok": True, "why": None, "luma": 96.0})
+        self.assertTrue(answer.good)
+        self.assertIsNone(answer.why)
+        self.assertEqual(answer.people[0].kp, kp)
+        self.assertEqual(answer.people[0].light, 182.5)
+
     def test_an_old_reply_without_bags_or_keypoints_still_works(self):
         jl = self.make_link()
         jl.send(make_frame(1.0))
@@ -173,8 +199,12 @@ class LinkTests(unittest.TestCase):
         answer = jl.latest()
         self.assertEqual(answer.objects, [])
         self.assertIsNone(answer.people[0].kp)
+        self.assertTrue(answer.good)  # no "quality": a server without the light gate, every frame counts
+        self.assertIsNone(answer.people[0].light)
         self.assertEqual(link.Answer(1.0, []).objects, [])  # positional use elsewhere is unchanged
+        self.assertTrue(link.Answer(1.0, []).good)
         self.assertIsNone(link.Seen(0.0, 0.9, (), [0, 0, 1, 1]).kp)
+        self.assertIsNone(link.Seen(0.0, 0.9, (), [0, 0, 1, 1]).light)
 
     def test_pose_is_asked_only_for_frames_sent_with_pose(self):
         self.srv.stop()
