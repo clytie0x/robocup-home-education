@@ -6,6 +6,9 @@ reply {"seq", "t", "people": [{"box": [x1, y1, x2, y2], "conf": float, "look": [
 "objects": [{"cls": "handbag" | "backpack" | "suitcase", "box": [x1, y1, x2, y2], "conf": float}]}.
 With pose (asked in the header, or every --pose-every frames) a person whose box overlaps a pose box also
 has "kp": 17 COCO keypoints [x, y, visibility] in the frame's pixels. Old clients ignore the new keys.
+The real server also judges each frame's light (light.FrameGate): "quality": {"ok", "why", "luma"}, ok False for a
+frame too dark, too saturated or a flash, and gives each person "light", the mean luma of their box (light.box_light),
+so the Pi compares a look only in about the light the operator was learned in.
 
 Run: python3 server.py --fake      (answers one person in the middle, for testing the link)
      python3 server.py             (TensorRT detector and OSNet looks, see DETECTOR and REID; pose with POSE)
@@ -35,22 +38,33 @@ POSE_CONF = 0.4
 KP_IOU = 0.3  # a pose box must overlap a person box at least this much to give it keypoints
 
 
-def seen_in(jpeg, detector, reid, pose=None):
+def seen_in(jpeg, detector, reid, pose=None, gate=None, normalise="none"):
     """One JPEG to {"people", "objects"}: person and bag boxes from one detector run, a look vector per
-    person, and with a pose engine the keypoints of each person it finds."""
+    person, and with a pose engine the keypoints of each person it finds. With a gate (light.FrameGate, it keeps
+    the history of the last frames) also the frame's "quality" and each person's box "light". normalise: the
+    light.normalise mode applied before the detector, the look network and pose."""
     import cv2
     import numpy as np
+
+    import light
 
     bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
     if bgr is None:
         return {"people": [], "objects": []}  # a broken frame is "nobody seen", never an error that drops the link
+    raw, bgr = bgr, light.normalise(bgr, normalise)
     boxes, objects = detector.detect_all(bgr) if hasattr(detector, "detect_all") else (detector.detect(bgr), [])
     looks = reid.looks(bgr, [b[:4] for b in boxes])
     people = [{"box": [float(v) for v in b[:4]], "conf": float(b[4]), "look": list(look)} for b, look in zip(boxes, looks)]
     if pose is not None:
         attach_keypoints(people, pose.poses(bgr))
-    return {"people": people,
+    seen = {"people": people,
             "objects": [{"cls": o[5], "box": [float(v) for v in o[:4]], "conf": float(o[4])} for o in objects]}
+    if gate is not None:
+        ok, why = gate.check(raw)
+        seen["quality"] = {"ok": ok, "why": why, "luma": round(gate.mean, 1)}
+        for person in people:  # the light the camera really had, before normalise
+            person["light"] = round(light.box_light(raw, person["box"]), 1)
+    return seen
 
 
 def people_in(jpeg, detector, reid):
@@ -117,10 +131,12 @@ class Pose:
         return decode_pose(self._engine.run(x)[0], scale, bgr.shape[1], bgr.shape[0])
 
 
-def real_people(detector_path=DETECTOR, reid_path=REID, pose_path=POSE):
-    """find_people for the server, with the engines loaded once. Without the pose engine, pose asks get no "kp"."""
+def real_people(detector_path=DETECTOR, reid_path=REID, pose_path=POSE, normalise=None):
+    """find_people for the server, with the engines loaded once. Without the pose engine, pose asks get no "kp".
+    Every frame goes through one light.FrameGate (the Server serves one frame at a time)."""
     import os
 
+    import light
     from detector import Detector
     from reid import ReId
 
@@ -128,7 +144,9 @@ def real_people(detector_path=DETECTOR, reid_path=REID, pose_path=POSE):
     pose_engine = Pose(pose_path) if pose_path and os.path.exists(pose_path) else None
     if pose_engine is None:
         print("no pose engine at", pose_path, "- answers carry no keypoints", flush=True)
-    return lambda jpeg, width, height, pose=False: seen_in(jpeg, detector, reid, pose_engine if pose else None)
+    gate, mode = light.FrameGate(), normalise or light.NORMALISE
+    return lambda jpeg, width, height, pose=False: seen_in(jpeg, detector, reid, pose_engine if pose else None,
+                                                           gate, mode)
 
 
 def fake_people(jpeg, width, height, pose=False):
@@ -237,8 +255,11 @@ def main():
     parser.add_argument("--reid", default=REID, help="look vector engine")
     parser.add_argument("--pose", default=POSE, help="pose engine (keypoints only when asked)")
     parser.add_argument("--pose-every", type=int, default=0, help="also run pose every N frames (0: only when asked)")
+    parser.add_argument("--normalise", default=None,
+                        help="light.normalise mode before the networks (default light.NORMALISE; tools/light_bench.py)")
     args = parser.parse_args()
-    server = Server(fake_people if args.fake else real_people(args.detector, args.reid, args.pose), port=args.port,
+    server = Server(fake_people if args.fake else real_people(args.detector, args.reid, args.pose, args.normalise),
+                    port=args.port,
                     pose_every=args.pose_every)
     server.start()
     print("listening on port", server.port, flush=True)

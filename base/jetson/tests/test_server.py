@@ -184,6 +184,64 @@ class PoseAndBagTests(unittest.TestCase):
         self.assertEqual(len(server.fake_people(b"", 320, 240, pose=True)[0]["kp"]), 17)
 
 
+class LightTests(unittest.TestCase):
+    """With a frame gate (real_people has one) the reply says whether the frame's light can be trusted, and each
+    person carries the mean luma of their box (light.box_light) for the Pi's light rule on looks."""
+
+    def jpeg(self, level):
+        import cv2
+        import numpy as np
+
+        return cv2.imencode(".jpg", np.full((240, 320, 3), level, np.uint8))[1].tobytes()
+
+    def test_a_dark_frame_is_marked_and_its_people_still_listed(self):
+        import light
+
+        seen = server.seen_in(self.jpeg(0), FakeDetector(), FakeReId(), gate=light.FrameGate())
+        self.assertEqual(seen["quality"]["ok"], False)
+        self.assertEqual(seen["quality"]["why"], "dark")
+        self.assertEqual(len(seen["people"]), 2)
+        self.assertAlmostEqual(seen["people"][0]["light"], 0.0, delta=1.0)
+
+    def test_a_good_frame_is_ok_and_people_carry_their_box_light(self):
+        import light
+
+        seen = server.seen_in(self.jpeg(120), FakeDetector(), FakeReId(), gate=light.FrameGate())
+        self.assertEqual(seen["quality"], {"ok": True, "why": None, "luma": 120.0})
+        self.assertAlmostEqual(seen["people"][1]["light"], 120.0, delta=1.0)
+
+    def test_the_gate_keeps_its_history_across_frames(self):
+        import light
+
+        gate = light.FrameGate()
+        for _ in range(light.FLASH_HISTORY):
+            server.seen_in(self.jpeg(30), FakeDetector(), FakeReId(), gate=gate)
+        self.assertEqual(server.seen_in(self.jpeg(200), FakeDetector(), FakeReId(), gate=gate)["quality"]["why"],
+                         "flash")
+
+    def test_normalise_is_applied_before_the_detector(self):
+        class Detector(FakeDetector):
+            def detect_all(self, bgr):
+                means = bgr.reshape(-1, 3).mean(axis=0)
+                self.spread = float(means.max() - means.min())
+                return super().detect_all(bgr)
+
+        import cv2
+        import numpy as np
+
+        jpeg = cv2.imencode(".png", np.full((240, 320, 3), (50, 100, 200), np.uint8))[1].tobytes()  # a warm cast
+        det = Detector()
+        server.seen_in(jpeg, det, FakeReId(), normalise="grayworld")
+        self.assertLess(det.spread, 2.0)  # grayworld: every channel at the same mean
+        server.seen_in(jpeg, det, FakeReId())
+        self.assertAlmostEqual(det.spread, 150.0, delta=1.0)  # none: the frame as sent
+
+    def test_no_gate_no_new_keys(self):
+        seen = server.seen_in(self.jpeg(0), FakeDetector(), FakeReId())
+        self.assertNotIn("quality", seen)
+        self.assertNotIn("light", seen["people"][0])
+
+
 class PoseRequestTests(unittest.TestCase):
     def serve(self, **kw):
         calls = []
