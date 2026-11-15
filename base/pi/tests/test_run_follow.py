@@ -412,6 +412,31 @@ class Loop(Logged):
         self.assertIs(state.dashboard.latest, record)
         self.assertEqual(base.sent[-1], (0.1, 0.0))  # still driving
 
+    def test_each_cycle_logs_the_camera_answer(self):
+        class Link:
+            host = None
+
+            def latest(self):
+                return Answer(0.40, [Seen(11.0, 0.9, LOOK, [0, 0, 1, 1])])
+
+            def alive(self, now, silence):
+                return True
+
+            def send(self, frame):
+                pass
+
+            def replies_per_s(self, now):
+                return 2
+
+        state = self.state(FakeBase())
+        state.link = Link()
+        record = self.cycle(state, 0.55)
+        self.assertEqual(record["cam"], {"age": 0.15, "people": 1, "replies_per_s": 2})
+
+    def test_the_camera_fields_are_empty_without_an_answer(self):
+        record = self.cycle(self.state(FakeBase()), 0.0)
+        self.assertEqual(record["cam"], {"age": None, "people": 0, "replies_per_s": 0})
+
     def test_the_page_can_switch_the_search_turn_off(self):
         state = self.search_state(FakeBase(), [])
         state.controls.apply({"search": False})
@@ -1350,6 +1375,8 @@ class Remote(Logged):
                               s["at_start"], s["stop"], s["ack"], s["ack_by"], s["cable_deg"]),
                              ("FOLLOW", False, None, False, None, None, False, None, "follow", "client", 0.0))
             self.assertIsInstance(s["breadcrumbs"], int)
+        # The cycle log carries the camera fields too (the status line above does not need them).
+        self.assertEqual(set(self.records()[-1]["cam"]), {"age", "people", "replies_per_s"})
 
     def test_operator_m_is_the_kept_operator_while_locked_but_not_seen(self):
         class LockedBlind:

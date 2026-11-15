@@ -933,6 +933,14 @@ def cycle(state, now):
         "operator": None if seen.operator is None else list(seen.operator),
         "operator_kept": None if operator is None else list(operator),  # the brain's smoothed operator
         "people": [list(pt) for pt in seen.people.values()],
+        # The newest camera answer this cycle: its frame is this old, it saw this many people,
+        # and answers arrive this often (link.replies_per_s, the last second).
+        "cam": {
+            "age": None if answer is None else round(now - answer.t, 3),
+            "people": 0 if answer is None else len(answer.people),
+            "replies_per_s": (state.link.replies_per_s(now)
+                              if getattr(state.link, "replies_per_s", None) is not None else 0),
+        },
         "obstacles": len(seen.obstacles),
         "path": len(getattr(getattr(follower, "navigator", None), "path", []) or []),  # 0 while following: no way found
         "depth_points": None if depth_points is None else len(depth_points),

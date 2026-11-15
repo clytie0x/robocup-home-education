@@ -14,6 +14,7 @@ from hmc.bystanders import add_bystanders
 from hmc.maps import MAPS
 from hmc.noise import PRESETS, make_noise
 from hmc.odometry import PRESETS as ODOMETRY, make_odometry
+from hmc.plant import Plant
 from hmc.scoresheet import MAX_TOTAL, Referee, Scoresheet
 from hmc.task import State, Task
 import hmc.world as hmc_world
@@ -46,6 +47,9 @@ BASES = {
     "real": dict(accel=0.25, turn_accel=0.7, turn_rate=0.49, follow_distance=0.8, deadband=math.radians(4)),
 }
 
+# In front of the base limits: what the measured base adds (see plant.py).
+PLANTS = {"none": None, "real-base": Plant}
+
 
 def use_base(world: World, base: str) -> None:
     """Set the base's acceleration and turn limits (they are module-wide in world.py)."""
@@ -68,11 +72,14 @@ def run_scenario(
     sensors: str = "ideal",
     odometry: str = "perfect",
     base: str = "sim",
+    plant: str = "none",
     operator_speed: float = 1.2,
 ) -> Result:
     """Run the whole scenario. on_step lets tests poke the world (e.g. drop the bag)."""
     world = MAPS[map_name](target_bag=target_bag, robot_speed=robot_speed)
     use_base(world, base)
+    if PLANTS[plant] is not None:
+        world.robot = PLANTS[plant](world.robot)
     add_bystanders(world, bystanders, seed)
     give_looks(world, seed)
     world.noise = make_noise(noise, seed)
@@ -182,6 +189,10 @@ def main(argv: list[str] | None = None) -> int:
         "--base", default="sim", choices=list(BASES), help="acceleration and turn limits"
     )
     parser.add_argument(
+        "--plant", default="none", choices=list(PLANTS),
+        help="base plant model: real-base adds the measured delay, dead zones, cap and decel",
+    )  # fmt: skip
+    parser.add_argument(
         "--odometry", default="perfect", choices=list(ODOMETRY), help="pose estimate"
     )
     parser.add_argument(
@@ -209,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         sensors=args.sensors,
         odometry=args.odometry,
         base=args.base,
+        plant=args.plant,
     )
     write_outputs(result, Path(args.out))
     print(result.sheet.table())

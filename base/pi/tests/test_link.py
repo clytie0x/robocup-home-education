@@ -103,6 +103,19 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(answer.people[0].look, (0.1, 0.2, 0.3, 0.4))
         self.assertIsNone(jl.latest())  # each answer once
 
+    def test_replies_per_second_counts_the_answers_of_the_last_second(self):
+        now = [100.0]
+        self.jl = link.JetsonLink("127.0.0.1", self.srv.port, 58.59, encode=lambda f: b"jpg",
+                                  reply_timeout=1.0, clock=lambda: now[0])
+        self.jl.start()
+        self.assertEqual(self.jl.replies_per_s(100.0), 0)  # nothing heard yet
+        self.jl.send(make_frame(1.0))
+        self.assertTrue(wait_for(lambda: self.jl.replies_per_s(100.0) == 1))
+        now[0] = 100.8
+        self.jl.send(make_frame(2.0))
+        self.assertTrue(wait_for(lambda: self.jl.replies_per_s(100.8) == 2))
+        self.assertEqual(self.jl.replies_per_s(102.0), 0)  # both answers are older than 1 s
+
     def test_only_the_newest_frame_is_sent(self):
         self.delay = 0.3
         jl = self.make_link()
