@@ -247,6 +247,34 @@ class EventTests(unittest.TestCase):
         self.assertIn("log", [k for k, _ in out])
 
 
+class SearchStatusTests(unittest.TestCase):
+    """/base/status "search": the Pi's brain is looking for a lost operator (hmc_flow asks them back after it)."""
+
+    def search(self, logic, now, **kw):
+        return statuses(logic.on_status(status(**kw), now))[0]["search"]
+
+    def test_following_unlocked_for_the_brains_lost_after_is_a_search(self):
+        logic = connected()
+        self.assertFalse(self.search(logic, 0.0, locked=True))
+        self.assertFalse(self.search(logic, 1.0, locked=False))
+        self.assertFalse(self.search(logic, 2.9, locked=False))
+        self.assertTrue(self.search(logic, 3.0, locked=False))  # 2 s, hmc follower.LOST_AFTER
+        self.assertFalse(self.search(logic, 4.0, locked=True))
+
+    def test_waiting_held_or_not_following_is_no_search(self):
+        logic = connected()
+        self.search(logic, 0.0, locked=False)
+        self.assertFalse(self.search(logic, 5.0, locked=False, waiting=True))
+        self.assertFalse(self.search(logic, 5.2, locked=False, held="silent"))
+        self.assertFalse(self.search(logic, 5.4, locked=False, phase="RETURN"))
+        self.assertTrue(self.search(logic, 5.6, locked=False))
+
+    def test_the_pis_own_mode_wins_when_it_sends_one(self):
+        logic = connected()
+        self.assertTrue(self.search(logic, 0.0, locked=False, mode="search"))
+        self.assertFalse(self.search(logic, 5.0, locked=False, mode="follow"))
+
+
 class LinkTests(unittest.TestCase):
     def test_first_status_is_link_ok(self):
         logic = connected()
@@ -455,7 +483,8 @@ class HoldTests(unittest.TestCase):
         self.assertEqual(sent(out), [])
         self.assertTrue(any(k == "log" and "page" in v for k, v in out))
         out = logic.on_status(status(phase="FOLLOW", waiting=True, held="page"), 4.0)
-        self.assertEqual(out[-1:], [("status", dict(status(phase="FOLLOW", waiting=True, held="page"), link=True))])  # logged once
+        self.assertEqual(out[-1:], [("status", dict(status(phase="FOLLOW", waiting=True, held="page"), link=True,
+                                                    search=False))])  # logged once
         self.assertEqual(sent(logic.on_status(status(phase="FOLLOW"), 6.0)), [])  # page resume: agrees
 
     def test_page_wait_while_returning_or_idle_is_never_resumed_or_followed(self):
@@ -827,6 +856,8 @@ class HostTests(unittest.TestCase):
 
     def test_committed_params_list_the_cable_first(self):
         path = os.path.join(os.path.dirname(__file__), "..", "..", "params.json")
+        if not os.path.exists(path):  # the Jetson's copy of this folder has no base/params.json next to it
+            self.skipTest("checks the repository's base/params.json, which is not here (%s)" % os.path.abspath(path))
         with open(path) as f:
             p = json.load(f)
         self.assertEqual(base_bridge.pi_host(None, p), ["10.0.0.1", "192.168.31.21", "100.73.128.36"])

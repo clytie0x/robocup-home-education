@@ -1,16 +1,23 @@
-"""Start, stop and report the Jetson's three Help Me Carry programs over HTTP, for the Pi's robot console.
+"""Start, stop and report the Jetson's Help Me Carry programs over HTTP, for the Pi's robot console.
 
   python3 agent.py [--port 8090] [--allow 127.0.0.1,10.0.0.1,192.168.31.21]
 
 Programs (run from this folder, ~/hmc-follow; the ROS ones with /opt/ros/jazzy and ROS_DOMAIN_ID=42):
   detector  python3 server.py                                    person detector, TCP 5601
+  whisper   VOICE_ROOT/src/whisper.cpp/build/bin/whisper-server  speech to text, TCP 8080 (servers.sh start-stt
+            in the foreground; VOICE_ROOT must be checked on the robot)
+  voice     ros2 launch voice_assistant hmc_voice.launch.py      stt, tts and the rule brain (VOICE_WS sourced)
   bridge    python3 base_bridge.py --pi-host 10.0.0.1,192.168.31.21   ROS <-> run_follow --remote
-  flow      python3 hmc_flow.py                                  the task flow (speech, says, state)
+  arm       python3 bag_arm.py                                   the arm side's pick_bag and drop_bag jobs
+                                                                 (~/so100_ws sourced)
+  flow      python3 hmc_flow.py --ros-args -p use_arm:=true -p grab_timeout:=240.0 -p drop_timeout:=60.0
+                                                                 the task flow (speech, says, state)
 
   GET  /status                     the shape below
   POST /start {"name": "flow"}     also /stop and /restart; one name from the list above
-  POST /start-all                  detector, then bridge, then flow (each waits for the one before)
-  POST /stop-all                   flow, bridge, detector
+  POST /start-all                  detector, whisper, voice, bridge, arm, then flow (each waits for the one
+                                   before); a whisper-server started by hand is used as it is
+  POST /stop-all                   flow, arm, bridge, voice, whisper, detector
 
 GET /status (the robot console shows it; base/pi/telemetry.py stores the metrics). Every metric is a
 number or null, never a string; a missing source gives null (or an empty object):
@@ -31,8 +38,9 @@ from /proc, children of the agent's own groups left out) and left alone, and whi
 agent refuses to start that program (409), so two bridges never fight for the Pi. Stop waits for
 the whole group to be gone (Ctrl+C, SIGTERM, then SIGKILL to the group), not only for bash.
 A copy counts by its argv: any python* executable with the script's file name in any position
-(python3 -u base_bridge.py, python3.12 ...). None of the three is a ROS package, so there is no
-ros2 run form to look for. Before stopping or restarting the flow or the bridge (and in stop-all)
+(python3 -u base_bridge.py, python3.12 ...; ros2 is a python script, so its hmc_voice.launch.py
+counts), or for whisper an argv[0] named whisper-server. The pids are listed in numeric order. Our
+python programs are no ROS packages, so there is no ros2 run form to look for. Before stopping or restarting the flow or the bridge (and in stop-all)
 while the agent's bridge runs, the agent sends b"hold" to the bridge's UDP 127.0.0.1:5605 and waits
 0.3 s: a Pi in FOLLOW or RETURN gets wait at once, not 2 s after the bridge is gone. The answer's
 "hold" says when that was done. On SIGTERM or Ctrl+C the agent stops what it started.
@@ -58,13 +66,32 @@ LOGS = HERE / "logs"
 PORT = 8090
 ALLOW = ("127.0.0.1", "10.0.0.1", "192.168.31.21")  # localhost and the Pi on the LAN cable and the Wi-Fi
 ROS = "source /opt/ros/jazzy/setup.bash && export ROS_DOMAIN_ID=42 && "
+# Where the voice side lives on the Jetson. Both must be checked on the robot before the first start-all:
+# VOICE_ROOT is ROOT of voice/scripts/servers.sh (whisper.cpp build and models, voice/CLAUDE.md), VOICE_WS the
+# colcon workspace with voice_assistant built in it (voice/README.md: ~/ros2_ws).
+VOICE_ROOT = "/opt/robot_voice"
+VOICE_WS = "~/ros2_ws"
+# servers.sh start_whisper without its "&" (the agent must see the server run) and without the download:
+# small.en when it is there, else base.en, as pick_model does offline
+WHISPER = ("M=%(r)s/models/whisper/ggml-small.en-q5_1.bin; [ -s \"$M\" ] || M=%(r)s/models/whisper/ggml-base.en-q5_1.bin; "
+           "exec %(r)s/src/whisper.cpp/build/bin/whisper-server -m \"$M\" -l en -t 4 --host 127.0.0.1 --port 8080"
+           % {"r": VOICE_ROOT})
+# bag_arm: a real pick took 30.4 s and a real place 30.0 s on the arm, but bag_arm may need /arm/home 60 s +
+# pick 150 s, so the flow waits 240 s for a pick and 60 s for a place
+FLOW_ARGS = "--ros-args -p use_arm:=true -p grab_timeout:=240.0 -p drop_timeout:=60.0"
 PROGRAMS = {  # name: (shell command, needs ROS, TCP port that says it is up, or None)
     "detector": ("python3 server.py", False, 5601),
+    "whisper": (WHISPER, False, 8080),
+    "voice": ("source %s/install/setup.bash && ros2 launch voice_assistant hmc_voice.launch.py" % VOICE_WS, True, None),
     "bridge": ("python3 base_bridge.py --pi-host 10.0.0.1,192.168.31.21", True, None),
-    "flow": ("python3 hmc_flow.py", True, None),
+    "arm": ("source ~/so100_ws/install/setup.bash && python3 bag_arm.py", True, None),
+    "flow": ("python3 hmc_flow.py " + FLOW_ARGS, True, None),
 }
-ORDER = ["detector", "bridge", "flow"]
-SCRIPTS = {"detector": "server.py", "bridge": "base_bridge.py", "flow": "hmc_flow.py"}
+ORDER = ["detector", "whisper", "voice", "bridge", "arm", "flow"]
+SCRIPTS = {"detector": "server.py", "voice": "hmc_voice.launch.py", "bridge": "base_bridge.py", "arm": "bag_arm.py",
+           "flow": "hmc_flow.py"}  # a python* argv with this file name (ros2 is python: its launch file counts)
+EXECUTABLES = {"whisper": "whisper-server"}  # argv[0]'s file name
+SHARED = ("whisper",)  # start-all uses a copy started by hand (servers.sh start-stt) instead of stopping there
 LOG_LINES = 20
 STOP_STEPS = ((signal.SIGINT, 5.0), (signal.SIGTERM, 3.0))  # ROS nodes end cleanly on Ctrl+C; SIGKILL after
 KILL = getattr(signal, "SIGKILL", signal.SIGTERM)
@@ -215,13 +242,17 @@ def outside(ours, proc=Path("/proc")):
             continue
         if pgrp in ours:  # the python under one of our bash groups
             continue
-        if not args or not os.path.basename(args[0].decode("utf-8", "replace")).startswith("python"):
+        first = os.path.basename(args[0].decode("utf-8", "replace")) if args else ""
+        for name, exe in EXECUTABLES.items():
+            if first == exe:
+                found.setdefault(name, []).append(int(entry.name))
+        if not first.startswith("python"):
             continue
         names = {os.path.basename(a.decode("utf-8", "replace")) for a in args[1:]}
         for name, script in SCRIPTS.items():
             if script in names:
                 found.setdefault(name, []).append(int(entry.name))
-    return found
+    return {name: sorted(pids) for name, pids in found.items()}  # /proc's own order differs between machines
 
 
 def send_hold(port=HOLD_PORT, settle=HOLD_SETTLE):
@@ -398,7 +429,8 @@ class Agent:
             for name in self.order:
                 p = self.programs[name]
                 self.sequence = "starting %s" % name
-                if not p.running():
+                shared = name in SHARED and p.port and self.find_outside(self._ours()).get(name)
+                if not p.running() and not shared:  # a shared copy by hand: only its port is waited for
                     error = self._outside_error(name) or p.start()
                     if error:
                         self.sequence = error
@@ -406,7 +438,7 @@ class Agent:
                 if p.port:
                     end = self.clock() + UP_WAIT
                     while not self.port_open(p.port) and self.clock() < end:
-                        if not p.running():
+                        if not shared and not p.running():
                             self.sequence = "%s ended before it was up: see its log" % name
                             return
                         self.sleep(0.5)
