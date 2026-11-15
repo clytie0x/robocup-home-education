@@ -81,8 +81,22 @@ class ClassifyTests(unittest.TestCase):
             ("Stop!", "stop"),
             ("wait", "stop"),
             ("This is the car.", "stop"),
-            ("here", "stop"),
             ("We are here", "stop"),
+            ("we're here", "stop"),
+            ("Here we are.", "stop"),
+            ("here", None),
+            ("come here", None),
+            ("over here", None),
+            ("this one here", None),
+            ("wait here", "stop"),
+            ("please wait", "stop"),
+            ("wait for me", "stop"),
+            ("wait, I want to show you something", None),
+            ("you have to wait for the bag", None),
+            ("I don't know, stop", "stop"),
+            ("I don't know. Stop.", "stop"),
+            ("okay, stop", "stop"),
+            ("okay I can see the bag over there", None),
             ("go back", "back"),
             ("take it back", "back"),
             ("Go to the start", "back"),
@@ -218,7 +232,7 @@ class ReadyTests(FlowCase):
 
 class FollowingTests(FlowCase):
     def test_arrival_words_send_wait_then_ask_for_the_pointing(self):
-        for words in ("stop", "wait", "this is the car", "here", "we are here"):
+        for words in ("stop", "wait", "this is the car", "here we are", "we are here", "we're here"):
             self.make()
             self.go(FOLLOWING)
             out = self.flow.on_heard(words, 2.0)
@@ -240,15 +254,49 @@ class FollowingTests(FlowCase):
         self.assertEqual(f.state, POINTING)
         self.assertEqual(actions(out), ["wait", "find_bag"])
 
-    def test_lost_person_for_5_s_asks_to_come_back_once(self):
+    def test_lost_person_for_20_s_asks_to_come_back_once(self):
+        """Asking the operator back costs -150 (rules): not after a short gap the Pi's search covers."""
         f = self.make()
         self.go(FOLLOWING)
         f.on_event("see_person", 1.5)
         f.on_event("lost_person", 2.0)
-        self.assertEqual(says(f.on_tick(6.9)), [])
-        self.assertEqual(says(f.on_tick(7.0)), ["Please come back."])
-        self.assertEqual(says(f.on_tick(9.0)), [])
+        self.assertEqual(says(f.on_tick(7.0)), [])  # the old 5 s
+        self.assertEqual(says(f.on_tick(21.9)), [])
+        self.assertEqual(says(f.on_tick(22.0)), ["Please come back."])
+        self.assertEqual(says(f.on_tick(30.0)), [])
         self.assertEqual(f.state, FOLLOWING)
+
+    def test_lost_person_for_6_s_while_the_pi_searches_says_nothing(self):
+        f = self.make()
+        self.go(FOLLOWING)
+        f.on_event("see_person", 1.5)
+        f.on_event("lost_person", 2.0)
+        for t in (2.5, 4.0, 5.0, 6.0, 7.0, 8.0):
+            searching = t >= 4.0  # the bridge says search 2 s after the lock went
+            self.assertEqual(says(f.on_status({"link": True, "phase": "FOLLOW", "locked": False,
+                                               "search": searching}, t)), [], t)
+            self.assertEqual(says(f.on_tick(t)), [], t)
+
+    def test_asks_when_the_pi_search_ended_without_a_lock(self):
+        f = self.make()
+        self.go(FOLLOWING)
+        f.on_event("see_person", 1.5)
+        f.on_event("lost_person", 2.0)
+        f.on_status({"link": True, "phase": "FOLLOW", "locked": False, "search": True}, 4.0)
+        out = f.on_status({"link": True, "phase": "FOLLOW", "locked": False, "search": False}, 9.0)
+        self.assertEqual(says(out), ["Please come back."])
+        self.assertEqual(says(f.on_tick(22.0)), [])  # once
+        self.assertEqual(actions(out), [])
+
+    def test_a_search_that_ends_with_a_lock_asks_nothing(self):
+        f = self.make()
+        self.go(FOLLOWING)
+        f.on_event("see_person", 1.5)
+        f.on_event("lost_person", 2.0)
+        f.on_status({"link": True, "phase": "FOLLOW", "locked": False, "search": True}, 4.0)
+        self.assertEqual(says(f.on_status({"link": True, "phase": "FOLLOW", "locked": True, "search": False}, 6.0)), [])
+        f.on_event("see_person", 6.0)
+        self.assertEqual(says(f.on_tick(30.0)), [])
 
     def test_seen_again_cancels_the_come_back(self):
         f = self.make()
@@ -256,12 +304,13 @@ class FollowingTests(FlowCase):
         f.on_event("see_person", 1.5)
         f.on_event("lost_person", 2.0)
         f.on_event("see_person", 4.0)
-        self.assertEqual(says(f.on_tick(8.0)), [])
+        self.assertEqual(says(f.on_tick(30.0)), [])
 
     def test_never_locked_after_follow_also_asks(self):
         f = self.make()
         self.go(FOLLOWING, now=1.0)
-        self.assertEqual(says(f.on_tick(6.0)), ["Please come back."])
+        self.assertEqual(says(f.on_tick(20.9)), [])
+        self.assertEqual(says(f.on_tick(21.0)), ["Please come back."])
 
     def test_lost_person_is_not_an_error(self):
         f = self.make()
@@ -270,10 +319,12 @@ class FollowingTests(FlowCase):
         self.assertEqual(f.state, FOLLOWING)
         self.assertEqual(actions(out), [])
 
-    def test_link_lost_while_following_is_an_error(self):
+    def test_link_lost_while_following_is_an_error_after_the_grace(self):
         f = self.make()
         self.go(FOLLOWING)
         out = f.on_event("base_link_lost", 2.0)
+        self.assertEqual((f.state, actions(out), says(out)), (FOLLOWING, [], []))
+        out = f.on_tick(6.0)
         self.assertEqual(f.state, ERROR)
         self.assertEqual(actions(out), ["end"])
         self.assertEqual(len(says(out)), 1)
@@ -306,7 +357,7 @@ class PointingTests(FlowCase):
         self.assertIn("I will go back to the start now.", says(out))
 
     def test_bag_failed_says_why_and_asks_to_point_again(self):
-        for code, why in (("NOT_POINTED", "I did not see you point."), ("NO_BAG", "I see no bag there."),
+        for code, why in (("NO_BAG", "I see no bag there."),
                           ("BLOCKED", "Something is in my way."), ("TIMEOUT", "That took me too long."),
                           ("LOST_BAG", "I lost sight of the bag.")):
             f = self.make()
@@ -315,6 +366,29 @@ class PointingTests(FlowCase):
             self.assertEqual(f.state, POINTING, code)
             self.assertEqual(says(out), [why + " Please point at the bag again."], code)
             self.assertEqual(cmds(out), [{"action": "find_bag", "params": {}}], code)
+
+    def test_not_pointed_asks_to_step_back_before_the_retry(self):
+        """The camera sees the shoulder only from about 2.2 m."""
+        f = self.make()
+        self.go(POINTING)
+        out = f.on_event("bag_failed|NOT_POINTED|no steady pointing in 20 s", 10.0)
+        self.assertEqual(f.state, POINTING)
+        self.assertEqual(says(out), ["Please step back two steps and point at the bag.",
+                                     "I did not see you point. Please point at the bag again."])
+        self.assertEqual(cmds(out), [{"action": "find_bag", "params": {}}])
+        for i in range(3):
+            out = f.on_event("bag_failed|NOT_POINTED|again", 20.0 + i)
+        self.assertEqual(f.state, AT_CAR)  # the fourth in a row
+        self.assertEqual(says(out), ["Please step back two steps and point at the bag.",
+                                     "I did not see you point. Please point at the bag, then say ready."])
+
+    def test_here_words_do_not_cancel_the_bag_search(self):
+        f = self.make()
+        self.go(POINTING)
+        for words in ("come here", "over here", "this one here", "okay I am pointing at it now"):
+            out = f.on_heard(words, 5.0)
+            self.assertEqual(f.state, POINTING, words)
+            self.assertEqual(actions(out), [], words)
 
     def test_after_three_failures_in_a_row_it_waits_for_ready(self):
         f = self.make()
@@ -518,10 +592,32 @@ class ReturningTests(FlowCase):
         out = f.on_heard("continue", 6.0)
         self.assertEqual(actions(out), ["resume"])
 
+    def test_a_pause_on_the_way_back_resumes_by_itself_after_20_s(self):
+        for words in ("stop", "wait"):
+            f = self.make()
+            self.go(RETURNING)
+            f.on_heard(words, 5.0)
+            self.assertTrue(f.paused, words)
+            self.assertEqual(f.on_tick(24.9), [], words)
+            out = f.on_tick(25.0)
+            self.assertEqual(cmds(out), [{"action": "resume", "params": {}}], words)
+            self.assertEqual(says(out), ["Going back to the start."], words)
+            self.assertFalse(f.paused, words)
+            self.assertEqual(f.on_tick(50.0), [], words)
+            self.assertEqual(f.state, RETURNING, words)
+
+    def test_a_pause_resumed_by_voice_is_not_resumed_again(self):
+        f = self.make()
+        self.go(RETURNING)
+        f.on_heard("stop", 5.0)
+        f.on_heard("go back", 10.0)
+        self.assertEqual(f.on_tick(30.0), [])
+
     def test_link_lost_while_returning_is_an_error(self):
         f = self.make()
         self.go(RETURNING)
         f.on_event("base_link_lost", 5.0)
+        f.on_tick(9.0)
         self.assertEqual(f.state, ERROR)
 
     def test_at_start_outside_returning_is_ignored(self):
@@ -565,15 +661,17 @@ class ErrorTests(FlowCase):
     def test_error_cmd_can_be_set_to_wait(self):
         f = self.make(error_pi_cmd="wait")
         self.go(FOLLOWING)
-        out = f.on_event("base_link_lost", 2.0)
+        f.on_event("base_link_lost", 2.0)
+        out = f.on_tick(6.0)
         self.assertEqual(actions(out), ["wait"])
 
     def test_follow_me_after_an_error_starts_again(self):
         f = self.make()
         self.go(FOLLOWING)
         f.on_event("base_link_lost", 2.0)
-        f.on_event("base_link_ok", 3.0)
-        out = f.on_heard("follow me", 4.0)
+        f.on_tick(6.0)
+        f.on_event("base_link_ok", 7.0)
+        out = f.on_heard("follow me", 8.0)
         self.assertEqual(f.state, FOLLOWING)
         self.assertEqual(actions(out), ["follow_me"])
 
@@ -581,8 +679,9 @@ class ErrorTests(FlowCase):
         f = self.make()
         self.go(RETURNING)
         f.on_event("base_link_lost", 5.0)
-        f.on_event("base_link_ok", 6.0)
-        out = f.on_heard("go back", 7.0)
+        f.on_tick(9.0)
+        f.on_event("base_link_ok", 10.0)
+        out = f.on_heard("go back", 11.0)
         self.assertEqual(f.state, RETURNING)
         self.assertEqual(actions(out), ["go_back"])
 
@@ -591,6 +690,7 @@ class ErrorTests(FlowCase):
             self.make()
             self.go(state)
             self.flow.on_event("base_link_lost", 9.0)
+            self.flow.on_tick(14.0)  # lost for 5 s
             self.assertEqual(self.flow.state, ERROR, state)
 
     def test_link_lost_after_at_start_is_only_logged(self):
@@ -633,6 +733,94 @@ class ErrorTests(FlowCase):
         self.assertEqual(f.state, FOLLOWING)
 
 
+class LinkGraceTests(FlowCase):
+    """A short link drop: the bridge restores the Pi's intent itself, so the flow waits LINK_GRACE_S quietly."""
+
+    def test_grace_is_4_s(self):
+        self.assertEqual(hmc_flow.LINK_GRACE_S, 4.0)
+
+    def test_lost_then_ok_after_2_s_keeps_the_state(self):
+        for state in (FOLLOWING, POINTING, AT_CAR, PICKING, RETURNING):
+            self.make()
+            self.go(state)
+            out = self.flow.on_event("base_link_lost", 9.0)
+            self.assertEqual((says(out), actions(out)), ([], []), state)
+            for t in (9.5, 10.0, 11.0):
+                self.assertEqual([k for k, _ in self.flow.on_tick(t) if k != "log"], [], state)
+            out = self.flow.on_event("base_link_ok", 11.0)
+            self.assertEqual((says(out), actions(out)), ([], []), state)
+            self.flow.on_tick(14.0)
+            self.flow.on_tick(20.0)
+            self.assertEqual(self.flow.state, state, state)
+
+    def test_lost_for_5_s_is_an_error(self):
+        for state in (FOLLOWING, POINTING, AT_CAR, PICKING, RETURNING):
+            self.make()
+            self.go(state)
+            self.flow.on_event("base_link_lost", 9.0)
+            self.assertEqual(self.flow.on_tick(12.9), [], state)
+            self.assertEqual(self.flow.state, state, state)
+            out = self.flow.on_tick(14.0)
+            self.assertEqual(self.flow.state, ERROR, state)
+            self.assertEqual(actions(out), ["end"], state)
+            self.assertTrue(any("connection to my wheels" in t for t in says(out)), state)
+
+    def test_nothing_is_said_while_waiting_for_the_link(self):
+        f = self.make()
+        self.go(FOLLOWING)
+        f.on_event("lost_person", 2.0)
+        f.on_event("base_link_lost", 21.0)
+        self.assertEqual(f.on_tick(22.5), [])  # the come-back was due at 22.0
+
+    def test_a_second_drop_starts_its_own_grace(self):
+        f = self.make()
+        self.go(FOLLOWING)
+        f.on_event("base_link_lost", 2.0)
+        f.on_event("base_link_ok", 4.0)
+        f.on_event("base_link_lost", 5.0)
+        f.on_tick(8.5)
+        self.assertEqual(f.state, FOLLOWING)
+        f.on_tick(9.0)
+        self.assertEqual(f.state, ERROR)
+
+
+class StartStatusTests(unittest.TestCase):
+    """A restarted flow reads one /base/status first, so it knows the link and the person as the Pi does."""
+
+    def test_should_start_waits_up_to_1_s_for_a_status(self):
+        self.assertFalse(hmc_flow.should_start(1, 0.5, status_seen=False))
+        self.assertTrue(hmc_flow.should_start(1, 0.5, status_seen=True))
+        self.assertTrue(hmc_flow.should_start(1, hmc_flow.STATUS_WAIT, status_seen=False))
+        self.assertEqual(hmc_flow.STATUS_WAIT, 1.0)
+
+    def test_a_status_before_start_sets_the_person_and_the_link(self):
+        f = HmcFlow()
+        out = f.on_status({"link": True, "phase": "FOLLOW", "locked": True, "search": False}, 0.5)
+        self.assertEqual([k for k, _ in out if k != "log"], [])
+        self.assertIsNone(f.state)
+        self.assertTrue(f.link_ok)
+        self.assertTrue(f.person_visible)
+        f.start(1.0)
+        f.on_heard("follow me", 2.0)
+        self.assertIsNone(f.lost_since)
+        self.assertEqual(says(f.on_tick(40.0)), [])  # the person is not taken for lost
+
+    def test_a_lost_link_status_before_start_refuses_follow(self):
+        f = HmcFlow()
+        f.on_status({"link": False}, 0.5)
+        self.assertFalse(f.link_ok)
+        f.start(1.0)
+        out = f.on_heard("follow me", 2.0)
+        self.assertEqual((f.state, actions(out)), (READY, []))
+
+    def test_only_the_first_status_sets_the_person(self):
+        """After it the bridge's debounced see_person and lost_person decide."""
+        f = HmcFlow()
+        f.on_status({"link": True, "phase": "FOLLOW", "locked": True}, 0.5)
+        f.on_status({"link": True, "phase": "FOLLOW", "locked": False}, 0.7)
+        self.assertTrue(f.person_visible)
+
+
 class ScriptedRunTests(unittest.TestCase):
     """The whole task with a fake publisher, as the node would emit it."""
 
@@ -653,8 +841,9 @@ class ScriptedRunTests(unittest.TestCase):
         emit(f.on_event("see_person", 1.5))
         emit(f.on_event("lost_person", 10.0))
         emit(f.on_tick(15.5))
-        emit(f.on_event("see_person", 16.0))
-        emit(f.on_heard("this is the car", 30.0))
+        emit(f.on_tick(30.0))  # 20 s lost
+        emit(f.on_event("see_person", 30.2))
+        emit(f.on_heard("this is the car", 31.0))
         emit(f.on_event("bag_failed|NOT_POINTED|no steady pointing in 20 s", 50.5))
         emit(f.on_event("bag_chosen|LEFT|I will take the left bag, on your left.", 55.0))
         for t in range(56, 85, 5):

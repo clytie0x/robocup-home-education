@@ -144,6 +144,30 @@ class AgentTest(unittest.TestCase):
         found = agent.outside({106}, proc)  # 106 leads one of our groups
         self.assertEqual(found, {"bridge": [101, 102], "flow": [103]})
 
+    def test_outside_pids_are_sorted(self):
+        """The Jetson's /proc lists 102 before 101 at times; the answer must not depend on that order."""
+        proc = Path(self.tmp.name) / "proc"
+        for pid in (99, 100, 102, 101):  # "100" < "99" by name, so a name-ordered listing is not numeric
+            d = proc / str(pid)
+            d.mkdir(parents=True)
+            (d / "cmdline").write_bytes(b"python3\0base_bridge.py\0")
+            (d / "stat").write_text("%d (x) S 1 %d %d 0" % (pid, pid, pid))
+        self.assertEqual(agent.outside(set(), proc), {"bridge": [99, 100, 101, 102]})
+
+    def test_outside_finds_the_whisper_server_the_voice_launch_and_the_arm_job(self):
+        proc = Path(self.tmp.name) / "proc"
+        cases = {201: [b"/opt/robot_voice/src/whisper.cpp/build/bin/whisper-server", b"-m", b"x.bin"],
+                 202: [b"/usr/bin/python3", b"/opt/ros/jazzy/bin/ros2", b"launch", b"voice_assistant",
+                       b"hmc_voice.launch.py"],
+                 203: [b"python3", b"bag_arm.py"], 204: [b"bash", b"-c", b"whisper-server"],
+                 205: [b"python3", b"whisper-server"]}
+        for pid, args in cases.items():
+            d = proc / str(pid)
+            d.mkdir(parents=True)
+            (d / "cmdline").write_bytes(b"\0".join(args) + b"\0")
+            (d / "stat").write_text("%d (x) S 1 %d %d 0" % (pid, pid, pid))
+        self.assertEqual(agent.outside(set(), proc), {"whisper": [201], "voice": [202], "arm": [203]})
+
     def holding_agent(self):
         holds = []
         a = self.agent
@@ -308,6 +332,62 @@ class AgentTest(unittest.TestCase):
         with open(path, "w") as f:
             f.write('{"commit": null}')
         self.assertIsNone(agent.deployed_version(path))
+
+
+class TaskProgramsTest(unittest.TestCase):
+    """The programs start-all runs for the whole task, in the order each needs the one before."""
+
+    def test_start_all_order(self):
+        self.assertEqual(agent.ORDER, ["detector", "whisper", "voice", "bridge", "arm", "flow"])
+        self.assertEqual(list(agent.PROGRAMS), agent.ORDER)
+        self.assertEqual(set(agent.SCRIPTS) | set(agent.EXECUTABLES), set(agent.ORDER))
+
+    def test_whisper_runs_the_server_of_servers_sh_in_the_foreground(self):
+        cmd, ros, port = agent.PROGRAMS["whisper"]
+        self.assertEqual((ros, port), (False, 8080))  # servers.sh: --host 127.0.0.1 --port 8080
+        self.assertIn(agent.VOICE_ROOT + "/src/whisper.cpp/build/bin/whisper-server", cmd)
+        self.assertIn("exec ", cmd)  # the server is the group leader: no "&", so the agent sees it run
+        self.assertNotIn("&", cmd.replace("&&", ""))
+        for part in ("-l en", "-t 4", "--host 127.0.0.1", "--port 8080", "ggml-small.en-q5_1.bin",
+                     "ggml-base.en-q5_1.bin"):
+            self.assertIn(part, cmd)
+
+    def test_voice_is_the_help_me_carry_launch(self):
+        cmd, ros, port = agent.PROGRAMS["voice"]
+        self.assertTrue(ros)
+        self.assertIsNone(port)
+        self.assertIn(agent.VOICE_WS + "/install/setup.bash", cmd)
+        self.assertTrue(cmd.endswith("ros2 launch voice_assistant hmc_voice.launch.py"))
+
+    def test_arm_is_bag_arm_with_the_arm_workspace(self):
+        cmd, ros, port = agent.PROGRAMS["arm"]
+        self.assertTrue(ros)
+        self.assertIn("so100_ws/install/setup.bash", cmd)
+        self.assertTrue(cmd.endswith("python3 bag_arm.py"))
+
+    def test_flow_uses_the_arm_with_the_measured_timeouts(self):
+        cmd, ros, port = agent.PROGRAMS["flow"]
+        self.assertTrue(cmd.endswith(
+            "python3 hmc_flow.py --ros-args -p use_arm:=true -p grab_timeout:=240.0 -p drop_timeout:=60.0"))
+
+    def test_start_all_uses_a_whisper_server_started_by_hand(self):
+        """servers.sh start-stt (the voice docs) leaves one on port 8080: use it, never start a second."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        fakes = {name: (shell(SLEEPER), False, 8080 if name == "whisper" else None) for name in ("whisper", "flow")}
+        a = agent.Agent(fakes, logs=Path(tmp.name), find_outside=lambda ours: {"whisper": [4321]},
+                        hold=lambda: None, port_open=lambda port: True)
+        self.addCleanup(a.stop_all)
+        self.assertEqual(a.act("start", "whisper")[0], 409)  # a single start is still refused
+        saved = agent.SETTLE
+        agent.SETTLE = 0.0
+        try:
+            self.assertEqual(a.act("start-all")[0], 200)
+            self.assertTrue(wait_for(lambda: a.sequence == "all started"))
+        finally:
+            agent.SETTLE = saved
+        self.assertFalse(a.programs["whisper"].running())
+        self.assertTrue(a.programs["flow"].running())
 
 
 class HttpTest(unittest.TestCase):

@@ -34,7 +34,9 @@ ROS side:
       then bag_reached|CODE|x,y (CODE OK, or ESTIMATED when the LiDAR never saw the bag; robot frame,
       metres, 3 decimals) or bag_failed|CODE|message (NOT_POINTED, NO_BAG, BLOCKED, TIMEOUT, LOST_BAG,
       CANCELLED; REFUSED when the Pi refused the command).
-  /base/status  every Pi status as JSON, plus "link": true; {"link": false} when the link is lost.
+  /base/status  every Pi status as JSON, plus "link": true and "search": true while the Pi's brain looks for a
+      lost operator (the Pi's "mode" == "search" when it sends a mode, else FOLLOW, not waiting, not held and
+      unlocked for SEARCH_AFTER_S, the brain's LOST_AFTER); {"link": false} when the link is lost.
 
 The bridge keeps the intent, what the flow last asked (following, waiting, returning, idle after end).
 A sent line is not proof it arrived, so every status is compared with the intent; after each
@@ -77,6 +79,7 @@ HOLD_PORT = 5605  # UDP on 127.0.0.1: agent.py asks for a hold here (see HoldLis
 PING_S = 0.5
 LOST_DEBOUNCE_S = 0.5
 LINK_TIMEOUT_S = 1.5
+SEARCH_AFTER_S = 2.0  # s without a lock before the brain searches (hmc/src/hmc/follower.py LOST_AFTER)
 MIN_BACKOFF_S = 0.5
 MAX_BACKOFF_S = 5.0
 CONNECT_TIMEOUT_S = 0.3  # one address per step, so a step blocks the ROS timer at most this long
@@ -312,9 +315,18 @@ class BridgeLogic:
         if at_start and not self.at_start:
             out.append(("event", "at_start"))
         self.at_start = at_start
-        out.append(("status", dict(status, link=True)))
+        out.append(("status", dict(status, link=True, search=self._search(status, now))))
         self.status_seen = True
         return out + self._bag_events(status) + self._run_end(self.phase) + self._restore(status, now)
+
+    def _search(self, status, now):
+        """The Pi's brain looks for a lost operator: its "mode" when the Pi sends one (run_follow's status line
+        does not today), else following, not waiting, not held and without a lock for SEARCH_AFTER_S."""
+        if "mode" in status:
+            return status["mode"] == "search"
+        return (status.get("phase") == "FOLLOW" and not status.get("waiting") and not status.get("held")
+                and not self.locked and self.unlocked_since is not None
+                and now - self.unlocked_since >= SEARCH_AFTER_S - EPS)
 
     def _run_end(self, phase):
         """DONE, or IDLE after moving: the Pi's run is over, so the flow's intent is dropped."""
