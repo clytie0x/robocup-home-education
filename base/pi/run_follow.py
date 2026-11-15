@@ -815,8 +815,9 @@ def cycle(state, now):
     v_was, w_was = state.sent
     # The senses keep their state in the odometry frame (it never jumps): what moved and what is
     # furniture, the yaw history for old camera answers. Only their output goes to the believed frame.
+    # The frame's depth gives the range of the people in its answer; a simulated person has none.
     seen = _to_believed(state.fix, senses.read(now, pose, v_was, w_was, dt, sensed, depth_points, answer, link_alive,
-                                               follower.score))
+                                               follower.score, frame if state.virtual is None else None))
     t_senses = state.clock() - now
     if REMOTE is not None and REMOTE.waiting():
         follower.navigator._goal = None  # no answer to a request after forget yet: ask again this cycle

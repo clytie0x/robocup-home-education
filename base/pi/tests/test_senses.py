@@ -1,10 +1,13 @@
 import math
 import unittest
+from types import SimpleNamespace
+
+import numpy as np
 
 import params
 from link import Answer, Seen
 from legs import candidates
-from senses import RealSenses
+from senses import RealSenses, person_range
 from test_legs import person, scan_of
 
 P = params.load()
@@ -33,8 +36,8 @@ def seen(x, y, look):
     return Seen(camera_bearing(x, y), 0.9, look, [0, 0, 1, 1])
 
 
-def read(s, now, scan, answer=None, pose=STILL, link_alive=True, depth=None):
-    return s.read(now, pose, 0.0, 0.0, 0.1, scan, depth, answer, link_alive, score)
+def read(s, now, scan, answer=None, pose=STILL, link_alive=True, depth=None, frame=None):
+    return s.read(now, pose, 0.0, 0.0, 0.1, scan, depth, answer, link_alive, score, frame)
 
 
 def ready():
@@ -49,6 +52,43 @@ def enrolled(x=1.5, y=0.0):
     got = s.enrol(0.0, scan_of(person(x, y)), Answer(0.0, [seen(x, y, OPERATOR)]))
     assert not isinstance(got, str), got
     return s
+
+
+W, H = 320, 240  # the Xtion frames the Jetson answers for
+FOCAL = (W / 2) / math.tan(math.radians(P["camera_hfov_deg"]) / 2)
+PITCH = math.radians(P["camera_pitch_deg"])
+
+
+def camera_range(x, y):
+    return math.hypot(x + P["lidar_x"] - P["camera_x"], y - P["camera_y"])
+
+
+def pixel(ahead, left, up):
+    """Image pixel of a point given from the camera (metres ahead, left, up). Mirrored: robot left is image right."""
+    z = ahead * math.cos(PITCH) + up * math.sin(PITCH)
+    down = ahead * math.sin(PITCH) - up * math.cos(PITCH)
+    return (W - 1) / 2 + FOCAL * left / z, (H - 1) / 2 + FOCAL * down / z
+
+
+def view(t, people, width=0.4, tall=1.7):
+    """A camera answer and its frame. Each person, (lidar-frame point, look), is an upright board width x tall
+    facing the camera at their LiDAR range; a nearer board hides a farther one in the depth image."""
+    depth = np.zeros((H, W), np.uint16)
+    found, boards = [], []
+    for (x, y), look in people:
+        ahead, left = x + P["lidar_x"] - P["camera_x"], y - P["camera_y"]
+        x1, _ = pixel(ahead, left - width / 2, 0.0)
+        x2, _ = pixel(ahead, left + width / 2, 0.0)
+        _, top = pixel(ahead, left, tall - P["camera_height"])
+        _, bottom = pixel(ahead, left, -P["camera_height"])
+        box = [max(0.0, x1), max(0.0, top), min(float(W), x2), min(float(H), bottom)]
+        found.append(Seen(camera_bearing(x, y), 0.9, look, box))
+        boards.append((ahead, box))
+    for ahead, box in sorted(boards, key=lambda b: -b[0]):  # the far ones first: the near ones paint over them
+        for v in range(int(box[1]), int(math.ceil(box[3]))):
+            down = (v - (H - 1) / 2) / FOCAL
+            depth[v, int(box[0]):int(math.ceil(box[2]))] = round(1000 * ahead / (math.cos(PITCH) + down * math.sin(PITCH)))
+    return Answer(t, found), SimpleNamespace(time=t, depth=depth)
 
 
 class NamedTests(unittest.TestCase):
@@ -341,6 +381,18 @@ class Merge(unittest.TestCase):
                 frames = approach + [[(1.5, -0.225)]] * 20 + split
                 self.check_never_on_the_stranger(enrolled(), frames, lambda t, people: None)
 
+    def test_a_stranger_missed_for_one_scan_just_before_the_merge_still_counts(self):
+        # Scratch fuzz 2026-11-15, scene 115: the stranger walked up and stood beside the operator, missed one
+        # scan, the camera locked the operator again, and they merged 0.2 s later. Counted from the missed
+        # scan, the stranger was too young to count, and the robot rode them after the split.
+        s = ready()
+        approach = [[(1.5, 0.0), (1.5, -1.2 + 0.05 * i)] for i in range(16)]  # walks in from 1.2 m away
+        beside = [[(1.5, 0.0), self.STRANGER]] * 5 + [[(1.5, 0.0)]] + [[(1.5, 0.0), self.STRANGER]] * 2
+        frames = approach + beside + [[(1.5, -0.225)]] * 20 + self.splits()["operator walks on, stranger stays"]
+        relock = round(0.1 * (len(approach) + 7), 1)  # the cycle after the missed scan; the camera looks only then
+        self.check_never_on_the_stranger(
+            s, frames, lambda t, people: Answer(t, [seen(*people[0], OPERATOR)]) if t == relock else None)
+
     def test_enrol_waits_while_someone_is_right_at_the_operator(self):
         s = enrolled()
         read(s, 0.1, scan_of(person(1.5, 0.0) + person(1.5, -0.35)))  # crowded: ambiguous latches
@@ -456,11 +508,9 @@ class SetDown(unittest.TestCase):
         self.assertTrue(s.locked)
         self.assertEqual(held[-15:], [False] * 15, "still holding 3.5 s after the bag was put down")
 
-    # Known gap, not fixed here: a bag that stays in every scan from the moment it is put down trips the
-    # split rule (_mixed_up, 0.6 s) and drops the track before the SET_DOWN_S evidence is in; the operator's
-    # own candidate then shares the bag's camera bearing. To be solved by the fused LiDAR and camera tracker
-    # (plan Milestone 3). The flickering case, the one seen in run 20261115-032329, passes above.
-    @unittest.expectedFailure
+    # A bag that stays in every scan from the moment it is put down sets off the split rule (_mixed_up,
+    # 0.6 s) before the SET_DOWN_S evidence is in: that only holds while the camera is looking, it no
+    # longer drops the track.
     def test_a_bag_that_never_flickers_too(self):
         s, held = self.run_set_down(link=True, flicker=1000)
         self.assertEqual(held[-15:], [False] * 15)
@@ -482,6 +532,164 @@ class SetDown(unittest.TestCase):
             read(s, t, scan_of(things), answer)
             held.append(s.ambiguous or not s.locked)
         self.assertEqual(held[-10:], [True] * 10)
+
+
+class Range(unittest.TestCase):
+    """The range of a camera person from the depth image of their frame (senses.person_range)."""
+
+    def test_the_depth_in_the_box_gives_the_range_from_the_camera(self):
+        for metres in (1.0, 1.5, 2.5, 3.5):
+            with self.subTest(metres=metres):
+                at = (metres, 0.3)
+                answer, frame = view(0.0, [(at, OTHER)])
+                (who,) = answer.people
+                self.assertGreater(who.box[0], W / 2 - 10)  # on the robot's left: the image's right
+                self.assertAlmostEqual(person_range(who.box, frame.depth, P), camera_range(*at), delta=0.05)
+
+    def test_no_depth_no_range(self):
+        answer, frame = view(0.0, [((2.0, 0.0), OTHER)])
+        self.assertIsNone(person_range(answer.people[0].box, np.zeros((H, W), np.uint16), P))
+        self.assertIsNone(person_range([0, 0, 1, 1], frame.depth, P))  # a box too small to read
+
+    def test_someone_hidden_behind_reads_the_range_of_who_hides_them(self):
+        front, back = (1.5, 0.0), (3.0, 0.1)
+        answer, frame = view(0.0, [(front, OPERATOR), (back, OTHER)])
+        ranges = [person_range(who.box, frame.depth, P) for who in answer.people]
+        self.assertAlmostEqual(ranges[1], camera_range(*front), delta=0.05)  # never farther apart than they look
+
+
+class TwoAtTheTrack(unittest.TestCase):
+    """Run 20261115-032329: 44 cycles 'two seen at the track', two camera people within MATCH_DEG of the
+    track bearing, e.g. a second person behind the operator at a different range."""
+
+    OP = (2.2, 0.0)
+
+    def check(self, stranger, with_frame):
+        s = enrolled(*self.OP)
+        scan = scan_of(person(*self.OP) + person(*stranger), wall=4.5)
+        answer, frame = view(0.1, [(self.OP, OPERATOR), (stranger, OTHER)])
+        self.assertLessEqual(abs(camera_bearing(*self.OP) - camera_bearing(*stranger)), 8.0)  # within MATCH_DEG
+        got = read(s, 0.1, scan, answer, frame=frame if with_frame else None)
+        return s, got
+
+    def test_someone_clearly_behind_the_operator_is_not_ambiguous(self):
+        s, got = self.check((3.6, 0.45), with_frame=True)
+        self.assertFalse(s.ambiguous, s.why)
+        self.assertEqual(got.operator_look, OPERATOR)  # the look whose range is the track's
+        self.assertEqual(len(got.people), 1)  # the camera saw a person behind: a person, not furniture
+
+    def test_without_the_depth_it_stays_ambiguous(self):
+        s, got = self.check((3.6, 0.45), with_frame=False)
+        self.assertTrue(s.ambiguous)
+        self.assertEqual(s.why, "two seen at the track")
+        self.assertIsNone(got.operator_look)
+
+    def test_someone_in_front_of_the_operator_keeps_it_ambiguous(self):
+        s, got = self.check((1.2, 0.05), with_frame=True)  # nearer: they hide the operator from the depth
+        self.assertTrue(s.ambiguous)
+        self.assertIsNone(got.operator_look)
+
+    def test_the_depth_never_re_locks_onto_a_candidate_at_another_range(self):
+        # The camera sees the operator 2.8 m away; the LiDAR has only a chair leg at that bearing, 1.5 m away.
+        chair, operator = (1.5, 0.0), (2.8, 0.0)
+        answer, frame = view(0.0, [(operator, OPERATOR)])
+        s = ready()
+        read(s, 0.0, scan_of([chair]), answer, frame=frame)
+        self.assertFalse(s.locked)
+        s = ready()
+        read(s, 0.0, scan_of([chair]), answer)  # without the depth, the bearing alone locks onto the chair
+        self.assertTrue(s.locked)
+
+
+class Ids(unittest.TestCase):
+    def test_a_person_who_drops_out_of_a_few_scans_keeps_their_id(self):
+        s = enrolled()
+        ids = set()
+        for i in range(25):  # walks along y = 1.5; the LiDAR misses them on 3 scans
+            t = round(0.1 * (i + 1), 1)
+            walker = (0.5 + 0.06 * i, 1.5)
+            scan = scan_of(person(1.5, 0.0) + ([] if 10 <= i < 13 else person(*walker)), wall=2.5)
+            got = read(s, t, scan, link_alive=False)
+            ids |= set(got.people)
+        self.assertEqual(len(ids), 1)
+
+
+class Objects(unittest.TestCase):
+    """Task 3 of plan Milestone 3: a candidate the camera never confirms as a person and that stays still is an
+    object, whether or not it flickers or appeared next to the operator."""
+
+    CHAIR = [(2.3, -0.5), (2.3, -0.7)]  # two legs, one candidate at (2.3, -0.6)
+    START, BESIDE = (1.5, 0.3), (2.1, -0.1)  # the chair is 0.54 m from the operator beside it
+
+    def beside_the_chair(self, link_for, drop_out=(40,)):
+        """The operator stands 2.5 s at START (the camera has the chair in clear view), walks beside it in
+        1 s and stands there; the chair drops out of the scans in drop_out. Returns the senses and, per
+        cycle, whether the robot holds (ambiguous or unlocked)."""
+        s = enrolled(*self.START)
+        held = []
+        for i in range(55):
+            t = round(0.1 * (i + 1), 1)
+            k = min(max(i - 25, 0), 10) / 10
+            op = (self.START[0] + k * (self.BESIDE[0] - self.START[0]), self.START[1] + k * (self.BESIDE[1] - self.START[1]))
+            things = person(*op) + ([] if i in drop_out else self.CHAIR)
+            link = link_for(i)
+            read(s, t, scan_of(things), Answer(t, [seen(*op, OPERATOR)]) if link else None, link_alive=link)
+            held.append(s.ambiguous or not s.locked)
+        return s, held
+
+    def test_a_watched_chair_that_drops_out_beside_the_operator_keeps_the_track(self):
+        s, held = self.beside_the_chair(lambda i: True)
+        self.assertTrue(s.locked)
+        self.assertEqual(held[36:], [False] * 19, s.why)
+
+    def test_with_the_link_down_it_drops_the_track(self):
+        _, held = self.beside_the_chair(lambda i: i < 38)  # an object while the camera answered; then silence
+        self.assertIn(True, held[40:])
+        _, held = self.beside_the_chair(lambda i: False)
+        self.assertIn(True, held[40:])
+
+    def test_an_object_never_takes_the_track(self):
+        # The bag (to the operator's left, its own LiDAR candidate) is an object; then the operator's legs
+        # drop out of the scan. The coasting track reaches the bag, inside track_jump: the fix is refused.
+        s = enrolled(1.5, 0.0)
+        op, bag = (2.0, 0.0), (2.0, 0.33)
+        for i in range(70):
+            t = round(0.1 * (i + 1), 1)
+            here = (1.5 + 0.05 * i, 0.0) if i < 10 else op
+            hidden = i >= 55
+            things = ([] if hidden else person(*here)) + ([bag] if i >= 10 else [])
+            got = read(s, t, scan_of(things), Answer(t, [seen(*here, OPERATOR)]))
+            if i == 54:
+                self.assertFalse(s.ambiguous or not s.locked, s.why)  # the bag stopped crowding
+            if s.locked:
+                self.assertGreater(math.dist(s.tracker.pos, bag), 0.1, "on the bag at %.1f s" % t)
+            if got.operator is not None:
+                self.assertGreater(math.dist(got.operator, (bag[0] + P["lidar_x"], bag[1])), 0.15, t)
+
+    def test_clear_view_is_where_a_person_standing_there_would_be_seen(self):
+        s = RealSenses(P)
+        s._camera_fresh = True
+        operator = at_bearing(-8.6, 1.14)  # run 20261115-032329 at 180 s: the operator, and the gift bag
+        bag = at_bearing(3.0, 1.33)  # 0.31 m from them, 0.19 m farther from the camera
+        self.assertTrue(s._in_clear_view(bag, [operator, bag]))
+        behind = at_bearing(-5.6, 1.29)  # 0.15 m behind the operator, 3 deg off: hidden by them
+        self.assertFalse(s._in_clear_view(behind, [operator, behind]))
+        beside = at_bearing(10.0, 1.2)  # 0.4 m to their left
+        self.assertTrue(s._in_clear_view(beside, [operator, beside]))
+        self.assertFalse(s._in_clear_view(at_bearing(0.0, 1.0), []))  # too near: only the legs below 0.77 m are in the picture
+        self.assertFalse(s._in_clear_view(at_bearing(25.0, 2.0), []))  # half of them out of the picture
+        s._camera_fresh = False
+        self.assertFalse(s._in_clear_view(bag, [operator, bag]))  # no camera answer: nobody watches
+
+    def test_a_still_stranger_the_camera_sees_stays_a_person(self):
+        s = enrolled(*self.START)
+        stranger = (2.3, -0.6)
+        for i in range(40):
+            t = round(0.1 * (i + 1), 1)
+            got = read(s, t, scan_of(person(*self.START) + person(*stranger)),
+                       Answer(t, [seen(*self.START, OPERATOR), seen(*stranger, OTHER)]))
+        self.assertEqual(len(got.people), 1)
+        self.assertFalse(any(track.object for track in s.tracks.tracks.values()))
 
 
 class Looks(unittest.TestCase):

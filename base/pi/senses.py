@@ -2,14 +2,19 @@
 
 The LiDAR track says where the operator is; the camera only says who someone is. A camera
 person can start a track, but only when the Jetson link is alive and their look matches.
+Everyone else in the scan keeps an id from scan to scan (tracks.Tracks, a Kalman filter each).
+A camera person is matched to the LiDAR by bearing, and by range where the depth image gives one.
 """
 import math
+
+import numpy as np
 
 from hmc.follower import Senses
 
 import geometry
-from legs import GATE, MAX_WIDTH, LegTracker, candidates
+from legs import MAX_WIDTH, LegTracker, candidates
 from shapes import ObstacleMemory
+from tracks import Tracks
 
 FRESH = 0.5  # s; an older camera answer is dropped, never matched
 MATCH_DEG = 8.0  # a camera person and a LiDAR candidate this close in bearing are the same
@@ -25,7 +30,16 @@ COMPANY = MAX_WIDTH  # m; someone this close to the operator can become one LiDA
 # s an id must live before its vanishing or appearing next to the operator counts. In a review fuzz
 # (600 runs, link down) 0.3 and 0.6 s both left 2 silent stranger follows, but a lone walker's own
 # stride (a sine-leg model, not real data) dropped the track in 51 of 96 gaits at 0.3 s, 6 at 0.6 s.
+# The tracks keep an id through a missed scan. Split counts from the last missed scan (Track.run_since), as
+# when every missed scan gave a new id, and so does vanished for an id first seen next to the operator (a
+# leg of a long stride paired alone comes and goes there). Vanished for someone who walked up from WALKED_IN or
+# farther counts their whole life (Track.born): one missed scan just before they merge must not hide them.
+# Scratch fuzz 2026-11-15 (senses only, robot still, a model, not real data): of 200 merge scenes with the
+# link down, 10 rode the stranger before these tracks and 5 after; vanished counted from born for everyone
+# gave 0, but held a lone walker with a 0.3 to 0.6 m stride in 21 of 150 walks (0 now, 0 before).
 COMPANY_MIN = 0.6
+WALKED_IN = 1.0  # m: first seen this far from the operator, it is someone else, not a leg of a long stride (up to
+# 0.6 m apart in the scratch walker model, and the track may sit on either leg)
 # Furniture is not a person (chair and table legs look like legs). A candidate counts as a person
 # once it moved MOVED from where it was first seen, or the camera saw a person at it in the last
 # CAMERA_KEEP, or it was first seen within COMPANY of the operator (it may have come out of them).
@@ -35,16 +49,69 @@ COMPANY_MIN = 0.6
 MOVED = 0.25  # m
 CAMERA_KEEP = 2.0  # s
 STATIC_NEAR = 0.1  # m; a candidate this close to last cycle's furniture is that furniture
-# Something set down next to the operator (run 20261115-032329: the gift bag 0.31 m from their foot held
-# the robot 'crowded' for 13.7 s) is first seen within COMPANY of them, so a person by the rule above.
-# It stops being one once it stood still SET_DOWN_S while the camera, answering fresh with that spot
-# in view, never saw a person there; its spot is remembered SET_DOWN_KEEP so that a flickering object
-# with a new id is furniture at once. With the link down nothing is demoted: no camera to ask.
+# Objects. Something set down next to the operator (run 20261115-032329: the gift bag 0.31 m from their
+# foot held the robot 'crowded' for 13.7 s) is first seen within COMPANY of them, so a person by the rule
+# above. Any candidate, that one or furniture, becomes an object once it stood still (never SET_DOWN_MOVED
+# from where it was first seen) for SET_DOWN_S while the camera, answering fresh, had its spot in clear
+# view (_in_clear_view) and never saw a person there. An object is furniture for good (until it moves or
+# the camera sees someone there); while the link is alive it no longer counts for the company rules, so
+# a bag that stays put does not drop the track. While that evidence is being collected, a company rule
+# set off by it holds the robot instead of dropping the track. An object's spot is remembered
+# SET_DOWN_KEEP, so the same thing under a new id (after a gap longer than tracks.KEEP) is an object at
+# once. With the link down nothing becomes an object: no camera to ask.
 SET_DOWN_S = 2.0  # s
 SET_DOWN_MOVED = 0.10  # m: it moved less than this from where it was first seen
 SET_DOWN_KEEP = 10.0  # s
 SET_DOWN_NEAR = 0.15  # m: a candidate this close to a remembered spot is that object
-SPOT_GAP = 0.6  # s a spot may go unseen (the object flickers in the scan) and still collect its evidence
+# Clear view: a person standing there would be in the picture with their whole width (BODY_HALF each side
+# of the bearing) and from the floor up to WATCH_HEIGHT (from camera_height and camera_pitch_deg in
+# params.json: camera_height 0.07 there, about 0.105 measured, so the 0.07 asks for more range: 1.18 m),
+# and no candidate more than OCCLUDE_GAP nearer the camera hides their middle (their bearing inside its
+# BODY_HALF). Run 20261115-032329 at 180 s: the gift bag 11.6 deg beside the operator, 0.19 m farther, is
+# in clear view (the operator's half width at 1.14 m is 10 deg); something 0.15 m behind them, 3 deg off, is not.
+BODY_HALF = 0.2  # m, half a person's width at the legs and hips, what this camera sees of them
+WATCH_HEIGHT = 0.9  # m: legs and hips in the picture
+OCCLUDE_GAP = 0.05  # m: nearer than this is beside, not in front (LiDAR centres move a few cm scan to scan)
+# Range. A camera person's range is the depth inside their box (camera frames carry the Xtion depth image):
+# the NEAR_SHARE percentile of the valid depths in the middle half of the box width, between half and
+# nine tenths of its height (legs and hips; the bottom tenth is floor). The low percentile reads the
+# person, not the background between their legs; someone hidden behind a nearer person reads that
+# person's range, which can only make two people look like one place, never one look like two.
+NEAR_SHARE = 30  # percent
+MIN_DEPTH_PIXELS = 20
+DEPTH_MAX = 4.0  # m, the Xtion's depth is too rough beyond (PEOPLE_RANGE ends there too)
+DEPTH_KEEP = 1.0  # s of depth images kept to find the one an answer was computed from (answers come in ~0.1 s)
+# Two camera people within MATCH_DEG of the track are ambiguous, unless their ranges say clearly who
+# is who: exactly one within RANGE_TOL of the track's range, every other one more than RANGE_FAR
+# behind it (someone nearer than the track, or without a range, keeps it ambiguous).
+RANGE_TOL = 0.3  # m
+RANGE_FAR = 0.6  # m
+
+
+def person_range(box, depth, p):
+    """Metres from the camera to a camera person in the floor plane, from the depth in their box, or None.
+
+    box is [x1, y1, x2, y2] in the pixels of the frame (link.Seen.box; mirrored, but the depth image is
+    mirrored the same way), depth the uint16 millimetre image of that frame (0 = no reading).
+    """
+    height, width = depth.shape
+    x1, y1, x2, y2 = box
+    cols = int(max(0, math.floor(x1 + (x2 - x1) / 4))), int(min(width, math.ceil(x2 - (x2 - x1) / 4)))
+    rows = int(max(0, math.floor(y1 + (y2 - y1) / 2))), int(min(height, math.ceil(y1 + (y2 - y1) * 0.9)))
+    if cols[1] <= cols[0] or rows[1] <= rows[0]:
+        return None
+    patch = depth[rows[0]:rows[1], cols[0]:cols[1]]
+    valid = patch[patch > 0]
+    if valid.size < MIN_DEPTH_PIXELS or valid.size < 0.3 * patch.size:
+        return None
+    z = float(np.percentile(valid, NEAR_SHARE)) / 1000.0
+    if z > DEPTH_MAX:
+        return None
+    f = (width / 2) / math.tan(math.radians(p["camera_hfov_deg"]) / 2)
+    right = ((cols[0] + cols[1] - 1) / 2 - (width - 1) / 2) / f
+    down = ((rows[0] + rows[1] - 1) / 2 - (height - 1) / 2) / f
+    pitch = math.radians(p["camera_pitch_deg"])  # same camera model as depth_obstacles.points
+    return math.hypot(z * math.cos(pitch) + down * z * math.sin(pitch), right * z)
 
 
 class RealSenses:
@@ -60,18 +127,18 @@ class RealSenses:
         self.learned = 0  # the loop sets this to Follower.operator_look.count every cycle
         self._pose = (0.0, 0.0, 0.0)
         self._yaws = []  # (time, yaw) from the poses passed to read
-        self._people = {}  # id -> odometry point, last cycle
-        self._next_id = 1
-        self._born = {}  # id -> when that person was first seen
-        self._first = {}  # id -> (odometry point, time) where and when that candidate was first seen
+        self.tracks = Tracks()  # everyone but the operator's fix, in the odometry frame
         self._person = set()  # ids that showed they are people (moved, seen by the camera, or came out of the operator)
         self._camera_at = {}  # id -> last time the camera saw a person at it
         self._furniture = []  # odometry points of the candidates that are not people, last cycle
         self._came_out = set()  # ids that are people only because they were first seen next to the operator
-        self._spots = []  # where 'came out' people stand: {"at", "seen", "watched_since", "person"}
+        self._walked_in = set()  # ids first seen farther than WALKED_IN from the operator's last fix and track
+        self._watched = {}  # id -> since when the camera watched it stand still with nobody there
         self._camera_fresh = False  # this cycle has a fresh camera answer over a live link
-        self._set_down = []  # (odometry point, time) of objects demoted as set down next to the operator
+        self._set_down = {}  # id -> (odometry point, time) where an object was last seen
         self._operator_at = None  # odometry point of the operator at the last fix
+        self._depths = []  # (frame time, depth image) of the latest camera frames
+        self._ranges = {}  # answer time -> range of each of its people (None where unknown)
 
     @property
     def locked(self):
@@ -88,8 +155,8 @@ class RealSenses:
             return "someone is right at the operator: wait"  # a fresh enrol has no look to check
         cands = candidates(scan)
         close = []
-        for bearing, look in self._fresh(now, answer):
-            c = self._match(bearing, cands)
+        for bearing, look, rng in self._fresh(now, answer):
+            c = self._match(bearing, rng, cands)
             if c is not None and math.hypot(*self._base(c)) <= ENROL_RANGE:
                 close.append((c, look))
         if len(close) > 1 or (close and self._crowded(close[0][0], cands)):
@@ -104,10 +171,13 @@ class RealSenses:
         self._last_now = now
         return geometry.base_to_odom(self._base(c), self._pose), look
 
-    def read(self, now, pose, v, w, dt, scan, depth_points, answer, link_alive, score):
+    def read(self, now, pose, v, w, dt, scan, depth_points, answer, link_alive, score, frame=None):
+        """frame: this cycle's camera frame (camera.Frame), kept for the range of the people in its answer."""
         self.why = None  # which rule made this cycle unsure or dropped the track, for the log
         self._pose = pose
         self._yaws = [s for s in self._yaws if now - s[0] <= YAW_KEEP] + [(now, pose[2])]
+        if frame is not None and getattr(frame, "depth", None) is not None:
+            self._depths = [d for d in self._depths if frame.time - d[0] <= DEPTH_KEEP] + [(frame.time, frame.depth)]
         if link_alive and answer is not None:
             self._answer = answer
         seen = self._fresh(now, answer) if link_alive else []
@@ -124,19 +194,21 @@ class RealSenses:
                 self.tracker = self._new_tracker()  # lost: only a camera look can lock again (rule 4)
                 self.why = "fix rejected"
             elif fixed:
-                at_track = [l for b, l in seen if abs(self._camera_bearing(pos) - b) <= MATCH_DEG]
+                at_track = self._at_track(pos, seen)
                 if self._crowded(pos, cands) or len(at_track) > 1:
                     self._unsure_at = now
                     self.why = "crowded" if self._crowded(pos, cands) else "two seen at the track"
                 else:
-                    look = next((l for b, l in seen if self._match(b, cands) == pos), None)
+                    look = next((l for b, l, r in at_track if self._match(b, r, cands) == pos), None)
         unsure = now - self._unsure_at <= UNSURE_LATCH
         if not self.locked and not unsure and self.learned >= LEARNED:  # before that, only enrol may lock
-            for bearing, l in sorted(seen, key=lambda s: -score(s[1])):
-                c = self._match(bearing, cands)
+            for bearing, l, rng in sorted(seen, key=lambda s: -score(s[1])):
+                c = self._match(bearing, rng, cands)
                 if c is None or score(l) < LOOK_MATCH:
                     continue
-                two_seen = sum(abs(self._camera_bearing(c) - b) <= MATCH_DEG for b, _ in seen) > 1
+                if rng is not None and abs(self._camera_range(c) - rng) > RANGE_FAR:
+                    continue  # the depth says that camera person stands nearer or farther than anyone there
+                two_seen = len(self._at_track(c, seen)) > 1
                 if self._crowded(c, cands) or two_seen:
                     self._unsure_at = now  # never lock onto a spot where two people stand (or look like one)
                     self.why = "no re-lock: crowded" if self._crowded(c, cands) else "no re-lock: two seen"
@@ -150,27 +222,29 @@ class RealSenses:
         if operator is not None:
             self._operator_at = operator
         others = [c for c in cands if c != self.tracker.pos and PEOPLE_RANGE[0] <= math.hypot(*self._base(c)) <= PEOPLE_RANGE[1]]
-        everybody = self._ids([geometry.base_to_odom(self._base(c), pose) for c in others])
-        people = self._sort_out(now, dict(zip(everybody, others)), everybody, seen)
+        everybody = self.tracks.update(now, [geometry.base_to_odom(self._base(c), pose) for c in others])
+        people = self._sort_out(now, dict(zip(everybody, others)), everybody, seen, cands)
         pid_of = {c: pid for pid, c in zip(everybody, others) if pid in people}
         # A look goes to a person only when its bearing points at exactly one candidate (not _match's
         # nearest-range rule, made for the operator: it hands a passer-by's look to whoever stands at the
         # operator's range), and never a look that scores as the operator (the operator coasting off the track).
         paired = []
-        for b, l in seen:
+        for b, l, _ in seen:
             near = [c for c in cands if abs(self._camera_bearing(c) - b) <= MATCH_DEG]
             if len(near) == 1 and near[0] in pid_of and score(l) < LOOK_MATCH:
                 paired.append((near[0], l))
         twice = {c for c, _ in paired if sum(1 for d, _ in paired if d == c) > 1}
         looks = {pid_of[c]: l for c, l in paired if c not in twice}  # two camera people on one track: whose look is it?
-        mixed = self._mixed_up(now, operator, everybody)  # furniture too: it may be a stranger who never moved
+        mixed, drop = self._mixed_up(now, operator, everybody)  # furniture too: it may be a stranger who never moved
         if mixed:
             # They may now be one LiDAR object; when it splits, nobody can say which piece is the
             # operator (spec criterion 4). Drop the track and hold: only a camera look may lock again.
-            self.tracker = self._new_tracker()
+            # A still thing the camera is still looking at only holds: it is an object or a person soon.
+            if drop:
+                self.tracker = self._new_tracker()
+                operator = None
             self._unsure_at = now
             self.why = mixed
-            operator = None
 
         self.ambiguous = now - self._unsure_at <= UNSURE_LATCH
         self._last_now = now
@@ -180,92 +254,127 @@ class RealSenses:
         obstacles = self.memory.update(now, pose, scan, depth_points, everyone)
         return Senses(now, operator, look, people, obstacles, looks=looks)
 
-    def _sort_out(self, now, cand_of, everybody, seen):
-        """The people among all the candidates; the rest is furniture, kept for the next cycle."""
-        track_bearing = self._camera_bearing(self.tracker.pos) if self.locked else None
+    def _sort_out(self, now, cand_of, everybody, seen, cands):
+        """The people among the candidates measured this scan; the rest is furniture, kept for the next cycle."""
+        at_operator = {id(s) for s in self._at_track(self.tracker.pos, seen)} if self.locked else set()
+        operator_at = [self._operator_at] if self._operator_at is not None else []  # the last fix, and the track now
+        if self.locked:
+            operator_at.append(geometry.base_to_odom(self._base(self.tracker.pos), self._pose))
         for pid, c in cand_of.items():
-            if pid not in self._first:
-                self._first[pid] = (everybody[pid], now)
-                if self._operator_at is not None and math.dist(everybody[pid], self._operator_at) <= COMPANY                         and not self._at_set_down(everybody[pid], now):
+            track = self.tracks[pid]
+            if track.born == now:
+                if all(math.dist(everybody[pid], at) > WALKED_IN for at in operator_at):
+                    self._walked_in.add(pid)
+                if self._at_set_down(everybody[pid], now):
+                    track.object = True  # where an object stood a moment ago: that object again
+                elif self._operator_at is not None and math.dist(everybody[pid], self._operator_at) <= COMPANY:
                     self._person.add(pid)  # it may have come out of the operator
                     self._came_out.add(pid)
-            for bearing, _ in seen:
-                if track_bearing is not None and abs(bearing - track_bearing) <= MATCH_DEG:
+            for s in seen:
+                if id(s) in at_operator:
                     continue  # that camera person is the operator
-                if abs(self._camera_bearing(c) - bearing) <= MATCH_DEG:
-                    self._camera_at[pid] = now  # every candidate at that bearing: the person may be the farther one
+                if self._at(c, s[0], s[2]):
+                    self._camera_at[pid] = now  # every candidate there: the person may be the farther one
         for pid, c in cand_of.items():
-            self._demote_if_set_down(pid, c, everybody[pid], now)
+            self._watch(pid, c, now, cands)
         people = {pid: pt for pid, pt in everybody.items() if self._is_person(pid, now)}
-        self._furniture = [pt for pid, pt in everybody.items() if pid not in people]
-        for gone in [pid for pid in self._first if pid not in everybody]:  # forget ids no longer seen
-            self._first.pop(gone)
-            self._person.discard(gone)
-            self._camera_at.pop(gone, None)
-            self._came_out.discard(gone)
-        self._spots = [sp for sp in self._spots if now - sp["seen"] <= SPOT_GAP]
+        alive = self.tracks.tracks
+        for pid in [pid for pid in self._camera_at if pid not in alive]:  # forget ids no longer tracked
+            self._camera_at.pop(pid)
+        for pid in [pid for pid in self._watched if pid not in alive]:
+            self._watched.pop(pid)
+        self._person &= set(alive)
+        self._came_out &= set(alive)
+        self._walked_in &= set(alive)
+        # Furniture seen this scan, and objects unseen this scan too (a bag flickers). Not other unseen
+        # tracks: the operator's own candidate is left out of the tracks while the track holds it.
+        self._furniture = [track.at for pid, track in alive.items()
+                           if pid not in self._person and (track.seen_at == now or track.object)]
         return people
 
-    def _demote_if_set_down(self, pid, c, at, now):
-        """A 'came out of the operator' person that stood still while the camera watched its spot and saw
-        nobody there is an object put down: furniture from now on, its spot remembered. The evidence is
-        kept per spot, not per id: a flickering object gets a new id every time it comes back."""
-        if pid not in self._came_out:
+    def _watch(self, pid, c, now, cands):
+        """A still candidate the camera watched SET_DOWN_S, its spot in clear view, and never saw a person
+        at becomes an object (see SET_DOWN_S). Moving or a camera person there ends that for good."""
+        track = self.tracks[pid]
+        camera = now - self._camera_at.get(pid, -math.inf) <= CAMERA_KEEP
+        if track.object:
+            if track.far >= SET_DOWN_MOVED or camera:
+                track.object = False  # it moved, or someone stands there: a person, never an object again
+                self._person.add(pid)
+                self._set_down.pop(pid, None)
+            else:
+                self._set_down[pid] = (track.at, now)
             return
-        spot = next((sp for sp in self._spots if math.dist(sp["at"], at) <= SET_DOWN_NEAR), None)
-        if spot is None:
-            spot = {"at": at, "watched_since": None, "person": False}
-            self._spots.append(spot)
-        spot["seen"] = now
-        start, _ = self._first[pid]
-        if math.dist(start, at) >= SET_DOWN_MOVED or now - self._camera_at.get(pid, -math.inf) <= CAMERA_KEEP:
-            spot["person"] = True  # it moved or the camera saw someone there: a person, for good
-        if spot["person"]:
-            self._came_out.discard(pid)
+        if track.far >= SET_DOWN_MOVED or camera or (pid in self._person and pid not in self._came_out):
+            self._came_out.discard(pid)  # it moved, or the camera saw someone there: a person, for good
+            self._watched.pop(pid, None)
             return
-        half = self.p["camera_hfov_deg"] / 2 - 2.0  # its spot must be inside the picture, with a margin
-        if not (self._camera_fresh and abs(self._camera_bearing(c)) <= half):
-            spot["watched_since"] = None
+        if not self._in_clear_view(c, cands):
+            self._watched.pop(pid, None)  # the evidence must be unbroken
             return
-        if spot["watched_since"] is None:
-            spot["watched_since"] = now
-        if now - spot["watched_since"] >= SET_DOWN_S:
+        since = self._watched.setdefault(pid, now)
+        if now - since >= SET_DOWN_S:
+            track.object = True
             self._person.discard(pid)
             self._came_out.discard(pid)
-            self._spots.remove(spot)
-            self._set_down.append((spot["at"], now))
+            self._watched.pop(pid)
+            self._set_down[pid] = (track.at, now)
+
+    def _in_clear_view(self, c, cands):
+        """Would the camera, answering fresh now, see a person who stood at this lidar-frame candidate?"""
+        if not self._camera_fresh:
+            return False
+        bearing, rng = self._camera_bearing(c), self._camera_range(c)
+        half_v = math.atan(math.tan(math.radians(self.p["camera_hfov_deg"]) / 2) * 3 / 4)  # 4:3 frames
+        top = math.radians(self.p["camera_pitch_deg"]) + half_v
+        if rng > PEOPLE_RANGE[1] or rng * math.tan(top) < WATCH_HEIGHT - self.p["camera_height"]:
+            return False
+        if abs(bearing) > self.p["camera_hfov_deg"] / 2 - math.degrees(math.atan2(BODY_HALF, rng)):
+            return False
+        for d in cands:
+            near = self._camera_range(d)
+            if d != c and near < rng - OCCLUDE_GAP and abs(self._camera_bearing(d) - bearing) <= math.degrees(
+                    math.atan2(BODY_HALF, near)):
+                return False  # someone nearer stands in front of its middle
+        return True
 
     def _at_set_down(self, at, now):
-        self._set_down = [(pt, t) for pt, t in self._set_down if now - t <= SET_DOWN_KEEP]
-        return any(math.dist(at, pt) <= SET_DOWN_NEAR for pt, _ in self._set_down)
+        self._set_down = {pid: (pt, t) for pid, (pt, t) in self._set_down.items() if now - t <= SET_DOWN_KEEP}
+        return any(math.dist(at, pt) <= SET_DOWN_NEAR for pt, _ in self._set_down.values())
 
-    def _mixed_up(self, now, operator, people):
-        """True when the LiDAR may have mixed the operator up with someone next to them.
+    def _mixed_up(self, now, operator, measured):
+        """(why, drop): the LiDAR may have mixed the operator up with someone next to them.
 
-        Vanished: someone within COMPANY of the operator is gone from the scan. They merged into
-        the operator's object or hid behind them; walking away keeps the id (less than GATE a scan).
-        Split: someone appeared within COMPANY of the operator and stayed. An object that was the
-        two of them came apart, and the track may be on either piece.
-        Both need an id alive COMPANY_MIN, so a leg the pairing missed for a scan or two does not count.
+        Vanished: someone within COMPANY of the operator is gone from the scan (or missed a scan since).
+        They merged into the operator's object or hid behind them; walking away keeps the id (less than
+        tracks.GATE a scan). Split: someone appeared within COMPANY of the operator and stayed. An object that was
+        the two of them came apart, and the track may be on either piece.
+        Both need an id COMPANY_MIN old (split: an unbroken run), so a leg the pairing missed for a scan or two does not count.
+        An object (while the camera answers) never counts; a still thing the camera is watching to tell
+        (SET_DOWN_S) only holds: drop is False then.
         """
-        for pid in people:
-            self._born.setdefault(pid, self._first[pid][1] if pid in self._first else now)
-        doubt = None
-        if operator is not None:  # no fix this cycle: keep what we knew, judge on the next fix
-            near = {pid for pid, pt in people.items() if math.dist(pt, operator) <= COMPANY}
-            if self._fixed_before:  # the first fix of a track has nothing to compare with
-                self._born_near |= {pid for pid in near if self._born[pid] == now}
-            old = [pid for pid, t in self._born.items() if now - t >= COMPANY_MIN]
-            vanished = any(pid not in people for pid in self._company if pid in old)
-            split = any(pid in people for pid in self._born_near if pid in old)
-            doubt = "someone next to the operator vanished" if vanished else ("split next to the operator" if split else None)
-            self._company, self._fixed_before = near, True
-            self._born_near = {pid for pid in self._born_near if pid in people}
-        self._born = {pid: t for pid, t in self._born.items() if pid in people or pid in self._company}
-        return doubt
+        if operator is None:  # no fix this cycle: keep what we knew, judge on the next fix
+            return None, False
+        near = {pid: (self.tracks[pid].run_since, self.tracks[pid].born if pid in self._walked_in else self.tracks[pid].run_since)
+                for pid, pt in measured.items() if math.dist(pt, operator) <= COMPANY}
+        if self._fixed_before:  # the first fix of a track has nothing to compare with
+            self._born_near |= {pid for pid, (since, _) in near.items() if since == now}
+        vanished = {pid for pid, (since, born) in self._company.items() if now - born >= COMPANY_MIN
+                    and (pid not in measured or self.tracks[pid].run_since != since)}
+        split = {pid for pid in self._born_near if pid in measured and now - self.tracks[pid].run_since >= COMPANY_MIN}
+        self._company, self._fixed_before = near, True
+        self._born_near = {pid for pid in self._born_near if pid in measured}
+        exempt = {pid for pid in vanished | split if self._camera_fresh and pid in self.tracks and self.tracks[pid].object}
+        vanished, split = vanished - exempt, split - exempt
+        if not vanished and not split:
+            return None, False
+        why = "someone next to the operator vanished" if vanished else "split next to the operator"
+        if all(pid in self._watched for pid in vanished | split):
+            return why + ": a still thing, the camera is looking", False
+        return why, True
 
     def _new_tracker(self):
-        self._company = set()  # ids within COMPANY of the operator at the last fix
+        self._company = {}  # id -> (start of its run, start of its age) for the ids within COMPANY of the operator at the last fix
         self._born_near = set()  # ids that first appeared within COMPANY of the operator
         self._fixed_before = False
         return LegTracker(lost_after=self.p["track_coast_max"])
@@ -278,7 +387,8 @@ class RealSenses:
             return True  # the previous cycle had a fix too: no gap
         if pos != min(cands, key=lambda c: math.dist(c, predicted)):
             return False
-        for bearing, l in self._fresh(now, self._answer, LOOK_KEEP):
+        for bearing, l, _ in self._fresh(now, self._answer, LOOK_KEEP):
+            # bearing only: a range up to LOOK_KEEP old says little about where someone is now
             if abs(self._camera_bearing(pos) - bearing) <= MATCH_DEG and score(l) < LOOK_MATCH:
                 return False  # the camera says the one at the track now is someone else
         return True
@@ -292,9 +402,33 @@ class RealSenses:
         x, y = self._base(c)
         return math.degrees(math.atan2(y - self.p["camera_y"], x - self.p["camera_x"]))
 
-    def _match(self, bearing, cands):
-        """The LiDAR candidate for a camera bearing, or None."""
+    def _camera_range(self, c):
+        x, y = self._base(c)
+        return math.hypot(x - self.p["camera_x"], y - self.p["camera_y"])
+
+    def _at(self, c, bearing, rng):
+        """Can the camera person at this bearing and range (None: unknown) stand at lidar-frame candidate c?"""
+        if abs(self._camera_bearing(c) - bearing) > MATCH_DEG:
+            return False
+        return rng is None or abs(self._camera_range(c) - rng) <= RANGE_FAR
+
+    def _at_track(self, c, seen):
+        """The camera people at lidar-frame point c: those within MATCH_DEG of its bearing, unless the
+        ranges say clearly that only one of them stands there (RANGE_TOL, RANGE_FAR)."""
+        window = [s for s in seen if abs(self._camera_bearing(c) - s[0]) <= MATCH_DEG]
+        if len(window) > 1 and all(s[2] is not None for s in window):
+            here = self._camera_range(c)
+            at = [s for s in window if abs(s[2] - here) <= RANGE_TOL]
+            behind = [s for s in window if s[2] > here + RANGE_FAR]
+            if len(at) == 1 and len(at) + len(behind) == len(window):
+                return at
+        return window
+
+    def _match(self, bearing, rng, cands):
+        """The LiDAR candidate for a camera bearing (and range, None if unknown), or None."""
         near = [c for c in cands if abs(self._camera_bearing(c) - bearing) <= MATCH_DEG]
+        if len(near) > 1 and rng is not None:
+            return min(near, key=lambda c: abs(self._camera_range(c) - rng))
         if len(near) > 1 and self.tracker.pos is not None:
             track_range = math.hypot(*self.tracker.pos)
             return min(near, key=lambda c: abs(math.hypot(*c) - track_range))
@@ -310,14 +444,13 @@ class RealSenses:
 
     def _is_person(self, pid, now):
         """Has the candidate with this id shown it is a person? Latched: once a person, always."""
-        if pid not in self._person:
-            (start, _), at = self._first[pid], self._people[pid]
-            if math.dist(start, at) >= MOVED or now - self._camera_at.get(pid, -math.inf) <= CAMERA_KEEP:
+        if pid not in self._person and not self.tracks[pid].object:
+            if self.tracks[pid].far >= MOVED or now - self._camera_at.get(pid, -math.inf) <= CAMERA_KEEP:
                 self._person.add(pid)
         return pid in self._person
 
     def _fresh(self, now, answer, max_age=FRESH):
-        """(bearing now, look) for each camera person, or [] when the answer is missing or late."""
+        """(bearing now, look, range or None) for each camera person, or [] when the answer is missing or late."""
         if answer is None or now - answer.t > max_age:
             return []
         # shortcut: only the turn is corrected, not the drive; fine for 0.5 s answers, rough for the 2 s look veto.
@@ -325,18 +458,16 @@ class RealSenses:
         then = [yaw for t, yaw in yaws if t <= answer.t] or [yaws[0][1]]
         turn = yaws[-1][1] - then[-1]
         turn = math.degrees(math.atan2(math.sin(turn), math.cos(turn)))
-        return [(s.bearing_deg - turn, s.look) for s in answer.people]
+        ranges = self._ranges_of(answer)
+        return [(s.bearing_deg - turn, s.look, r) for s, r in zip(answer.people, ranges)]
 
-    def _ids(self, points):
-        """Give each point the id of the nearest person last cycle (within GATE), else a new id."""
-        # shortcut: greedy in list order, not a best global assignment; fine for a few people.
-        old, ids = dict(self._people), {}
-        for pt in points:
-            pid = min(old, key=lambda i: math.dist(old[i], pt), default=None)
-            if pid is None or math.dist(old[pid], pt) > GATE:
-                pid, self._next_id = self._next_id, self._next_id + 1
-            else:
-                del old[pid]
-            ids[pid] = pt
-        self._people = ids
-        return ids
+    def _ranges_of(self, answer):
+        """The range of each camera person of this answer, from the depth image of its frame (None: unknown)."""
+        if answer.t not in self._ranges:
+            depth = next((d for t, d in self._depths if abs(t - answer.t) < 1e-6), None)
+            ranges = [None] * len(answer.people)
+            if depth is not None:
+                ranges = [person_range(s.box, depth, self.p) if s.box is not None else None for s in answer.people]
+            self._ranges = {t: r for t, r in self._ranges.items() if answer.t - t <= LOOK_KEEP}
+            self._ranges[answer.t] = ranges
+        return self._ranges[answer.t]
