@@ -1,0 +1,191 @@
+# SO-100 Arm API (`/arm/*`)
+
+API สำหรับให้ส่วนอื่นของหุ่น (ระบบเสียง, กล้อง, ตัวสั่งงานหลัก) สั่งแขนผ่าน ROS 2
+นิยามอยู่ในแพ็กเกจ `so100_interfaces` ตัวเซิร์ฟเวอร์อยู่ในโหนด `so100_pick_place`
+ซึ่งเปิดเองเมื่อรัน `Start-SO100.cmd` (โหมด MoveIt)
+
+- ใช้ `ROS_DOMAIN_ID=42` และ `source ~/so100_ws/install/setup.bash` ก่อน
+- หน่วยเป็น **เมตร** และ **เรเดียน**
+- พิกัดเทียบกับ frame `base` (ฐานแขน) หรือ frame อื่นที่มี TF ไปถึง `base` เช่น frame ของกล้อง
+
+## สรุป
+| ชื่อ | ชนิด | ทำอะไร |
+|---|---|---|
+| `/arm/pick` | action `so100_interfaces/action/Pick` | หยิบของ แล้วยกมาถือไว้ที่ท่า ready |
+| `/arm/place` | action `so100_interfaces/action/Place` | วางของที่ถืออยู่ แล้วกลับท่า ready |
+| `/arm/pick_place` | action `so100_interfaces/action/PickPlace` | หยิบแล้ววางในคำสั่งเดียว |
+| `/arm/pick_bag` | action `so100_interfaces/action/PickBag` | จับถุงบนพื้นที่ส่วนบน (หูหิ้ว/ขอบปาก) ยกไปถือไว้ข้างตัว (ต้องเปิดแบบ `mount:=robot`) วางด้วย `/arm/place` |
+| `/arm/home` | action `so100_interfaces/action/Home` | กลับท่า ready |
+| `/arm/rest` | action `so100_interfaces/action/Rest` | หุบก้ามแล้วพับแขนลงท่าพัก (ถ้าถือของอยู่จะได้ `HOLDING`) |
+| `/arm/stop` | service `std_srvs/srv/Trigger` | หยุดทันที แขนค้างท่าตรงนั้น งานที่ทำอยู่จบด้วย `STOPPED` |
+| `/arm/torque` | service `std_srvs/srv/SetBool` | `true` = ล็อกแรงที่ท่าปัจจุบัน, `false` = ปลดแรง (**ประคองแขนก่อน แขนจะร่วง**) |
+| `/arm/state` | topic `so100_interfaces/msg/ArmState` (2 Hz) | สถานะแขน |
+
+ทำได้ทีละงาน ถ้าสั่งงานใหม่ระหว่างที่งานเดิมยังไม่เสร็จ จะได้ `BUSY` ทันที แขนจะไม่ขยับ
+(ยกเว้นตอนแขนกำลังไปท่าพัก ดูหัวข้อถัดไป)
+
+## กลับท่าพักเอง (auto rest)
+- แขนจะหุบก้ามแล้วพับลงท่าพักเอง ถ้าไม่ได้ถือของ และไม่มีงานใหม่มานาน `rest_after_s` วินาที (ค่าเริ่มต้น 120)
+  - เปลี่ยนเวลาได้: `ros2 param set /so100_pick_place rest_after_s 60.0` ถ้าใส่ `0.0` คือปิด
+  - งานจากทุกช่องทางนับหมด (API, topic เสียงเดิม, ปุ่มใน panel) เริ่มนับใหม่ทุกครั้งที่งานจบ
+- จะ**ไม่**ไปท่าพักเองในกรณีเหล่านี้:
+  - ถือของอยู่
+  - ปลดแรงอยู่ หรือมี fault
+  - งานล่าสุดโดนสั่งหยุด (`STOPPED`)
+  - งานล่าสุดพังระหว่างที่ของอาจยังค้างอยู่ในก้าม
+  - สองกรณีหลังจะกลับมานับเวลาใหม่เมื่อมีคำสั่งใหม่ หรือมีคนปลดแรงแขน
+- ถ้าสั่งงานใหม่ตอนแขนกำลังไปท่าพัก จะไม่ได้ `BUSY` แขนจะเลิกไปท่าพักแล้วทำงานใหม่ทันที
+- ถ้าสั่งงานตอนอยู่ท่าพัก แขนจะขึ้นไปท่า ready ก่อนแล้วค่อยทำงาน งานจึงนานขึ้นประมาณ 3–5 วินาที
+- ที่ท่าพักแขนยังล็อกแรงไว้ ส่วน `/arm/state` จะแสดงแบบนี้:
+  - ระหว่างไปท่าพัก: `state=busy`, `task=rest`
+  - ถึงท่าพักแล้ว: `state=resting`
+
+## หยิบถุง (Help Me Carry): `/arm/pick_bag`
+ใช้ได้เมื่อแขนติดบนหุ่นและเปิดแบบ `mount:=robot`:
+- พื้นห้องอยู่ต่ำกว่าฐานแขน 33.1 ซม. ในพิกัดแขน (`floor_z`)
+- โปรแกรมรู้ขอบตัวหุ่น (`deck`) แล้วจะไม่ให้แขนหรือถุงชนตัวหุ่น
+
+**ส่งข้อมูลอะไรเข้ามา**
+- `grasp_pose`: จุดที่จะให้ก้ามหนีบ เป็นส่วนบนสุดของถุง เช่น หูหิ้ว หรือขอบปากถุงด้านที่หันมาทางแขน
+  - `x, y`: ตรงกลางของส่วนนั้น
+  - `z`: **ความสูงของยอดส่วนนั้น** ในพิกัดแขน ต่างจาก `/arm/pick` ที่ไม่ใช้ `z`
+    - เช่น ปากถุงสูงจากพื้น 27 ซม. → `z = -0.331 + 0.27 = -0.061`
+  - `orientation`: ทิศที่ส่วนนั้นยาวไป ก้ามจะหนีบขวางทิศนี้
+    - ถ้าใส่ 0 ทั้งหมด แขนจะถือว่าส่วนนั้นขวางหน้าแขน
+- `thickness`: ความหนาที่ก้ามต้องหนีบ (ม.) ใส่ 0 = 2 ซม. หนาสุด 6.5 ซม.
+- `length`: ความยาวของส่วนนั้น (ม.) ใส่ 0 = 5 ซม.
+
+**แขนทำอะไร**
+1. ก้มมือลงจากด้านบน อ้าก้ามสุด (7.5 ซม.) แล้วหนีบ ถ้าหนีบโดนแต่อากาศจะลองใหม่โดยเลื่อนขวาง ระยะเลื่อนไม่เกินที่ก้ามอ้าครอบได้ลบ 1 ซม. ทุกครั้งจึงซ้อนกัน
+2. ยกขึ้น
+3. พาถุงอ้อมไปถือไว้**ข้างซ้าย**ของหุ่น (`bag_carry_side` = 90°)
+   - ยกให้ก้นถุงสูงจากพื้น `bag_bottom_min` = 36 ซม. เพื่อไม่ให้บัง LiDAR และไม่ชนของบนชั้น
+   - ถ้าเส้นทางตรงจะทำให้ถุงชนตัวหุ่น แขนจะยกถุงขึ้นสูงก่อน แล้วค่อยหมุนอ้อม
+
+**ผลลัพธ์เพิ่ม:** `gripper_pos` (rad) และ `gripper_load` (%) อ่านทันทีหลังก้ามหนีบครั้งล่าสุด ใช้ตั้งค่า `bag_miss_below` จากการหยิบจริง (NaN = ไม่ได้หนีบ)
+
+**งานล้มเหลวหรือถูกหยุดกลางทาง:** ถ้าก้ามยังค้างอ้ากว่าเกณฑ์หนีบพลาด แขนถือว่ายังถือของอยู่ (`holding`) สั่ง `pick_bag` อีกจะได้ `HOLDING` โดยไม่อ้าก้าม ให้ใช้ `/arm/place` วาง เวลามอเตอร์ขัดข้องก้ามยังบีบค้างไว้ และตอนมอเตอร์ร้อนยังสั่งอ้าก้ามได้
+
+**วางถุงลง:** ใช้ `/arm/place` ใส่ `target_pose` = จุดบนพื้นที่ต้องการให้ถุงตั้ง แขนจะพาถุงกลับมา หย่อนลงจนก้นถุงแตะพื้น แล้วปล่อย
+
+**ระยะที่จับได้** (ทดสอบในโปรแกรมจำลอง โดยวัดจากแกนฐานแขนไปข้างหน้า)
+| ยอดส่วนที่จับ สูงจากพื้น | จุดจับห่างแกนฐานแขน |
+|---|---|
+| 22–32 ซม. | ประมาณ 24–34 ซม. |
+| 37 ซม. (หูหิ้วตั้ง) | ประมาณ 24–26 ซม. |
+
+- ขอบหน้าของหุ่นอยู่ห่างแกนฐานแขน 18 ซม. ทีมฐานจึงต้องจอดให้ถุงอยู่ห่างขอบหน้าหุ่นประมาณ **6–16 ซม.**
+- ถ้าจุดจับใกล้แกนฐานแขนไม่ถึง 22 ซม. จะได้ `COLLISION` เพราะถุงจะชนตัวหุ่น
+
+**ตัวอย่างจาก terminal:**
+```
+ros2 run so100_driver arm_cli pick_bag 0.28 0.0 0.27
+ros2 run so100_driver arm_cli place 0.28 0.0
+```
+ตัวเลขของ `pick_bag` คือ หน้า, ซ้าย, ความสูงยอดจากพื้น (เมตร) ส่วนของ `place` คือ หน้า, ซ้าย
+
+**ตัวอย่างจาก Python:** `arm.pick_bag((x, y), top_z=z, yaw=yaw, thickness=0.01)` แล้วตามด้วย `arm.place((x2, y2))`
+
+## ข้อมูลที่ส่งเข้า
+**ตำแหน่งของ / จุดวาง** (`geometry_msgs/PoseStamped`)
+- `position.x, y` = จุดกึ่งกลางฐานของของบนโต๊ะ ค่า `z` ไม่ใช้ เพราะถือว่าของตั้งอยู่บนโต๊ะเสมอ
+- `orientation` = มุมหมุนของของรอบแกนตั้ง (yaw)
+  - ถ้าใส่ quaternion เป็น 0 ทั้งหมด หมายถึง "ไม่รู้มุม" แขนจะถือว่าด้าน "ลึก" ของของชี้มาทางแขน
+- `header.frame_id` ใส่ `""` หรือ `"base"` หมายถึงพิกัดเทียบกับฐานแขน
+  - frame อื่น (เช่น กล้อง) แขนจะแปลงผ่าน TF ให้ แต่ต้องมีคน publish TF ของกล้องเทียบกับ `base` ก่อน
+
+**ขนาดของ** `object_size = [ลึก, กว้าง, สูง]` (เมตร)
+- ลึก = ตามแกน x ของของเอง, กว้าง = ตามแกน y ของของเอง
+- ก้ามหนีบได้กว้างสุด ~6.5 ซม. แขนเลือกหนีบด้านที่แคบกว่าให้เอง
+
+**ท่าจับ** `grasp_mode` = `"auto"` (ค่าเริ่มต้น), `"top"` (จับจากด้านบน) หรือ `"side"` (จับจากด้านข้าง)
+
+**พิกัดฐานแขน (`base`) เทียบกับการวัดด้วยตลับเมตร:**
+แกนหมุนฐานอยู่ที่ `(x=0, y=-0.0452)` ทิศ "หน้า" ของแขนคือ **-y** ทิศ "ซ้าย" คือ **+x** เช่น
+- ของอยู่หน้าแกนฐาน 20 ซม. เยื้องซ้าย 5 ซม. → `x = 0.05, y = -0.0452 - 0.20 = -0.2452`
+- ใน Python ใช้ `user_xy(0.20, 0.05)` แปลงให้ได้
+
+## ผลลัพธ์ (ทุก action)
+- `success` (bool)
+- `error_code` (string)
+- `message`: ภาษาอังกฤษ ระบบเสียงเอาไปพูดได้เลย
+
+| error_code | ความหมาย |
+|---|---|
+| `SUCCESS` | สำเร็จ |
+| `UNREACHABLE` | เอื้อมไม่ถึงของหรือจุดวาง (ไกล/ใกล้เกิน หรือท่าจับนั้นทำไม่ได้) |
+| `TOO_WIDE` | ของกว้างเกินก้าม |
+| `MISSED` | หนีบพลาด (ก้ามหุบสุด) แขนถอยขึ้นแล้ว |
+| `COLLISION` | แขนจะชนโต๊ะ หรือถูกขวาง/ติดกลางทาง |
+| `BUSY` | กำลังทำงานอื่นอยู่ |
+| `HOLDING` | ถือของอยู่แล้ว (สั่ง pick ซ้ำ) |
+| `NOT_HOLDING` | สั่ง place แต่ไม่ได้ถือของ |
+| `HOT` | มอเตอร์ร้อนเกิน รอให้เย็นก่อน |
+| `STOPPED` | ถูกสั่งหยุด (`/arm/stop` หรือยกเลิก goal) |
+| `REPLACED` | โปรแกรมอื่นสั่งแขนแทรก (trajectory ใหม่ หรือ slider) งานจึงหยุด |
+| `FAILED` | ผิดพลาดอื่น ๆ (ดูข้อความใน log ของ `so100_pick_place`) |
+
+**ความคืบหน้า (feedback)** ระหว่างทำงาน:
+- `step`: `leave_rest`, `move_above`, `open`, `approach`, `grasp`, `lift`, `carry`, `move_above_target`, `lower`, `retreat`, `home`, `close`, `rest`
+- `step_index` / `step_count`: เช่น 3 / 6
+
+**เวลาโดยประมาณ:** pick ~12–18 วิ, place ~8–12 วิ, pick_place ~20–30 วิ
+ไม่ต้องตั้งเวลารอเอง action จะตอบกลับเมื่อเสร็จ
+
+## สถานะ `/arm/state`
+`state` มีค่าได้ดังนี้:
+- `idle`: ว่าง
+- `resting`: อยู่ท่าพัก (ว่าง พร้อมรับงาน)
+- `busy`: กำลังทำงาน
+- `holding`: ถือของอยู่
+- `fault`: หยุดเพราะมีปัญหา เช่น ร้อนเกิน
+- `torque_off`: ปลดแรงอยู่
+- `no_arm`: ไม่ได้ข้อมูลจากแขน
+
+ฟิลด์อื่น: `holding`, `torque_on`, `fault`, `voltage_min`, `temp_max`, `task`, `step`, `last_error_code`, `last_message`, `gripper_pos` (rad ตอนนี้), `gripper_load` (% จาก so100/status ทุก 1 วิ)
+
+**สั่งแขนได้ทีละโปรแกรม:** ระหว่างที่ trajectory ของแขนกำลังวิ่ง driver ปฏิเสธ goal `FollowJointTrajectory` จากโปรแกรมอื่น (error_string `arm busy: another program has it`) ยกเว้น goal ของ `so100_pick_place` เอง โปรแกรมดูจาก `trajectory.header.frame_id` (MoveIt ใส่ `base` สคริปต์ส่วนใหญ่ใส่ว่าง)
+
+## ตัวอย่างจาก terminal
+```
+ros2 topic echo /arm/state
+ros2 action send_goal --feedback /arm/pick so100_interfaces/action/Pick \
+  "{object_pose: {header: {frame_id: base}, pose: {position: {x: 0.0, y: -0.245}}}, object_size: [0.03, 0.03, 0.05]}"
+ros2 action send_goal /arm/place so100_interfaces/action/Place \
+  "{target_pose: {header: {frame_id: base}, pose: {position: {x: -0.10, y: -0.245}}}}"
+ros2 action send_goal /arm/home so100_interfaces/action/Home "{}"
+ros2 action send_goal /arm/rest so100_interfaces/action/Rest "{}"
+ros2 service call /arm/stop std_srvs/srv/Trigger
+ros2 service call /arm/torque std_srvs/srv/SetBool "{data: true}"
+```
+คำสั่งย่อ (ใช้พิกัด "หน้า ซ้าย" แบบตลับเมตร หน่วยเมตร):
+```
+ros2 run so100_driver arm_cli pick 0.20 0.0 --size 0.03 0.03 0.05
+ros2 run so100_driver arm_cli place 0.20 -0.10
+ros2 run so100_driver arm_cli pick_place 0.20 0.0 0.20 -0.10 --size 0.03 0.03 0.05
+ros2 run so100_driver arm_cli home | rest | stop | lock | release | state
+```
+
+## ตัวอย่างจาก Python (โหนดของเพื่อน)
+```python
+import threading, rclpy
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+from so100_driver.arm_client import ArmClient, user_xy
+
+rclpy.init()
+node = Node('my_task')
+arm = ArmClient(node)
+ex = MultiThreadedExecutor(); ex.add_node(node)
+threading.Thread(target=ex.spin, daemon=True).start()
+
+ok, code, msg = arm.pick(user_xy(0.20, 0.0), size=(0.03, 0.03, 0.05))   # รอจนเสร็จ
+if ok:
+    ok, code, msg = arm.place(user_xy(0.20, -0.10))
+print(ok, code, msg)          # เช่น True SUCCESS "I have put it down."
+```
+ถ้าตำแหน่งมาจากกล้อง ส่ง `PoseStamped` ใน frame ของกล้องเข้าไปได้เลย: `arm.pick(pose_from_camera, size=...)`
+
+## ของเดิมที่ยังใช้ได้ (ระบบเสียงรุ่นแรก)
+`/robot/carry_bag`, `/robot/drop_bag` (`std_msgs/Empty`) → `/robot/event` (`grab_success`/`grab_failed`, `drop_done`/`drop_failed`)
+ตำแหน่งของมาจากกล่องฟ้า/ม่วงใน RViz แนะนำให้ย้ายมาใช้ `/arm/pick` และ `/arm/place` แทน
