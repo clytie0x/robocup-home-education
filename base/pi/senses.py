@@ -14,7 +14,7 @@ from hmc.follower import Senses
 import geometry
 from legs import MAX_WIDTH, LegTracker, candidates
 from shapes import ObstacleMemory
-from tracks import Tracks
+from tracks import KEEP, Tracks
 
 FRESH = 0.5  # s; an older camera answer is dropped, never matched
 MATCH_DEG = 8.0  # a camera person and a LiDAR candidate this close in bearing are the same
@@ -34,12 +34,17 @@ COMPANY = MAX_WIDTH  # m; someone this close to the operator can become one LiDA
 # when every missed scan gave a new id, and so does vanished for an id first seen next to the operator (a
 # leg of a long stride paired alone comes and goes there). Vanished for someone who walked up from WALKED_IN or
 # farther counts their whole life (Track.born): one missed scan just before they merge must not hide them.
+# Vanished for someone who walked up (moved MOVED) to within CROWDED of the operator at the last fix counts
+# at any age: no leg of the operator's own stride stands that close to the track (legs.PAIR pairs legs
+# nearer than 0.5 m), so it is someone else, and the track may just have taken their candidate.
 # Scratch fuzz 2026-11-15 (senses only, robot still, a model, not real data): of 200 merge scenes with the
 # link down, 10 rode the stranger before these tracks and 5 after; vanished counted from born for everyone
 # gave 0, but held a lone walker with a 0.3 to 0.6 m stride in 21 of 150 walks (0 now, 0 before).
 COMPANY_MIN = 0.6
-WALKED_IN = 1.0  # m: first seen this far from the operator, it is someone else, not a leg of a long stride (up to
-# 0.6 m apart in the scratch walker model, and the track may sit on either leg)
+WALKED_IN = 0.7  # m: first seen this far from the operator, it is someone else, not a leg of a long stride (up to
+# 0.6 m apart in the scratch walker model, and the track may sit on either leg). It was 1.0, and the 5 scenes
+# above were strangers first seen 0.64 to 0.99 m away. In the walker (2 x 150 walks) every id that came within
+# COMPANY was first seen at most 0.56 m from the operator; WALKED_IN 0.6 held one walk of 150, 0.7 none.
 # Furniture is not a person (chair and table legs look like legs). A candidate counts as a person
 # once it moved MOVED from where it was first seen, or the camera saw a person at it in the last
 # CAMERA_KEEP, or it was first seen within COMPANY of the operator (it may have come out of them).
@@ -86,6 +91,14 @@ DEPTH_KEEP = 1.0  # s of depth images kept to find the one an answer was compute
 # behind it (someone nearer than the track, or without a range, keeps it ambiguous).
 RANGE_TOL = 0.3  # m
 RANGE_FAR = 0.6  # m
+# Merged. When a company rule drops the track, or a fix is refused with someone within COMPANY of the
+# operator's last fix, the operator and someone else may be one LiDAR object there. Until the people seen
+# there (the ids within COMPANY of it since) stand more than COMPANY apart, or nothing is there any more
+# (tracks.KEEP), a camera re-lock onto a candidate there (or a re-enrol) needs the depth: the operator's
+# range within RANGE_TOL of the candidate's, and nobody else the camera sees within COMPANY of it. By
+# bearing alone the camera only says the operator is in that object, not that nobody else is. Scratch fuzz
+# (200 merge scenes, camera on, the stranger not in its answer, 20 looks learned; a model, not real data):
+# such re-locks drove on the stranger after the split in 42 scenes before, 0 now.
 
 
 def person_range(box, depth, p):
@@ -139,6 +152,7 @@ class RealSenses:
         self._operator_at = None  # odometry point of the operator at the last fix
         self._depths = []  # (frame time, depth image) of the latest camera frames
         self._ranges = {}  # answer time -> range of each of its people (None where unknown)
+        self._merged = None  # [odometry point, last time seen, ids seen there] where the operator may be merged
 
     @property
     def locked(self):
@@ -155,15 +169,18 @@ class RealSenses:
             return "someone is right at the operator: wait"  # a fresh enrol has no look to check
         cands = candidates(scan)
         close = []
-        for bearing, look, rng in self._fresh(now, answer):
-            c = self._match(bearing, rng, cands)
+        fresh = self._fresh(now, answer)
+        for person in fresh:
+            c = self._match(person[0], person[2], cands)
             if c is not None and math.hypot(*self._base(c)) <= ENROL_RANGE:
-                close.append((c, look))
+                close.append((c, person))
         if len(close) > 1 or (close and self._crowded(close[0][0], cands)):
             return "more than one person within 2.5 m"
         if not close:
             return "nobody in view"
-        c, look = close[0]
+        c, (_, look, _) = close[0]
+        if self._merged_with(c) and not self._only_one_there(c, close[0][1], fresh):
+            return "two people may be one object there: wait"
         if accept is not None and not accept(look):
             return "the person in view does not look like the operator"
         self.tracker = self._new_tracker()
@@ -193,6 +210,8 @@ class RealSenses:
             if fixed and (not self._fix_ok(now, pos, predicted, last_fix, cands, score) or self._is_furniture(pos)):
                 self.tracker = self._new_tracker()  # lost: only a camera look can lock again (rule 4)
                 self.why = "fix rejected"
+                if self._operator_at is not None and any(math.dist(geometry.base_to_odom(self._base(c), pose), self._operator_at) <= COMPANY for c in cands):
+                    self._merged = [self._operator_at, now, set()]  # someone else stood where the operator was
             elif fixed:
                 at_track = self._at_track(pos, seen)
                 if self._crowded(pos, cands) or len(at_track) > 1:
@@ -202,7 +221,8 @@ class RealSenses:
                     look = next((l for b, l, r in at_track if self._match(b, r, cands) == pos), None)
         unsure = now - self._unsure_at <= UNSURE_LATCH
         if not self.locked and not unsure and self.learned >= LEARNED:  # before that, only enrol may lock
-            for bearing, l, rng in sorted(seen, key=lambda s: -score(s[1])):
+            for person in sorted(seen, key=lambda s: -score(s[1])):
+                bearing, l, rng = person
                 c = self._match(bearing, rng, cands)
                 if c is None or score(l) < LOOK_MATCH:
                     continue
@@ -212,6 +232,10 @@ class RealSenses:
                 if self._crowded(c, cands) or two_seen:
                     self._unsure_at = now  # never lock onto a spot where two people stand (or look like one)
                     self.why = "no re-lock: crowded" if self._crowded(c, cands) else "no re-lock: two seen"
+                    break
+                if self._merged_with(c) and not self._only_one_there(c, person, seen):
+                    self._unsure_at = now  # the operator is in that object, maybe not alone
+                    self.why = "no re-lock: merged"
                     break
                 self.tracker.update(scan, now, lock_at=c)
                 look = l
@@ -224,6 +248,7 @@ class RealSenses:
         others = [c for c in cands if c != self.tracker.pos and PEOPLE_RANGE[0] <= math.hypot(*self._base(c)) <= PEOPLE_RANGE[1]]
         everybody = self.tracks.update(now, [geometry.base_to_odom(self._base(c), pose) for c in others])
         people = self._sort_out(now, dict(zip(everybody, others)), everybody, seen, cands)
+        self._follow_merge(now, everybody, people)
         pid_of = {c: pid for pid, c in zip(everybody, others) if pid in people}
         # A look goes to a person only when its bearing points at exactly one candidate (not _match's
         # nearest-range rule, made for the operator: it hands a passer-by's look to whoever stands at the
@@ -242,6 +267,7 @@ class RealSenses:
             # A still thing the camera is still looking at only holds: it is an object or a person soon.
             if drop:
                 self.tracker = self._new_tracker()
+                self._merged = [operator, now, {pid for pid, pt in everybody.items() if math.dist(pt, operator) <= COMPANY}]
                 operator = None
             self._unsure_at = now
             self.why = mixed
@@ -355,8 +381,12 @@ class RealSenses:
         """
         if operator is None:  # no fix this cycle: keep what we knew, judge on the next fix
             return None, False
-        near = {pid: (self.tracks[pid].run_since, self.tracks[pid].born if pid in self._walked_in else self.tracks[pid].run_since)
-                for pid, pt in measured.items() if math.dist(pt, operator) <= COMPANY}
+        near = {}  # pid -> (start of its run, since when its vanishing counts)
+        for pid, pt in measured.items():
+            if math.dist(pt, operator) <= COMPANY:
+                track = self.tracks[pid]
+                walked_up = math.dist(pt, operator) <= CROWDED and track.far >= MOVED
+                near[pid] = (track.run_since, -math.inf if walked_up else track.born if pid in self._walked_in else track.run_since)
         if self._fixed_before:  # the first fix of a track has nothing to compare with
             self._born_near |= {pid for pid, (since, _) in near.items() if since == now}
         vanished = {pid for pid, (since, born) in self._company.items() if now - born >= COMPANY_MIN
@@ -372,6 +402,41 @@ class RealSenses:
         if all(pid in self._watched for pid in vanished | split):
             return why + ": a still thing, the camera is looking", False
         return why, True
+
+    def _follow_merge(self, now, measured, people):
+        """Keep the merged spot on the people there as they move; forget it once they stand apart or left, or on a lock."""
+        if self._merged is None:
+            return
+        if self.locked:
+            self._merged = None
+            return
+        spot, seen_at, ids = self._merged
+        near = {pid: pt for pid, pt in measured.items() if pid in people and math.dist(pt, spot) <= COMPANY}
+        ids |= set(near)
+        apart = [measured[pid] for pid in ids if pid in measured]
+        if any(math.dist(a, b) > COMPANY for a in apart for b in apart):
+            self._merged = None  # they came apart: the usual rules tell who is who
+        elif near:
+            self._merged = [min(near.values(), key=lambda pt: math.dist(pt, spot)), now, ids]
+        elif now - seen_at > KEEP:
+            self._merged = None  # gone from the scan
+
+    def _merged_with(self, c):
+        """Is lidar-frame candidate c the object the operator may be merged in?"""
+        return self._merged is not None and math.dist(
+            geometry.base_to_odom(self._base(c), self._pose), self._merged[0]) <= COMPANY
+
+    def _only_one_there(self, c, person, seen):
+        """Is this camera person (bearing, look, range) the only one the camera sees who could be in candidate
+        c, and does the depth put them at its range?"""
+        here, there = self._base(c), []
+        for s in seen:
+            r = s[2] if s[2] is not None else self._camera_range(c)  # no range: as far as the candidate
+            at = (self.p["camera_x"] + r * math.cos(math.radians(s[0])), self.p["camera_y"] + r * math.sin(math.radians(s[0])))
+            if math.dist(at, here) <= COMPANY:
+                there.append(s)
+        return (there == [person] and person[2] is not None
+                and abs(person[2] - self._camera_range(c)) <= RANGE_TOL)
 
     def _new_tracker(self):
         self._company = {}  # id -> (start of its run, start of its age) for the ids within COMPANY of the operator at the last fix

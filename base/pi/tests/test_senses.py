@@ -416,6 +416,133 @@ class Merge(unittest.TestCase):
                     lambda t, people: Answer(t, [seen(*people[0], OPERATOR)]) if len(people) > 1 else Answer(t, []))
 
 
+class MergedRelock(unittest.TestCase):
+    """Scratch fuzz 2026-11-15 (senses only, a model, not real data), camera on, the stranger not in its
+    answer: the track was dropped when the stranger merged with the operator, and once the latch ran out
+    the camera re-locked onto the merged object (the operator's bearing was within 8 deg of it). At the
+    split the track took the stranger's piece: 42 of 200 scenes drove on the stranger."""
+
+    OP, STRANGER = (1.5, 0.0), (1.5, -0.4)
+    BLOB = (1.5, -0.1)  # the merged object nearer the operator: the stranger is 11 deg from it, outside MATCH_DEG
+
+    def run_merge(self, answer_for, merged=30, hidden=0):
+        """The stranger walks up and stands beside the operator, the operator's legs drop out of `hidden` scans,
+        they merge into one LiDAR object for `merged` scans, then the operator walks on. Yields (time, what
+        the LiDAR sees, senses, output)."""
+        s = enrolled(*self.OP)
+        s.learned = 20
+        frames = [[self.OP, (1.5, -1.2 + 0.05 * i)] for i in range(16)] + [[self.OP, self.STRANGER]] * 5
+        frames += [[self.STRANGER]] * hidden + [[self.BLOB]] * merged + [[(1.5, 0.05 * i), self.STRANGER] for i in range(1, 31)]
+        for i, lidar in enumerate(frames):
+            t = round(0.1 * (i + 1), 1)
+            real = [lidar[0], self.STRANGER] if len(lidar) > 1 else [self.OP, self.STRANGER]
+            answer, frame = answer_for(t, real)
+            got = read(s, t, scan_of(sum((person(*p) for p in lidar), [])), answer, frame=frame)
+            yield t, lidar, s, got
+
+    def check(self, answer_for, hidden=0):
+        for t, lidar, s, got in self.run_merge(answer_for, hidden=hidden):
+            if len(lidar) == 1:
+                self.assertFalse(s.locked, "re-locked onto the merged object at %.1f s" % t)
+            elif s.locked and got.operator is not None and not s.ambiguous:  # driving
+                self.assertLess(abs(s.tracker.pos[1] - lidar[0][1]), abs(s.tracker.pos[1] - lidar[1][1]),
+                                "following the stranger at %.1f s" % t)
+        self.assertTrue(s.locked)  # the operator walked away from the stranger: the camera locks them again
+        self.assertAlmostEqual(s.tracker.pos[1], lidar[0][1], delta=0.1)
+
+    def test_no_re_lock_onto_the_merged_object_by_bearing_alone(self):
+        self.check(lambda t, real: (Answer(t, [seen(*real[0], OPERATOR)]), None))  # no depth: no range
+
+    def test_no_re_lock_while_the_depth_sees_the_stranger_inside_the_object(self):
+        self.check(lambda t, real: view(t, [(real[0], OPERATOR), (real[1], OTHER)]))
+
+    def test_a_fix_rejected_next_to_the_stranger_counts_too(self):
+        # Fuzz scene 4: the operator's legs drop out with the stranger 0.4 m away, beyond track_jump: the fix
+        # is refused and the track dropped (no company rule), then the two merge.
+        self.check(lambda t, real: (Answer(t, [seen(*real[0], OPERATOR)]), None), hidden=1)
+
+    def test_a_re_enrol_waits_too(self):
+        # While the brain still learns (fewer than 20 looks) the loop enrols again whenever unlocked.
+        s = enrolled(*self.OP)
+        frames = [[self.OP, (1.5, -1.2 + 0.05 * i)] for i in range(16)] + [[self.OP, self.STRANGER]] * 5
+        frames += [[self.BLOB]] * 30
+        said = set()
+        for i, lidar in enumerate(frames):
+            t = round(0.1 * (i + 1), 1)
+            scan, answer = scan_of(sum((person(*p) for p in lidar), [])), Answer(t, [seen(*self.OP, OPERATOR)])
+            if not s.locked:
+                said.add(s.enrol(t, scan, answer, lambda look: score(look) >= 0.65))
+            read(s, t, scan, answer)
+            if len(lidar) == 1:
+                self.assertFalse(s.locked, "enrolled onto the merged object at %.1f s" % t)
+        self.assertIn("two people may be one object there: wait", said)
+
+    def test_the_depth_seeing_only_the_operator_there_re_locks(self):
+        # The stranger stepped behind the operator (gone from the scan) and walked off unseen: the LiDAR
+        # sees one object where the two merged, the camera's depth one person at its range, the operator.
+        s = enrolled(*self.OP)
+        s.learned = 20
+        frames = [[self.OP, (1.5, -1.2 + 0.05 * i)] for i in range(16)] + [[self.OP, self.STRANGER]] * 5
+        frames += [[self.OP]] * 30
+        for i, lidar in enumerate(frames):
+            t = round(0.1 * (i + 1), 1)
+            answer, frame = view(t, [(self.OP, OPERATOR)])
+            read(s, t, scan_of(sum((person(*p) for p in lidar), [])), answer, frame=frame)
+        self.assertTrue(s.locked)
+        self.assertAlmostEqual(s.tracker.pos[1], 0.0, delta=0.1)
+
+    def test_without_the_depth_one_person_there_is_not_enough(self):
+        s = enrolled(*self.OP)
+        s.learned = 20
+        frames = [[self.OP, (1.5, -1.2 + 0.05 * i)] for i in range(16)] + [[self.OP, self.STRANGER]] * 5
+        frames += [[self.OP]] * 30
+        whys = set()
+        for i, lidar in enumerate(frames):
+            t = round(0.1 * (i + 1), 1)
+            read(s, t, scan_of(sum((person(*p) for p in lidar), [])), Answer(t, [seen(*self.OP, OPERATOR)]))
+            whys.add(s.why)
+            if i >= 21:
+                self.assertFalse(s.locked, t)  # the stranger may still be in that object: hold
+        self.assertTrue(s.ambiguous)
+        self.assertIn("no re-lock: merged", whys)
+
+
+class CloseStranger(unittest.TestCase):
+    """Scratch fuzz 2026-11-15, link down: 5 of 200 scenes drove on a stranger first seen 0.64 to 0.99 m
+    from the operator. Closer than WALKED_IN, their vanishing counted only from their last missed scan."""
+
+    STRANGER = (1.5, -0.45)
+
+    def check_never_on_the_stranger(self, frames):
+        s = enrolled()
+        for i, people in enumerate(frames):
+            t = round(0.1 * (i + 1), 1)
+            got = read(s, t, scan_of(sum((person(*p) for p in people), [])), link_alive=False)
+            if len(people) > 1 and s.locked and got.operator is not None and not s.ambiguous:  # driving
+                self.assertLess(abs(s.tracker.pos[1] - people[0][1]), abs(s.tracker.pos[1] - people[1][1]),
+                                "following the stranger at %.1f s" % t)
+
+    def test_a_stranger_from_0_85_m_missed_once_on_the_way_in_still_counts(self):
+        # Missed at 0.7 m (outside COMPANY), then merged 0.4 s later: too young counted from the missed scan.
+        ys = [round(-0.85 + 0.05 * i, 2) for i in range(9)]  # -0.85 to -0.45
+        approach = [[(1.5, 0.0)] + ([] if y == -0.7 else [(1.5, y)]) for y in ys]
+        split = [[(1.5, 0.05 * i), self.STRANGER] for i in range(1, 21)]  # the operator walks on
+        self.check_never_on_the_stranger(approach + [[(1.5, -0.225)]] * 20 + split)
+
+    def test_a_fast_stranger_the_track_slides_onto_is_not_followed(self):
+        # Fuzz scene 25: first seen 0.65 m away, at 1 m/s; right next to the operator (crowded) the operator's
+        # legs drop out of one scan and the track takes the stranger, 0.33 m away, inside track_jump. The
+        # stranger walks off, the operator stays and flickers (no unbroken run for the split rule).
+        strangers = [-0.65, -0.55, -0.45, -0.33, -0.33, -0.33] + [-0.33 - 0.05 * i for i in range(1, 30)]
+        s = enrolled()
+        for i, y in enumerate(strangers):
+            t = round(0.1 * (i + 1), 1)
+            operator_seen = i != 5 and (i < 6 or (i - 6) % 3)
+            lidar = ([(1.5, 0.0)] if operator_seen else []) + [(1.5, y)]
+            got = read(s, t, scan_of(sum((person(*p) for p in lidar), [])), link_alive=False)
+            if s.locked and got.operator is not None and not s.ambiguous:  # driving
+                self.assertLess(abs(s.tracker.pos[1]), abs(s.tracker.pos[1] - y), "following the stranger at %.1f s" % t)
+
 
 class Furniture(unittest.TestCase):
     """A chair leg is a LiDAR candidate that never moves: it must not count as a person (Task 6)."""
