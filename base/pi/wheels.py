@@ -150,8 +150,12 @@ class StallWatch:
         since, start = self.samples[0]
         if now - since < STALL_TIME - 1e-6:
             return False
-        turned = abs(math.atan2(math.sin(pose[2] - start[2]), math.cos(pose[2] - start[2])))
-        return math.dist(pose[:2], start[:2]) < STALL_MOVE and turned < STALL_TURN
+        # the path over the window, not the net change: a turn or a drive that reverses inside the window
+        # (the search spin turning back at +-200 deg) nets near 0 while the wheels turn all the time
+        steps = list(zip(self.samples, self.samples[1:]))
+        moved = sum(math.dist(b[:2], a[:2]) for (_, a), (_, b) in steps)
+        turned = sum(abs(math.atan2(math.sin(b[2] - a[2]), math.cos(b[2] - a[2]))) for (_, a), (_, b) in steps)
+        return moved < STALL_MOVE and turned < STALL_TURN
 
 
 def true_step(pose, before, after, p):

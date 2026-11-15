@@ -268,6 +268,22 @@ class Stall(unittest.TestCase):
         turning = [(0.0, 0.0, 0.15 * 0.1 * i) for i in range(30)]
         self.assertEqual(self.feed(wheels.StallWatch(), (0.0, 0.15), turning), [])
 
+    def test_a_turn_that_reverses_inside_the_window_is_turning(self):
+        # Lane D, 2026-11-15: the search spin turns back at +-200 deg; over the 1 s window the net yaw was near 0
+        # and the watch said "not turning" (and held the robot) while the wheels turned all the time.
+        poses, yaw = [], 0.0
+        for i in range(30):  # 0.3 rad/s left for 0.5 s, right for 0.5 s, and so on
+            yaw += 0.03 if (i // 5) % 2 == 0 else -0.03
+            poses.append((0.0, 0.0, yaw))
+        self.assertEqual(self.feed(wheels.StallWatch(), (0.0, 0.3), poses), [])
+
+    def test_a_drive_that_comes_back_inside_the_window_is_moving(self):
+        poses, x = [], 0.0
+        for i in range(30):  # 0.05 m/s forward and back (an escape), 0.4 s each way
+            x += 0.005 if (i // 4) % 2 == 0 else -0.005
+            poses.append((x, 0.0, 0.0))
+        self.assertEqual(self.feed(wheels.StallWatch(), (0.05, 0.0), poses), [])
+
     def test_small_commands_are_not_watched(self):
         watch = wheels.StallWatch()
         self.assertEqual(self.feed(watch, (0.02, 0.1), [(0.0, 0.0, 0.0)] * 30), [])

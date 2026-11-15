@@ -1979,9 +1979,8 @@ class SearchSpin(Logged):
         state = run_follow.State(P, base, Scans(WALL_ONLY), Camera(), None, self.log, clock=lambda: self.now)
         follower = state.follower
         follower.mode, follower.look_since = Mode.SEARCH, 0.0  # lost: looking around on the spot
-        # Not this test: the Pi's wheel check takes the turn round at -200 deg (net yaw about 0 over its 1 s
-        # window) for wheels that do not turn.
-        wheels_unwatched(state)
+        # The Pi's wheel check stays on: it once took this turn round at -200 deg for wheels that do not turn
+        # (net yaw about 0 over its 1 s window); StallWatch now sums the path over the window.
         state.cable.net_deg = 100.0
         records = []
         with mock.patch.object(run_follow.hmc_follower, "LOOK_AROUND", 1e9):  # keep looking round all the minute
