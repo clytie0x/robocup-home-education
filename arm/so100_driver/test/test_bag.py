@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))
-from so100_driver.ik import JAW_G_MAX, Box, GraspPlanner, PlanError, bag_shifts, deck_box, jaw_gap  # noqa: E402
+from so100_driver.ik import JAW_G_MAX, TIP_Y, Box, GraspPlanner, PlanError, bag_shifts, deck_box, jaw_gap  # noqa: E402
 from so100_driver.tabletop import find_objects, grasp_top  # noqa: E402
 from test_ik import kin  # noqa: E402
 
@@ -169,6 +169,51 @@ class BagPlan(unittest.TestCase):
                 except PlanError:
                     pass
         self.assertGreaterEqual(ok, 8)
+
+    def test_probe_goes_straight_down_in_steps(self):
+        x, y = self.k.from_user(0.28, 0.0)
+        pr = self.pl.plan_probe(x, y, 0.40, 0.12, 0.01, min_steps=4)
+        tips = pr['tip_h']
+        self.assertLessEqual(tips[0], 0.40 - 0.01 + 1e-9)          # starts no higher than asked
+        self.assertGreater(tips[0], 0.30)                          # above the bags it can grasp at 28 cm
+        self.assertGreaterEqual(tips[-1], 0.12 - 1e-6)               # floor + 12 cm at most
+        self.assertLess(tips[-1], 0.16)                               # below the lowest top it grasps (22 cm)
+        for a, b in zip(tips, tips[1:]):
+            self.assertAlmostEqual(a - b, 0.01, delta=1e-6)
+        start_tip = self.k.gripper_point(pr['start'], (0.0, TIP_Y, 0))
+        self.assertAlmostEqual(start_tip[2] - FLOOR, tips[0] + 0.01, delta=0.003)
+        for qs, h in zip(pr['steps'], tips):
+            self.assertEqual(len(qs), 2)                           # 5 mm line points
+            tip = self.k.gripper_point(qs[-1], (0.0, TIP_Y, 0))
+            self.assertAlmostEqual(tip[2] - FLOOR, h, delta=0.003)  # closed tips where the step says
+            self.assertLess(np.linalg.norm(tip[:2] - start_tip[:2]), 0.005)   # straight down over the bag
+            self.assertFalse(self.pl.hits_body(qs[-1]))
+
+    def test_shoulder_and_elbow_carry_the_probe(self):
+        # a push up on the tips turns a joint by (lever = horizontal distance from its axis to the tips)
+        x, y = self.k.from_user(0.28, 0.0)
+        pr = self.pl.plan_probe(x, y, 0.40, 0.12, 0.01, min_steps=4)
+        for qs in pr['steps']:
+            q = qs[-1]
+            tip = self.k.gripper_point(q, (0.0, TIP_Y, 0))
+            w = self.k.frames(q)
+            lever = {j: np.hypot(*(tip[:2] - w[link][:3, 3][:2]))
+                     for j, link in (('shoulder_lift', 'upper_arm'), ('elbow_flex', 'lower_arm'), ('wrist_flex', 'wrist'))}
+            self.assertGreater(lever['shoulder_lift'], 0.15)
+            self.assertGreater(lever['elbow_flex'], 0.05)
+            self.assertLess(lever['wrist_flex'], 0.6 * lever['elbow_flex'])   # tilted 25 deg: 7 cm against 14
+
+    def test_probe_never_goes_into_the_body(self):
+        # 15 cm in front of the axis is over the deck: the closed jaws cannot go down to floor + 12 cm there
+        x, y = self.k.from_user(0.15, 0.0)
+        try:
+            pr = self.pl.plan_probe(x, y, 0.40, 0.12, 0.01, min_steps=4)
+        except PlanError:
+            return
+        self.assertGreater(pr['tip_h'][-1], DECK_Z - FLOOR)      # stopped above the deck
+        for qs in pr['steps']:
+            for q in qs:
+                self.assertFalse(self.pl.hits_body(q))
 
 
 if __name__ == '__main__':
