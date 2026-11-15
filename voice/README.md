@@ -84,6 +84,31 @@ ros2 launch voice_assistant voice_assistant.launch.py brain:=rules
 ~/robot_voice/scripts/servers.sh status   # ดูสถานะ + RAM
 ```
 
+## Help Me Carry (งานแข่ง 5.1)
+
+ลำดับงานของงานนี้คือ `base/jetson/hmc_flow.py` ไม่ใช่ `flow_node` ของ voice เพราะ hmc_flow อ่าน `/speech/heard`
+และ `/robot/intent` เอง แล้วเป็นเจ้าของ `/tts/say` กับ `/robot/command` ดังนั้น launch สำหรับงานนี้จึงเริ่มแค่
+กล่องเสียง 3 ตัว คือ `stt_node`, `rule_node` (สมองกฎ ไม่ใช้ LLM) และ `tts_node`
+ถ้าเปิด `flow_node` หรือ `command_bridge_node` ซ้ำ หุ่นจะพูดซ้ำและสั่งงานซ้ำ
+
+```bash
+# 1) whisper server ก่อน (llama-server ไม่ต้องใช้ เพราะสมองเป็นกฎ)
+~/robot_voice/scripts/servers.sh start-stt
+
+# 2) แล้วจึงเริ่มสแตกเสียงของงานนี้
+ros2 launch voice_assistant hmc_voice.launch.py
+
+# ไม่มีไมค์ ทดสอบด้วยการพิมพ์
+ros2 launch voice_assistant hmc_voice.launch.py use_mic:=false
+ros2 topic pub /speech/heard std_msgs/String "{data: 'follow me'}" --once
+```
+
+- `servers.sh status` ดูว่า whisper ขึ้นหรือยัง ถ้า whisper ไม่ขึ้น stt_node จะถอดเสียงไม่ได้ (POST ไป 8080)
+- launch นี้เปิด `task_words: true` ให้ rule_node เพิ่มคำของงานนี้ (`this is the car`, `go back to the start`,
+  `continue`, `ready`/`done`/`okay` ตอนอยู่ที่รถ) ส่วน launch เดิมยังเป็น `false`
+- คำที่พูดคำเดียวได้ (ready, done, okay, back, follow, continue, resume, stop, wait, here, yes, no)
+  อยู่ใน `single_word_allow` ของ `config/params.yaml` แล้ว
+
 ## ค่าเฉพาะเครื่อง (ไม่ถูกทับตอนอัปเดต)
 ใส่เลขไมค์/ลำโพงใน `~/.robot_voice_local.yaml` (โหลดหลัง params.yaml ค่าในนี้ชนะ):
 ```yaml

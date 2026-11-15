@@ -11,11 +11,12 @@
 - Barge-in: while the robot speaks it still listens for sounds clearly LOUDER than the robot's own
   voice at the mic; if whisper hears "stop" / "halt" / "freeze" in them it publishes /tts/interrupt
   (robot stops talking at once) and sends "stop" on as a normal sentence
+
+The transcript filter, the volume gate and the barge-in detector live in speech_rules.py (pure, numpy
+only, unit-tested there); this file is the microphone, the VAD loop and the whisper request.
 """
 import io
-import collections
 import queue
-import re
 import threading
 import time
 import wave
@@ -28,90 +29,11 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Empty, String
 
+from voice_assistant.speech_rules import BARGE_RX, BargeInDetector, LoudnessGate, frame_rms, noise_transcript
+
 VAD_RATE = 16000          # whisper + webrtcvad expect 16 kHz mono
 FRAME_MS = 30             # webrtcvad accepts 10/20/30 ms frames
 FRAME_SAMPLES = VAD_RATE * FRAME_MS // 1000
-
-
-def frame_rms(frame: np.ndarray) -> float:
-    return float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
-
-
-class LoudnessGate:
-    """Tracks the background noise level and decides whether a clip is loud enough to be speech
-    aimed at the robot. Level of a clip = 75th percentile of its 30 ms frame RMS values."""
-
-    def __init__(self, min_snr=2.0, min_rms=0.0, alpha=0.05, floor_min=30.0):
-        self.min_snr, self.min_rms = min_snr, min_rms
-        self.alpha, self.floor_min = alpha, floor_min
-        self.noise = None
-
-    def update_noise(self, rms: float):
-        """Call with frames that are NOT speech (robot not talking)."""
-        self.noise = rms if self.noise is None else (1 - self.alpha) * self.noise + self.alpha * rms
-
-    def check(self, frame_levels):
-        level = float(np.percentile(frame_levels, 75)) if len(frame_levels) else 0.0
-        noise = max(self.noise if self.noise is not None else self.floor_min, self.floor_min)
-        snr = level / noise
-        ok = level >= self.min_rms and (self.min_snr <= 0 or snr >= self.min_snr)
-        return ok, level, noise, snr
-
-
-BARGE_RX = re.compile(r"\b(stop|halt|freeze)\b|^\W*(?:robot\W+|please\W+)*(finish(?:ed)?|pause|end)\W*$", re.I)   # finish/pause/end only as the whole sentence
-
-
-class BargeInDetector:
-    """Finds the user's voice on top of the robot's own voice while the robot is talking.
-    Echo level = 90th percentile of the last ~2 s of frame RMS (frames judged to be the robot only).
-    A frame is "loud" when it is `ratio` times above that. 3 loud frames start a segment, 300 ms below
-    the threshold (or 2 s total) end it. feed() returns the segment's audio when it ends, else None."""
-
-    def __init__(self, ratio=2.0, min_level=0.0, window=70, start_frames=3, end_frames=10,
-                 max_frames=66, min_loud=5, pre_roll=6):
-        self.ratio, self.min_level = ratio, min_level
-        self.extra = 1.0                    # set > 1 while the robot itself is saying "stop"
-        self.echo = collections.deque(maxlen=window)
-        self.start_frames, self.end_frames = start_frames, end_frames
-        self.max_frames, self.min_loud, self.pre_n = max_frames, min_loud, pre_roll
-        self.reset()
-
-    def reset(self):
-        self.echo.clear()
-        self.pre, self.seg = [], []
-        self.loud_run = self.quiet_run = self.n_loud = 0
-        self.active = False
-
-    def threshold(self):
-        if len(self.echo) < 10:             # not enough robot audio heard yet
-            return None
-        return max(float(np.percentile(self.echo, 90)) * self.ratio * self.extra, self.min_level)
-
-    def feed(self, frame, rms):
-        thr = self.threshold()
-        loud = thr is not None and rms > thr
-        if not self.active:
-            if not loud:
-                self.echo.append(rms)       # learn the robot's echo level from non-loud frames only
-            self.pre = (self.pre + [frame])[-self.pre_n:]
-            self.loud_run = self.loud_run + 1 if loud else 0
-            if self.loud_run >= self.start_frames:
-                self.active, self.seg = True, list(self.pre)
-                self.n_loud, self.quiet_run = self.loud_run, 0
-            return None
-        self.seg.append(frame)
-        if loud:
-            self.n_loud += 1
-            self.quiet_run = 0
-        else:
-            self.quiet_run += 1
-            self.echo.append(rms)
-        if self.quiet_run >= self.end_frames or len(self.seg) >= self.max_frames:
-            seg, n_loud = self.seg, self.n_loud
-            self.active, self.seg, self.pre = False, [], []
-            self.loud_run = self.quiet_run = self.n_loud = 0
-            return np.concatenate(seg) if n_loud >= self.min_loud else None
-        return None
 
 
 def input_devices_text() -> str:
@@ -143,13 +65,14 @@ class SttNode(Node):
         self.declare_parameter('barge_in', True)      # listen for "stop" while the robot is talking
         self.declare_parameter('barge_ratio', 2.0)    # your voice must be this many times louder than the robot's echo
         # A transcript of ONE word is dropped unless it is in this list (whisper invents "Go.", "You.", "Okay."
-        # from noise / speaker echo). Empty list = keep every transcript.
+        # from noise / speaker echo). Empty list = keep every transcript. The Help Me Carry flow says the
+        # task words as one word (ready, done, okay, back, follow, continue, resume, stop, wait, here, yes, no).
         self.declare_parameter('single_word_allow',
-                               ['stop', 'halt', 'freeze', 'stops', 'stopped', 'stopping', 'stab', 'stob', 'stup', 'stap', 'top', 'tops', 'stuff', 'wait', 'enough', 'stay', 'finish', 'finished', 'pause', 'end', 'hello', 'hi', 'robot', 'yes', 'no', 'thanks', 'beatbox', 'yeah', 'yep', 'yup', 'sure', 'okay', 'ok', 'nope', 'nah'])
-        # Vocabulary hint for whisper: biases transcription toward robot commands.
+                               ['stop', 'halt', 'freeze', 'stops', 'stopped', 'stopping', 'stab', 'stob', 'stup', 'stap', 'top', 'tops', 'stuff', 'wait', 'enough', 'stay', 'finish', 'finished', 'pause', 'end', 'hello', 'hi', 'robot', 'yes', 'no', 'thanks', 'beatbox', 'yeah', 'yep', 'yup', 'sure', 'okay', 'ok', 'nope', 'nah', 'ready', 'done', 'back', 'follow', 'continue', 'resume', 'here'])
+        # Vocabulary hint for whisper: biases transcription toward the Help Me Carry task words.
         self.declare_parameter('initial_prompt',
-                               'Hey robot. Robot voice commands: carry the bag, drop the bag, put the bag down, '
-                               'follow me, stop, stay here, pause, finish, move forward, go back, turn left, turn right, do a beatbox.')
+                               'Robot voice commands: follow me, this is the car, stop, wait for me, '
+                               'go back to the start, done, ready, take the bag, left, right.')
 
         p = lambda n: self.get_parameter(n).value
         self.url = p('whisper_url')
@@ -373,12 +296,10 @@ class SttNode(Node):
         if text is None:
             return
 
-        # whisper hallucinates on noise: drop empty / bracketed outputs like "[BLANK_AUDIO]"
-        if not text or text.startswith(('[', '(')) or len(text) < 2:
-            return
-        words = re.findall(r"[a-z']+", text.lower())
-        if self.single_word_allow and len(words) == 1 and words[0] not in self.single_word_allow:
-            self.get_logger().info(f'(dropped, single-word noise) "{text}" [{len(pcm) / VAD_RATE:.1f}s clip]')
+        # whisper hallucinates on noise: drop empty / bracketed outputs like "[BLANK_AUDIO]", and
+        # single-word transcripts that are not on the allow list (see speech_rules.noise_transcript)
+        if noise_transcript(text, self.single_word_allow):
+            self.get_logger().info(f'(dropped, noise) "{text}" [{len(pcm) / VAD_RATE:.1f}s clip]')
             return
 
         if self.wake_word:
