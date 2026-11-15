@@ -74,3 +74,60 @@ def gripper_load(status):
     except (ValueError, SyntaxError):
         return math.nan
     return float(loads[5]) if len(loads) == 6 else math.nan
+
+
+# ---- touch probe for a bag top of unknown height (PickBag grasp_pose z = NaN)
+# The closed jaws go straight down over the bag in small steps. A push up on the finger tips turns the joints
+# by (force x horizontal distance from their axis to the tips): over a bag 22-34 cm in front, shoulder_lift
+# (lever 19-30 cm) and elbow_flex (8-20 cm) carry it; wrist_flex has the shortest lever (0-7 cm; test_bag).
+PROBE_JOINTS = ('shoulder_lift', 'elbow_flex')
+PROBE_SERVOS = (2, 3)        # their servo IDs = places 2 and 3 in the driver's load% list (calib.IDS)
+
+
+def top_unknown(z):
+    """PickBag grasp_pose z NaN = the caller does not know the height of the bag top: find it by touch.
+    Every real z is used as given (as before)."""
+    return math.isnan(float(z))
+
+
+def descent_loads(status):
+    """Load % of the PROBE_JOINTS from the driver's so100/status line ('... load%=[l1, ..., l6]'),
+    NaN where it is not there."""
+    nan = (math.nan,) * len(PROBE_SERVOS)
+    if 'load%=' not in status:
+        return nan
+    try:
+        loads = ast.literal_eval(status.split('load%=', 1)[1].split(']', 1)[0] + ']')
+    except (ValueError, SyntaxError):
+        return nan
+    return tuple(float(loads[i - 1]) for i in PROBE_SERVOS) if len(loads) == 6 else nan
+
+
+def probe_contact(samples, base_steps, load_jump, error_jump):
+    """First probe step (index into samples) at which the closed jaws touched something, or None.
+    samples: one (loads, errors) per step, read with the arm standing still at the end of the step: load %
+    and tracking error (rad, |commanded - present|) of each PROBE_JOINT. The first base_steps steps are in
+    free air (the probe starts above the tallest bag); their mean per joint is the baseline. Contact: a
+    joint's load is more than load_jump % away from its baseline (either sign: a push from below takes weight
+    off a joint), or its tracking error is more than error_jump rad above its baseline. A threshold <= 0
+    switches that check off. NaN readings never count; the baseline steps themselves are not judged."""
+    base_steps = max(1, int(base_steps))
+    if len(samples) <= base_steps:
+        return None
+
+    def baseline(kind):
+        out = []
+        for j in range(len(samples[0][kind])):
+            vals = [s[kind][j] for s in samples[:base_steps] if math.isfinite(s[kind][j])]
+            out.append(sum(vals) / len(vals) if vals else math.nan)
+        return out
+
+    base_load, base_err = baseline(0), baseline(1)
+    for i in range(base_steps, len(samples)):
+        loads, errors = samples[i]
+        for j in range(len(loads)):
+            if load_jump > 0 and abs(loads[j] - base_load[j]) > load_jump:
+                return i
+            if error_jump > 0 and errors[j] - base_err[j] > error_jump:
+                return i
+    return None

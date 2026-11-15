@@ -1,5 +1,5 @@
 """Rules of the task server and the driver that need no ROS: error codes as values, a held bag is never
-forgotten, a fault keeps the squeeze, one commander at a time, the load reading, one floor height."""
+forgotten, a fault keeps the squeeze, one commander at a time, the load reading, one floor height, the touch probe for an unknown bag top."""
 import ast
 import math
 import os
@@ -166,6 +166,81 @@ class FloorHeight(unittest.TestCase):
         self.assertEqual(m.group(1), '-0.331')
         client = (PKG / 'arm_client.py').read_text(encoding='utf-8')
         self.assertRegex(client, r'\nFLOOR_Z = -0\.331\b')
+
+
+class TouchProbe(unittest.TestCase):
+    """Bag top unknown (PickBag grasp_pose z = NaN): the closed jaws go down in steps until the loads or the
+    tracking error of shoulder_lift / elbow_flex leave their free-air baseline."""
+    BASE, LOAD, ERR = 3, 8.0, 0.02
+
+    @staticmethod
+    def free_air(n, seed=1):
+        import random
+        rnd = random.Random(seed)
+        return [((20 + rnd.uniform(-3, 3), -10 + rnd.uniform(-3, 3)),
+                 (0.005 + rnd.uniform(-0.003, 0.003), 0.004 + rnd.uniform(-0.003, 0.003))) for _ in range(n)]
+
+    def contact(self, samples, load=None, err=None):
+        return tr.probe_contact(samples, self.BASE, self.LOAD if load is None else load,
+                                self.ERR if err is None else err)
+
+    def test_noisy_free_air_is_no_contact(self):
+        for seed in range(20):
+            self.assertIsNone(self.contact(self.free_air(30, seed)))
+
+    def test_a_load_step_is_contact_at_that_step(self):
+        s = self.free_air(30)
+        for i in range(17, 30):                    # pushed from below: weight comes off the shoulder
+            s[i] = ((s[i][0][0] - 12, s[i][0][1]), s[i][1])
+        self.assertEqual(self.contact(s), 17)
+        self.assertIsNone(self.contact(s[:17]))    # one step earlier nothing is seen yet
+        s = self.free_air(30)
+        s[12] = ((s[12][0][0], s[12][0][1] + 13), s[12][1])     # elbow, the other sign
+        self.assertEqual(self.contact(s), 12)
+
+    def test_tracking_error_growing_is_contact(self):
+        s = self.free_air(30)
+        for i in range(20, 30):                    # blocked: the joints stay behind the command
+            s[i] = (s[i][0], (0.04, 0.035))
+        self.assertEqual(self.contact(s), 20)
+        self.assertIsNone(self.contact(s, err=0.0))     # 0 = that check off
+        self.assertEqual(self.contact(s, load=0.0), 20)
+
+    def test_baseline_is_the_first_steps(self):
+        s = [((30.0, -10.0), (0.01, 0.01))] * 3 + [((22.0, -10.0), (0.01, 0.01))]
+        self.assertIsNone(self.contact(s))         # 8 % off the baseline is not more than 8 %
+        s[-1] = ((21.5, -10.0), (0.01, 0.01))
+        self.assertEqual(self.contact(s), 3)
+        self.assertIsNone(self.contact(s[:3]))     # only the baseline yet: nothing is judged
+
+    def test_missing_readings_never_count(self):
+        s = self.free_air(10)
+        s[5] = ((math.nan, math.nan), (math.nan, math.nan))
+        self.assertIsNone(self.contact(s))
+
+    def test_loads_of_the_descent_joints_from_the_status(self):
+        st = 'torque=ON fault=none load%=[3, -12, 20, 5, 1, 37]'
+        self.assertEqual(tr.descent_loads(st), (-12.0, 20.0))      # servo 2 shoulder_lift, 3 elbow_flex
+        self.assertTrue(all(math.isnan(v) for v in tr.descent_loads('torque=ON load%=[3, 4]')))
+        self.assertTrue(all(math.isnan(v) for v in tr.descent_loads('')))
+        self.assertEqual(tr.PROBE_JOINTS, ('shoulder_lift', 'elbow_flex'))
+
+    def test_only_a_nan_top_means_probe(self):
+        self.assertTrue(tr.top_unknown(float('nan')))
+        for z in (-0.061, 0.0, -0.331 + 0.26, 0.5):
+            self.assertFalse(tr.top_unknown(z))
+
+    def test_the_task_server_probes_only_for_an_unknown_top(self):
+        tree = ast.parse((PKG / 'pick_place_node.py').read_text(encoding='utf-8'))
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, 'attr', '') == 'probe_bag']
+        self.assertEqual(len(calls), 1)
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'do_pick_bag')
+        guard = next(n for n in ast.walk(fn) if isinstance(n, ast.If)
+                     and getattr(getattr(n.test, 'func', None), 'id', '') == 'top_unknown')
+        self.assertIn(calls[0], list(ast.walk(guard)))
+        # a real z keeps the height check it always had
+        to_bag = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'to_bag')
+        self.assertIn('0.03 < h < 0.6', ast.unparse(to_bag))
 
 
 if __name__ == '__main__':

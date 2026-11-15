@@ -9,6 +9,7 @@ API (so100_interfaces, see API.md):
   arm on the robot: deck = [front, back, left, right] deck edges from the pan axis (m), deck_z = deck top;
             table_z is then the floor. /arm/pick_bag holds a bag by its top and carries it at the side
             (bag_carry_side deg, 90 = left) with its bottom bag_bottom_min m above the floor.
+            A PickBag grasp_pose z of NaN = top unknown: it is found by touch first (probe_bag, bag_probe_*).
 
 Pick-and-place test with the closed-form IK (ik.py).
 
@@ -59,7 +60,8 @@ from so100_interfaces.msg import ArmState
 
 from .calib import Calibration
 from .ik import ARM, GRASP_Y, TIP_Y, Box, GraspPlanner, Kinematics, PlanError, bag_shifts, deck_box
-from .task_rules import PICK_PLACE, Failed, api_code, gripper_load, still_held
+from .task_rules import (PICK_PLACE, PROBE_JOINTS, Failed, api_code, descent_loads, gripper_load, probe_contact,
+                         still_held, top_unknown)
 
 READY = {'shoulder_pan': 0.0, 'shoulder_lift': 1.2, 'elbow_flex': -1.2, 'wrist_flex': 0.3, 'wrist_roll': 0.0}
 REST = {'shoulder_pan': 0.0, 'shoulder_lift': 0.04, 'elbow_flex': -0.04, 'wrist_flex': 0.0, 'wrist_roll': 0.0}  # SRDF 'rest'
@@ -118,6 +120,21 @@ class PickPlace(Node):
         self.declare_parameter('bag_miss_below', 0.06)    # rad: bag jaws closing below this = missed, 0 = no check
         self.declare_parameter('bag_tries', 3)            # grasp tries, shifted across the part after a miss
         self.declare_parameter('bag_try_step', 0.05)      # m between tries
+        # Bag top unknown (PickBag grasp_pose z NaN): found by touch (probe_bag). Every value is a first guess,
+        # to be measured on the robot from the 'probe k/n' log lines of one real run.
+        self.declare_parameter('bag_probe_top', 0.40)     # m above the floor the closed tips start (or the highest
+        #                                                   the arm reaches there): over the tallest top it grasps (37 cm)
+        self.declare_parameter('bag_probe_bottom', 0.12)  # m above the floor: the tips go no lower
+        self.declare_parameter('bag_probe_step', 0.01)    # m per step = the most it goes into a bag before a reading
+        self.declare_parameter('bag_probe_speed', 0.02)   # m/s on a probe step
+        self.declare_parameter('bag_probe_base_steps', 3)  # first steps (free air): their readings are the baseline
+        # % change of the shoulder_lift / elbow_flex load = contact (0 = off). 8 % of the 12 V STS3215's 30 kg.cm
+        # would be about 1 N up on the tips at the shoulder's 25 cm lever, if load % is that share of the torque.
+        self.declare_parameter('bag_probe_load_jump', 8.0)
+        # rad rise of their tracking error = contact (0 = off): ~5 mm at the tips. The driver itself fails a move
+        # at 0.06 rad short at the end or 0.14 rad behind on the way (follow_error).
+        self.declare_parameter('bag_probe_error_jump', 0.02)
+        self.declare_parameter('bag_probe_backoff', 0.02)  # m back up after the contact
         p = lambda n: self.get_parameter(n).value
         self.table_z = float(p('table_z'))
         self.sim = bool(p('sim'))
@@ -771,9 +788,12 @@ class PickPlace(Node):
         return f'วางของแล้ว{where}'
 
     def do_pick_bag(self, obj):
-        """Bag on the floor (table_z): hold its top part `obj`, lift, carry it at the side."""
+        """Bag on the floor (table_z): hold its top part `obj`, lift, carry it at the side.
+        obj height NaN (grasp_pose z NaN): the top is found by touch first (probe_bag)."""
         if self.holding:
             raise Failed('ถือของอยู่แล้ว: สั่งวางก่อน', 'HOLDING')
+        if top_unknown(obj.size[2]):
+            obj = self.probe_bag(obj)
         p = lambda n: float(self.get_parameter(n).value)
         # The jaws open fully (JAW_G_MAX, 7.5 cm) over the part; a miss (jaws close on nothing) is tried again
         # shifted across the part (yaw + 90 deg): 0, +step, -step, +2 step, ... (bag_tries in all), the step
@@ -814,6 +834,87 @@ class PickPlace(Node):
         self.line(carry['path'], 'ยกถุงไปถือ', p('bag_speed'), self.planner.CARRY_STEP)
         bottom = self.planner.held_point(carry['q'], plan)[2] - hang - self.table_z
         return f'ถือถุงอยู่ ({plan["mode"]}) ก้นถุงสูงจากพื้นประมาณ {bottom * 100:.0f} ซม.'
+
+    PROBE_SETTLE = 0.15   # s the arm stands still after a probe step before a load reading counts
+
+    def probe_bag(self, obj):
+        """Bag top height unknown: find it by touch. The closed jaws go straight down over the part in
+        bag_probe_step steps from bag_probe_top to at most bag_probe_bottom above the floor (ik.plan_probe: no
+        floor, no robot body). After each step the arm stands still and the PROBE_JOINTS loads (so100/status,
+        1 Hz) and tracking errors are compared with the first bag_probe_base_steps steps (probe_contact); a step
+        the arm cannot follow (COLLISION) is contact too. At contact the arm backs up bag_probe_backoff and the
+        part's top = the measured tip height there. No contact: back up, MISSED. Every step is logged."""
+        p = lambda n: float(self.get_parameter(n).value)
+        base, step, speed = max(1, int(p('bag_probe_base_steps'))), p('bag_probe_step'), p('bag_probe_speed')
+        load_jump, error_jump = p('bag_probe_load_jump'), p('bag_probe_error_jump')
+        pr = self.planner.plan_probe(obj.x, obj.y, p('bag_probe_top'), p('bag_probe_bottom'), step,
+                                     self.joints or None, min_steps=base + 1)
+        tips, n = pr['tip_h'], len(pr['tip_h'])
+        start_h = tips[0] + step
+        self.get_logger().info(f'probe plan: tips {start_h * 100:.0f} -> {tips[-1] * 100:.0f} cm above the floor in '
+                               f'{n} steps, pitch {math.degrees(pr["pitch"]):.0f} deg; base {base} steps, load_jump '
+                               f'{load_jump} %, error_jump {error_jump} rad, joints {PROBE_JOINTS}')
+        # MoveIt does not know the bag: its column below the start stands in for it on the way there
+        self.show_object(Box(obj.x, obj.y, obj.yaw, (obj.size[0], obj.size[1], start_h - 0.02)))
+        self.progress(1, 3, 'close', 'หุบก้าม (ใช้ปลายก้ามแตะหาความสูงถุง)...')
+        self.gripper(0.0, 'หุบก้าม')
+        self.progress(2, 3, 'probe_above', f'ไปเหนือถุง ปลายก้ามสูงจากพื้น {start_h * 100:.0f} ซม. (MoveIt)...')
+        self.moveit_to(pr['start'], 'ไปเหนือถุง')
+        samples, done, contact = [], [pr['start']], None
+        for k, (qs, tip) in enumerate(zip(pr['steps'], tips)):
+            self.progress(3, 3, 'probe', f'แตะหาความสูงถุง ขั้น {k + 1}/{n}: ปลายก้ามลงไป {tip * 100:.0f} ซม. จากพื้น')
+            blocked = ''
+            try:
+                self.line(qs, 'แตะหาความสูงถุง', speed)
+            except Failed as exc:
+                if exc.code != 'COLLISION':
+                    raise
+                blocked = str(exc)            # the arm could not follow: something is in the way
+            done += qs
+            loads, errors, measured = self.probe_reading(qs[-1], blocked)
+            samples.append((loads, errors))
+            hit = probe_contact(samples, base, load_jump, error_jump)
+            self.get_logger().info(
+                f'probe {k + 1}/{n}: tip {tip * 100:.1f} cm (measured {measured * 100:.1f}) above the floor, '
+                f'load% {PROBE_JOINTS[0]} {loads[0]:+.0f} {PROBE_JOINTS[1]} {loads[1]:+.0f}, '
+                f'error rad {errors[0]:.3f} {errors[1]:.3f}{" BLOCKED " + blocked if blocked else ""}'
+                f'{" CONTACT" if hit is not None else ""} | {self.driver_status}')
+            if blocked or hit is not None:
+                contact = measured if math.isfinite(measured) else tip
+                break
+        if contact is None:
+            self.progress(3, 3, 'probe_back', 'แตะไม่โดนอะไร: ถอยกลับขึ้น...')
+            self.line(list(reversed(done[:-1])), 'ถอยขึ้นจากการแตะ')
+            raise Failed(f'แตะหาความสูงถุงไม่โดนอะไร ลงไปถึง {tips[-1] * 100:.0f} ซม. จากพื้น: ไม่มีถุงตรงนี้ หรือถุงนุ่ม'
+                         f'จนภาระไม่เปลี่ยน (ดู log "probe")', 'MISSED')
+        self.progress(3, 3, 'probe_back', 'แตะโดนยอดถุง: ถอยขึ้น...')
+        back = int(round(p('bag_probe_backoff') / self.planner.STEP))
+        self.line(list(reversed(done[:-1]))[:max(1, back)], 'ถอยขึ้นจากยอดถุง', speed)
+        self.say(f'ยอดถุงจากการแตะ: สูงจากพื้น {contact * 100:.1f} ซม.')
+        self.get_logger().info(f'probe: top {contact * 100:.1f} cm above the floor (z {self.table_z + contact:.3f})')
+        return Box(obj.x, obj.y, obj.yaw, (obj.size[0], obj.size[1], contact))
+
+    def probe_reading(self, q_cmd, blocked=''):
+        """(PROBE_JOINTS loads %, their tracking errors rad, measured tip height above the floor) with the arm
+        standing still PROBE_SETTLE s: waits for the next so100/status line (1 Hz, its loads are read just
+        before it is sent). A fault stops the probe, unless the step was blocked (the driver faults then)."""
+        settled = time.monotonic() + self.PROBE_SETTLE
+        end = settled + 2.5
+        while self.driver_seen < settled:
+            if self.cancel_requested:
+                raise Failed('แตะหาความสูงถุง: ถูกสั่งหยุด', 'STOPPED')
+            if time.monotonic() > end:
+                raise Failed('แตะหาความสูงถุง: ไม่ได้ค่าภาระมอเตอร์จาก so100/status', 'FAILED')
+            time.sleep(0.02)
+        fault = self.driver_flags()[1]
+        if fault and not blocked:
+            raise Failed(f'แตะหาความสูงถุง: มอเตอร์ขัดข้อง ({fault})', 'FAILED')
+        now = dict(self.joints)
+        errors = tuple(abs(q_cmd[j] - now[j]) if j in now else math.nan for j in PROBE_JOINTS)
+        tip = math.nan
+        if all(j in now for j in ARM):
+            tip = float(self.kin.gripper_point({j: now[j] for j in ARM}, (0.0, TIP_Y, 0))[2]) - self.table_z
+        return descent_loads(self.driver_status), errors, tip
 
     def do_pick_place(self, obj, target, mode='auto'):
         if self.holding:
@@ -944,11 +1045,15 @@ class PickPlace(Node):
             raise Failed(f'แปลงพิกัดจาก frame "{pose.header.frame_id}" ไม่ได้: {exc}', 'FAILED')
 
     def to_bag(self, g):
-        """PickBag goal -> Box of the part to hold, standing on the floor up to its top (grasp_pose z)."""
+        """PickBag goal -> Box of the part to hold, standing on the floor up to its top (grasp_pose z).
+        z NaN = top unknown: the Box height is NaN and do_pick_bag finds it by touch."""
+        unknown = top_unknown(g.grasp_pose.pose.position.z)
+        if unknown and g.grasp_pose.header.frame_id not in ('', 'base'):
+            raise Failed('grasp_pose z = NaN (หาความสูงด้วยการแตะ) ใช้ได้เฉพาะ frame "base"', 'FAILED')
         ps = self.in_base(g.grasp_pose)
         x, y, top = ps.pose.position.x, ps.pose.position.y, ps.pose.position.z
         h = top - self.table_z
-        if not 0.03 < h < 0.6:
+        if not unknown and not 0.03 < h < 0.6:
             raise Failed(f'ส่วนบนของถุงสูงจากพื้น {h * 100:.0f} ซม.: ต้องอยู่ระหว่าง 3-60 ซม. '
                          '(grasp_pose z = ความสูงส่วนบนในพิกัดแขน)', 'UNREACHABLE')
         thick, length = float(g.thickness) or 0.02, float(g.length) or 0.05

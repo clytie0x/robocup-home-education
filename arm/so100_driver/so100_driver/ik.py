@@ -708,6 +708,64 @@ class GraspPlanner:
         """Joint path from the carry pose to the place plan's 'above_place' pose."""
         return self.bag_move(held['carry']['q'], place['steps']['above_place'], held, hang, bag_r, 'ทางไปจุดวางถุง')
 
+    PROBE_GAP = 0.016    # closed jaws, for the table / body check (as so100/touch)
+
+    def plan_probe(self, x, y, top_h, bottom_h, step, current=None, min_steps=1):
+        """Touch probe for a bag top of unknown height: closed jaws pointing down go straight down over (x, y).
+        The tips start at the highest height up to top_h above the floor (table_z) the arm reaches and go
+        down in steps of `step` m to bottom_h, or as far as the arm goes without the floor or the robot body.
+        Of the top-down pitches the one covering the longest height range is used (straight down first).
+        The jaws are closed, so they close sideways (as so100/touch): that roll fits every pitch.
+        Returns {'start': q, 'steps': [[q, ...] the STEP-spaced poses of each probe step], 'tip_h': [tip height
+        above the floor at the end of each step], 'pitch'}. PlanError if fewer than min_steps steps fit."""
+        prefer = (current or {}).get('wrist_roll', 0.0)
+        v = np.array([x, y]) - self.k.pan_point
+        h0 = math.atan2(v[1], v[0])
+        close_dir = np.array([-math.sin(h0), math.cos(h0), 0.0])
+        per = max(1, int(round(step / self.STEP)))
+        best, err = None, PlanError('เอื้อมไปเหนือถุงไม่ได้ (แตะหาความสูงถุง)', 0)
+        for pitch in self.pitches('top'):
+            drop = (GRASP_Y - TIP_Y) * math.sin(-pitch)        # tips this far below the point _pose places
+            h, start = top_h, None
+            while start is None and h - min_steps * step >= bottom_h - 1e-9:
+                c = np.array([x, y, self.table_z + h + drop])
+                try:
+                    q = self._pose(c, pitch, close_dir, self.PROBE_GAP, None, prefer, x_off=0.0)
+                    self.check_table([q], self.PROBE_GAP, 'แตะหาความสูงถุง', 1)
+                    start = q
+                except PlanError as exc:
+                    err = exc
+                    h -= 0.01
+            if start is None:
+                continue
+            steps, tips, prev = [], [], start
+            for k in range(1, int(math.floor((h - bottom_h) / step + 1e-9)) + 1):
+                try:
+                    qs = []
+                    for i in range(1, per + 1):
+                        c = np.array([x, y, self.table_z + h + drop - (k - 1 + i / per) * step])
+                        q = self._pose(c, pitch, close_dir, self.PROBE_GAP, start['_branch'], start['wrist_roll'],
+                                       x_off=0.0)
+                        if max(abs(q[j] - prev[j]) for j in ARM) > 0.25:
+                            raise PlanError('ท่าแขนกระโดดกลางทาง', 3)
+                        self.check_table([q], self.PROBE_GAP, 'แตะหาความสูงถุง', 3)
+                        qs.append(q)
+                        prev = q
+                except PlanError as exc:
+                    err = exc
+                    break
+                steps.append(qs)
+                tips.append(h - k * step)
+            span = lambda p: p['tip_h'][0] - p['tip_h'][-1]
+            cand = {'start': start, 'steps': steps, 'tip_h': tips, 'pitch': pitch}
+            if len(steps) >= min_steps and (best is None or span(cand) > span(best) + 1e-9):
+                best = cand
+            if best is not None and best['tip_h'][-1] <= bottom_h + 1e-6 and best['tip_h'][0] >= top_h - step - 1e-6:
+                break                                   # the whole range asked for: no need to tilt
+        if best is None:
+            raise PlanError(f'แตะหาความสูงถุงไม่ได้: {err}', err.stage, err.code)
+        return best
+
     # ------------------------------------------------------------- "where can it go" map for RViz
     def pick_options(self, obj, current=None):
         """Ways to pick `obj` (grasp + pre-grasp checked; the straight lines are not), best first."""
