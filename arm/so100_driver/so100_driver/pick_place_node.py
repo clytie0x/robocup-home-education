@@ -149,7 +149,11 @@ class PickPlace(Node):
         # on 2026-11-15 spread 2-6 % (shoulder), 2-5 % (elbow).
         # Unmeasured: on 2026-11-15 13:25 an empty reading taken while settling and arriving from above read 8 % below
         # the closed one arriving from below (nothing lifted) -> both readings now arrive from below and settle.
-        self.declare_parameter('bag_weight_load', 5.0)
+        # OFF since 13:40 the same day: again nothing lifted (LiDAR and Xtion unchanged) but empty 18,12,9,6,2,4 ->
+        # 3 against closed 18,16 -> 17: the shoulder load decays for 5 to 6 s at rest, so a quick reading looks like
+        # weight. Two false "holding" out of two; a false hold sends the robot home empty. Turn on only after a
+        # measured real hold and a reading that waits out the decay.
+        self.declare_parameter('bag_weight_load', 0.0)
         # Before the empty-jaws reading the hand dips this far down the approach line and comes back, so it also
         # arrives from below. At most 1.5 cm: the approach starts with the tips 2 cm above the top (approach_dist).
         self.declare_parameter('bag_weight_dip', 0.015)
