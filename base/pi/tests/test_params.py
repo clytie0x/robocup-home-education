@@ -13,8 +13,10 @@ class Gates(unittest.TestCase):
         # calib.BaseEstimates, trusted in all four runs of 2026-11-15: decel 0.135 to 0.157 m/s^2,
         # latency 0.393 to 0.421 s (the 2026-11-13 values 0.064 and 0.17 were far off).
         p = params.load()
-        self.assertEqual((p["decel"], p["command_latency"]), (0.14, 0.40))
+        # decel: the cautious end of the corrected coast (0.09 to 0.11), below the online 0.135 to 0.157
+        self.assertEqual((p["decel"], p["command_latency"]), (0.10, 0.40))
         self.assertIn("0.135 to 0.157", params.__doc__)
+        self.assertIn("counted the delay a second", params.__doc__)
         self.assertIn("0.393 to 0.421", params.__doc__)
 
     def test_speed_gate_opens_when_the_three_values_are_measured(self):

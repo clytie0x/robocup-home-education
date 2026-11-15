@@ -7,7 +7,7 @@
   "max_turn_rate": 0.49,
   "accel": 0.25,
   "turn_accel": 0.7,
-  "decel": 0.14,
+  "decel": 0.10,
   "stop_delay": 0.27,
   "command_latency": 0.40,
   "robot_radius": 0.29,

@@ -392,6 +392,8 @@ class Phase(Logged):
             phases.add(record["phase"])
             if record["bag_task"] and record["bag_task"]["result"]:
                 break
+        for _ in range(5):  # 0.5 s more: the 5 Hz status line catches up with the result (record stays the one above)
+            self.tick()
         result = record["bag_task"]["result"]
         self.assertEqual(result["code"], "OK", record["bag_task"])
         truth = geometry.odom_to_base(self.bags[0], self.base.pose)
@@ -405,7 +407,8 @@ class Phase(Logged):
         statuses = [s for s in self.statuses() if "bag" in s]
         self.assertIn("BAG", {s["phase"] for s in statuses})
         self.assertTrue(all(s["held"] is None for s in statuses if s["phase"] == "BAG"))
-        last = statuses[-1]["bag"]
+        # the newest status that carries the result (statuses go out at 5 Hz: the very last one may predate it)
+        last = next(s["bag"] for s in reversed(statuses) if s["bag"] and s["bag"].get("result"))
         self.assertEqual((last["result"]["code"], last["chosen"]["say"]), ("OK", "I will take the bag."))
         self.assertTrue(all(abs(v) <= bag.FAR_SPEED + 1e-9 for v, _ in self.base.sent))
         self.jetson.cmd("return")  # the arm picked it: the way back
