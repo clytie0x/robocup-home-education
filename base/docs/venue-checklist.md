@@ -37,7 +37,7 @@ a red dot is a fault (`base/docs/robot-console.md`).
 6. Join the lab SSID on the phone and laptop. Check the console at 192.168.31.21:8081. If the
    laptop is on the robot's cable network, 10.0.0.1:8081 is the same page.
 7. Press Start all on the Jetson tab. It starts detector, whisper, voice, bridge, armstack,
-   arm, flow in that order (`base/jetson/agent.py`, `ORDER`). A program with a port gets up to
+   webcam, arm, flow in that order (`base/jetson/agent.py`, `ORDER`). A program with a port gets up to
    60 s to listen; one without a port gets 3 s before the next.
 
 The order is for the checks: the 21 V battery first so the wheel test can turn the wheels,
@@ -55,12 +55,12 @@ instead of after 20 s and 30 s; do not also keep the crontab lines.
   and exit code 0. Code 2 no motor power (check the 21 V battery), 3 one encoder dead, 4 no
   answer from the base, 5 unclear, 6 not under safe_run. It needs the PIN, runs at most once
   every 10 s, and needs a LiDAR scan younger than 0.5 s with nothing within 0.35 m ahead.
-- **Jetson tab**: 7/7 running, one black dot per program, no red rows, and the sequence line
-  says "all started". The seven are detector, whisper, voice, bridge, armstack, arm, flow.
+- **Jetson tab**: 8/8 running, one black dot per program, no red rows, and the sequence line
+  says "all started". The eight are detector, whisper, voice, bridge, armstack, webcam, arm, flow.
 - **Version**: the lower line on the Checks, Logs or Help tab shows the Pi and the deployed
   commit; the Jetson tab shows `agent <host> <commit>`. Both are the commit you deployed and
   the same one in `VERSION.json`, which `deploy.sh` writes.
-- **Arm**: folded at rest; the Live tab's arm webcam (the arm team's port 8082) shows it. The
+- **Arm**: folded at rest; the Live tab's arm webcam (port 8082, the webcam program) shows it. The
   console only stops programs the agent started. A copy the arm team started by hand is left
   alone, and Start all uses an arm stack started that way instead of starting a second one.
 

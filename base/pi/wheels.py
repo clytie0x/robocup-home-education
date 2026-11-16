@@ -5,6 +5,8 @@ import os
 import threading
 import time
 
+import console_gate
+
 WHEEL_PORT = "/dev/rct_ahr_robot"
 BAUD = 115200
 TIMEOUT = 0.3  # seconds of silence before the watchdog sends S#
@@ -183,6 +185,7 @@ class Wheels:
 
     def __init__(self, p, port=None, clock=time.monotonic, start_thread=True):
         if port is None:
+            console_gate.require("wheels")
             import serial
 
             # write_timeout: a stuck USB write raises instead of holding the lock, so the watchdog keeps running

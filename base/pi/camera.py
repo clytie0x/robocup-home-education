@@ -14,6 +14,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+import console_gate
+
 
 @dataclass
 class Frame:
@@ -28,6 +30,8 @@ class Camera:
     """Keeps the camera open and hands out the newest frame, each one at most once."""
 
     def __init__(self, capture=None, clock=time.monotonic):
+        if capture is None:
+            console_gate.require("camera")
         self._capture = capture or capture_color_and_depth
         self._clock = clock
         self._lock = threading.Lock()
@@ -194,6 +198,7 @@ def main():
     them back, and the mean level of one colour frame."""
     import numpy as np
 
+    console_gate.require("camera")
     got = {}
     pair = capture_color_and_depth(5.0, on_settings=got.update)
     rgb = None if pair is None else np.frombuffer(pair[0]["rgb"], np.uint8)

@@ -2,7 +2,9 @@
 import json
 import math
 import os
+import socket
 import sys
+import threading
 import time
 import unittest
 
@@ -271,6 +273,212 @@ class JobsTest(unittest.TestCase):
         jobs.thread.join(10)
         self.assertEqual(arm.sent[0], "drop_failed|BUSY|another arm job is running")
         self.assertEqual(arm.stops, 1)
+
+
+# the real limits on 2026-11-16 (deg), as the robot description gives them (rad)
+LIMITS_DEG = {"shoulder_pan": (-121, 120), "shoulder_lift": (1, 200), "elbow_flex": (-191, -2),
+              "wrist_flex": (-144, 32), "wrist_roll": (-85, 271), "gripper": (0, 125)}
+URDF = "<robot name='so'>%s<joint name='fixed_base' type='fixed'/></robot>" % "".join(
+    "<joint name='%s' type='revolute'><limit lower='%r' upper='%r'/></joint>" % (n, math.radians(lo), math.radians(hi))
+    for n, (lo, hi) in LIMITS_DEG.items())
+
+
+class FakeApi:
+    """ArmCommands' api without ROS: records what it was asked."""
+
+    def __init__(self, state="idle", rest_after=120.0):
+        self.calls = []
+        self.params = {"rest_after_s": rest_after, "robot_description": URDF}
+        self.arm_state = {"state": state, "holding": False, "gripper_load": float("nan")}
+        self.results = {}
+        self.gate = None  # a threading.Event the move waits for
+
+    def task(self, name, timeout):
+        self.calls.append(name)
+        return self.results.get(name, (True, "SUCCESS", "done"))
+
+    def stop(self):
+        self.calls.append("stop")
+
+    def torque(self, on):
+        self.calls.append(("torque", on))
+        return True, "ok"
+
+    def state(self):
+        return dict(self.arm_state)
+
+    def joints(self):
+        return {"shoulder_pan": 0.1, "gripper": float("nan")}
+
+    def limits(self):
+        return bag_arm.urdf_limits(self.params["robot_description"])
+
+    def move(self, q, timeout):
+        self.calls.append(("move", q))
+        if self.gate is not None:
+            self.gate.wait(10)
+        return self.results.get("move", (True, "MoveIt code 1"))
+
+    def grip(self, position, timeout):
+        self.calls.append(("grip", position))
+        return True, "position"
+
+    def get_param(self, name):
+        return self.params[name]
+
+    def set_param(self, name, value):
+        self.calls.append(("set", name, value))
+        self.params[name] = value
+
+
+class ArmCommandsTest(unittest.TestCase):
+    def setUp(self):
+        self.arm = ApiArm()
+        self.jobs = bag_arm.Jobs(make(self.arm), log=lambda _s: None)
+        self.api = FakeApi()
+        self.cmds = bag_arm.ArmCommands(self.jobs, self.api, log=lambda _s: None)
+        self.jobs.before = self.cmds.release
+
+    def send(self, cmd):
+        return self.cmds.handle(json.dumps(cmd))
+
+    def test_mid_pose_is_the_middle_of_each_limit(self):
+        q = bag_arm.mid_pose(bag_arm.urdf_limits(URDF))
+        want = {"shoulder_pan": -0.5, "shoulder_lift": 100.5, "elbow_flex": -96.5, "wrist_flex": -56.0,
+                "wrist_roll": 93.0, "gripper": 62.5}
+        self.assertEqual(set(q), set(want))
+        for n, deg in want.items():
+            self.assertAlmostEqual(math.degrees(q[n]), deg, places=6)
+        self.assertEqual(bag_arm.mid_pose({"a": (0.0, 1.0), **{n: (-1.0, 3.0) for n in LIMITS_DEG}})["gripper"], 1.0)
+        with self.assertRaises(ValueError):
+            bag_arm.mid_pose({"shoulder_pan": (0.0, 1.0)})
+
+    def test_center_homes_moves_the_arm_then_the_gripper_and_holds_the_pose(self):
+        out = self.send({"cmd": "center"})
+        self.assertTrue(out["ok"], out)
+        self.assertEqual([c if isinstance(c, str) else c[0] for c in self.api.calls], ["home", "move", "grip", "set"])
+        q = self.api.calls[1][1]
+        self.assertEqual(set(q), set(bag_arm.ARM))   # the gripper goes by its own action
+        self.assertAlmostEqual(math.degrees(q["shoulder_lift"]), 100.5)
+        self.assertAlmostEqual(math.degrees(self.api.calls[2][1]), 62.5)
+        self.assertEqual(self.api.params["rest_after_s"], 0.0)
+        self.assertEqual(self.cmds.saved_rest, 120.0)
+
+    def test_the_saved_rest_after_comes_back_on_rest_home_and_a_bag_job(self):
+        self.send({"cmd": "center"})
+        self.send({"cmd": "center"})                      # a second hold keeps the first saved value
+        self.assertEqual(self.cmds.saved_rest, 120.0)
+        self.assertTrue(self.send({"cmd": "rest"})["ok"])
+        self.assertEqual(self.api.params["rest_after_s"], 120.0)
+        self.assertIsNone(self.cmds.saved_rest)
+        self.assertEqual(self.api.calls[-1], "rest")      # put back before it moves
+        self.send({"cmd": "torque", "on": True})
+        self.assertEqual(self.api.params["rest_after_s"], 0.0)
+        self.send({"cmd": "home"})
+        self.assertEqual(self.api.params["rest_after_s"], 120.0)
+        self.send({"cmd": "center"})
+        self.jobs.on_command(json.dumps({"action": "drop_bag", "params": {"x": 0.31, "y": 0.0}}))
+        self.jobs.thread.join(10)
+        self.assertEqual(self.api.params["rest_after_s"], 120.0)
+        self.assertEqual(self.arm.sent, ["drop_done"])
+        n = len(self.api.calls)
+        self.send({"cmd": "rest"})                        # nothing held: nothing set
+        self.assertEqual(self.api.calls[n:], ["rest"])
+
+    def test_a_failed_center_does_not_hold(self):
+        self.api.results["move"] = (False, "MoveIt code 99999")
+        out = self.send({"cmd": "center"})
+        self.assertFalse(out["ok"])
+        self.assertIn("99999", out["error"])
+        self.assertEqual(self.api.params["rest_after_s"], 120.0)
+        self.api.results = {"home": (False, "BUSY", "busy")}
+        out = self.send({"cmd": "center"})
+        self.assertEqual(out["code"], "BUSY")
+        self.assertEqual(self.api.calls[-1], "home")       # nothing moved after a refused home
+
+    def test_moves_are_refused_while_a_bag_job_runs_but_stop_and_state_answer(self):
+        gate = threading.Event()
+
+        def slow(name, timeout, **goal):
+            gate.wait(10)
+            return True, "SUCCESS", ""
+        self.arm.arm_task = slow
+        self.jobs.on_command(json.dumps({"action": "drop_bag", "params": {"x": 0.31, "y": 0.0}}))
+        for cmd in ({"cmd": "home"}, {"cmd": "rest"}, {"cmd": "center"}, {"cmd": "torque", "on": True}):
+            out = self.send(cmd)
+            self.assertFalse(out["ok"])
+            self.assertIn("bag job", out["error"])
+        self.assertEqual(self.api.calls, [])
+        state = self.send({"cmd": "state"})
+        self.assertTrue(state["ok"] and state["busy"])
+        self.assertTrue(self.send({"cmd": "stop"})["ok"])
+        self.assertEqual(self.api.calls, ["stop"])
+        gate.set()
+        self.jobs.thread.join(10)
+        self.assertFalse(self.send({"cmd": "state"})["busy"])
+
+    def test_a_bag_job_is_refused_while_the_console_moves_and_stop_ends_a_center(self):
+        self.api.gate = threading.Event()
+        out = []
+        th = threading.Thread(target=lambda: out.append(self.send({"cmd": "center"})))
+        th.start()
+        self.assertTrue(wait_until(lambda: any(isinstance(c, tuple) and c[0] == "move" for c in self.api.calls)))
+        self.assertTrue(self.send({"cmd": "state"})["busy"])
+        self.assertIn("busy with center", self.send({"cmd": "home"})["error"])
+        self.jobs.on_command(json.dumps({"action": "pick_bag", "params": {"x": 0.31, "y": 0.0}}))
+        self.assertEqual(self.arm.sent, ["grab_failed|BUSY|the console is moving the arm (center)"])
+        self.send({"cmd": "stop"})
+        self.api.gate.set()
+        th.join(10)
+        self.assertEqual(out[0]["code"], "STOPPED")       # the gripper never moved
+        self.assertNotIn("grip", [c[0] for c in self.api.calls if isinstance(c, tuple)])
+        self.assertEqual(self.api.params["rest_after_s"], 120.0)
+
+    def test_torque_off_only_at_rest(self):
+        for st in ("idle", "busy", "holding", "torque_off"):
+            self.api.arm_state["state"] = st
+            out = self.send({"cmd": "torque", "on": False})
+            self.assertFalse(out["ok"])
+            self.assertIn("only at rest", out["error"])
+        self.assertEqual(self.api.calls, [])
+        self.api.arm_state["state"] = "resting"
+        self.assertTrue(self.send({"cmd": "torque", "on": False})["ok"])
+        self.assertEqual(self.api.calls, [("torque", False)])
+        self.assertIsNone(self.cmds.saved_rest)             # torque off holds nothing
+
+    def test_state_and_bad_commands(self):
+        out = self.send({"cmd": "state"})
+        self.assertEqual(out["state"]["state"], "idle")
+        self.assertIsNone(out["state"]["gripper_load"])      # NaN is no JSON
+        self.assertEqual(out["joints"], {"shoulder_pan": 0.1, "gripper": None})
+        self.assertFalse(out["busy"])
+        json.loads(json.dumps(out, allow_nan=False))
+        self.assertIn("one of", self.send({"cmd": "dance"})["error"])
+        self.assertIn("torque needs", self.send({"cmd": "torque"})["error"])
+        self.assertEqual(self.cmds.handle(b"not json")["error"], "not JSON")
+        self.assertFalse(self.cmds.handle("[1]")["ok"])
+        self.assertEqual(self.api.calls, [])
+
+    def test_the_tcp_server_answers_line_by_line(self):
+        server = bag_arm.serve_commands(self.cmds, port=0)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with socket.create_connection(server.server_address, 5) as s:
+            f = s.makefile("rwb")
+            f.write(b'{"cmd": "state"}\n{"cmd": "center"}\n')
+            f.flush()
+            self.assertTrue(json.loads(f.readline())["ok"])
+            self.assertTrue(json.loads(f.readline())["ok"])
+        self.assertEqual(bag_arm.ARM_CMD_PORT, 5607)
+
+
+def wait_until(check, timeout=5.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if check():
+            return True
+        time.sleep(0.01)
+    return check()
 
 
 if __name__ == "__main__":
