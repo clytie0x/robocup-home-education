@@ -342,6 +342,10 @@ def bagpick_result(lines, exit_code=None):
             exit_code, ": %s" % lines[-1].strip() if lines else "")
     words = result[len("RESULT"):].strip()
     code = next((c for w, c in BAGPICK_CODES if words.startswith(w)), "FAILED")
+    if code == "HOLDING_BAG" and any("DROPPED" in ln for ln in lines):  # it prints holding after a drop (2026-11-16)
+        return False, "DROPPED", result
+    if code == "HOLDING_BAG" and exit_code not in (0, None):  # the put-back after the RESULT crashed
+        return False, "FAILED", "%s; then exit %s: %s" % (result, exit_code, lines[-1].strip())
     return code == "HOLDING_BAG", code, result
 
 
@@ -449,6 +453,10 @@ class ArmCommands:
         argv = ["python3", "bagpick.py"] + (["--putback"] if putback else [])
         self.log("console: %s in %s" % (" ".join(argv), BAGPICK_DIR))
         try:
+            try:  # their auto rest fires after 120 s idle and took the arm mid-bagpick on the robot (2026-11-16)
+                self.hold()
+            except Exception as exc:  # noqa: BLE001 (bagpick still runs, with the risk logged)
+                self.log("rest_after_s not set to 0: %s" % exc)
             try:
                 proc = self.popen(argv, cwd=os.path.expanduser(BAGPICK_DIR), stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, text=True, errors="replace", start_new_session=True)
@@ -474,6 +482,10 @@ class ArmCommands:
             reader.join(5.0)
         finally:
             self.bagpick = None
+            try:
+                self.release()
+            except Exception as exc:  # noqa: BLE001
+                self.log("rest_after_s not put back: %s" % exc)
             self.jobs.claim(None)
         ok, code, msg = bagpick_result(lines, exit_code)
         if why is not None or self.stopped:

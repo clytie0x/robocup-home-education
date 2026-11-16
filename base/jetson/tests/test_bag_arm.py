@@ -594,6 +594,14 @@ class BagpickTest(unittest.TestCase):
         self.assertIn("no webcam frame", msg)
         self.assertEqual(bag_arm.bagpick_result([], None)[:2], (False, "FAILED"))
         self.assertEqual(bag_arm.bagpick_result(["  RESULT holding (indented, not its line)"], 0)[:2], (False, "FAILED"))
+        # robot 2026-11-16: the bag fell while raising, yet bagpick.py still printed "RESULT holding"
+        dropped = ["high check: floor under the bag 0.25  -> DROPPED while raising", HOLDING]
+        self.assertEqual(bag_arm.bagpick_result(dropped, 0)[:2], (False, "DROPPED"))
+        # and its put-back crashed after the RESULT line (the arm was taken): not a clean hold
+        ok, code, msg = bag_arm.bagpick_result([HOLDING, "Traceback (most recent call last):",
+                                                "RuntimeError: move failed: arm busy: another program has it"], 1)
+        self.assertEqual((ok, code), (False, "FAILED"))
+        self.assertIn("arm busy", msg)
 
     def test_it_runs_bagpick_in_the_arm_workspace_with_this_environment(self):
         self.proc = FakeProc(["line %d" % i for i in range(25)] + [HOLDING, "put back"])
@@ -612,7 +620,10 @@ class BagpickTest(unittest.TestCase):
         self.assertEqual((out["ok"], out["code"]), (False, "NO_BAG"))
         self.assertIn("RESULT no bag in view", out["error"])
         self.assertFalse(self.send({"cmd": "state"})["busy"])
-        self.assertEqual(self.api.calls, [])           # nothing of the arm team's API is asked
+        # their auto rest (120 s idle) took the arm mid-bagpick on the robot: off while it runs, then back
+        sets = [c for c in self.api.calls if c[0] == "set"]
+        self.assertEqual(sets, [("set", "rest_after_s", 0.0), ("set", "rest_after_s", 120.0)] * 2)
+        self.assertIsNone(self.cmds.saved_rest)
 
     def test_bad_putback_and_a_missing_workspace(self):
         self.assertIn("putback", self.send({"cmd": "bagpick", "putback": "yes"})["error"])
@@ -634,7 +645,8 @@ class BagpickTest(unittest.TestCase):
         self.assertTrue(self.send({"cmd": "stop"})["ok"])
         th.join(10)
         self.assertEqual(self.proc.signals, [signal.SIGINT])
-        self.assertEqual(self.api.calls, ["stop"])     # and /arm/stop, as before
+        self.assertEqual(self.api.calls, [("set", "rest_after_s", 0.0), "stop",     # and /arm/stop, as before
+                                          ("set", "rest_after_s", 120.0)])          # their auto rest back after
         self.assertEqual((out[0]["ok"], out[0]["code"]), (False, "STOPPED"))
         self.assertEqual(out[0]["tail"], ["scan left +0.00: bag area 900"])
         self.assertFalse(self.send({"cmd": "state"})["busy"])
