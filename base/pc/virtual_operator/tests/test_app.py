@@ -73,7 +73,7 @@ class FakeRun:
     def __call__(self, argv, input=None, **kw):
         self.calls.append((argv, input))
         code, out = self.answers.pop(0)
-        return SimpleNamespace(returncode=code, stdout=out, stderr="")
+        return SimpleNamespace(returncode=code, stdout=out.encode(), stderr=b"")
 
 
 class SshTest(unittest.TestCase):
@@ -85,6 +85,14 @@ class SshTest(unittest.TestCase):
         self.assertEqual(run.calls[0][0][-2:], ["bash", "-s"])  # the script goes on stdin
         self.assertIn("BatchMode=yes", run.calls[0][0])
         self.assertEqual(ssh.host, "100.73.128.36")  # remembered for the datagrams and the next call
+
+    def test_the_script_goes_as_lf_bytes(self):
+        # text mode on Windows turned \n into \r\n and bash read "set -u\r" (2026-11-16)
+        run = FakeRun([(0, "STARTED 4242 logs/virtual/x.log\n")])
+        remote.Ssh(run=run).start(DRY, "10.0.0.5", 5610)
+        sent = run.calls[0][1]
+        self.assertIsInstance(sent, bytes)
+        self.assertNotIn(b"\r", sent)
 
     def test_the_answers(self):
         cases = [("CONSOLE {\"error\": null}\n", None), ("CONSOLE {\"error\": \"busy\"}\n", "busy"),

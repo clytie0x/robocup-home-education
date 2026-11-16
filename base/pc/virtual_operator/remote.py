@@ -110,15 +110,17 @@ class Ssh:
         last = (255, "")
         for host in order:
             try:
-                done = self.run(["ssh"] + SSH_OPTIONS + ["%s@%s" % (self.user, host), "bash", "-s"], input=script,
-                                capture_output=True, text=True, timeout=timeout)
+                # bytes: text mode on Windows sends \r\n and bash reads "set -u\r"
+                done = self.run(["ssh"] + SSH_OPTIONS + ["%s@%s" % (self.user, host), "bash", "-s"],
+                                input=script.encode("utf-8"), capture_output=True, timeout=timeout)
             except (OSError, subprocess.TimeoutExpired) as error:
                 last = (255, str(error))
                 continue
+            out, err = (done.stdout or b"").decode("utf-8", "replace"), (done.stderr or b"").decode("utf-8", "replace")
             if done.returncode != 255:  # 255: ssh itself failed (no route, no login): try the next host
                 self.host = host
-                return done.returncode, (done.stdout or "") + (done.stderr or "")
-            last = (255, done.stderr or "")
+                return done.returncode, out + err
+            last = (255, err)
         self.error = last[1].strip() or "ssh failed"
         return last
 
