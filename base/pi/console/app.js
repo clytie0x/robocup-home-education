@@ -590,6 +590,45 @@ $("img-webcam").addEventListener("error", () => {
 });
 $("img-webcam").addEventListener("load", () => { delete $("img-webcam").dataset.failed; $("img-webcam").dataset.shown = "1"; });
 
+// The skeleton: COCO keypoints from the Jetson's pose detector, drawn over the console's own camera (not during a task:
+// then run_follow has the detector).
+const SKELETON = [[5, 7], [7, 9], [6, 8], [8, 10], [5, 6], [5, 11], [6, 12], [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
+  [0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 6]];
+const KP_SEEN = 0.3; // a keypoint's visibility must reach this to be drawn
+
+function drawSkeleton(s) {
+  const svg = $("cam-skel");
+  if (!s || !s.on || !s.w || !$("img-camera").dataset.shown || liveFromRun(state)) { svg.innerHTML = ""; return; }
+  svg.setAttribute("viewBox", `0 0 ${s.w} ${s.h}`);
+  let out = "";
+  for (const p of s.people) {
+    const [x1, y1, x2, y2] = p.box;
+    out += `<rect x="${x1}" y="${y1}" width="${x2 - x1}" height="${y2 - y1}"/>`;
+    if (!p.kp) continue;
+    const ok = (i) => p.kp[i] && p.kp[i][2] >= KP_SEEN;
+    for (const [a, b] of SKELETON) {
+      if (ok(a) && ok(b)) out += `<line x1="${p.kp[a][0]}" y1="${p.kp[a][1]}" x2="${p.kp[b][0]}" y2="${p.kp[b][1]}"/>`;
+    }
+    p.kp.forEach((k, i) => { if (ok(i)) out += `<circle cx="${k[0]}" cy="${k[1]}" r="4"/>`; });
+  }
+  svg.innerHTML = out;
+}
+
+let skeletonOn = false;
+getJSON("/api/skeleton").then((s) => { skeletonOn = !!s.on; $("btn-skel").setAttribute("aria-pressed", String(skeletonOn)); })
+  .catch(() => { /* off until the button is pressed */ });
+$("btn-skel").addEventListener("click", async () => {
+  const r = await post("/api/skeleton", { on: !skeletonOn });
+  if (!r || r.error) return;
+  skeletonOn = r.on;
+  $("btn-skel").setAttribute("aria-pressed", String(skeletonOn));
+  drawSkeleton(r);
+});
+setInterval(async () => {
+  if (!skeletonOn || !onScreen("cam-box") || document.visibilityState !== "visible") return;
+  try { drawSkeleton(await getJSON("/api/skeleton")); } catch (e) { /* the next poll tries again */ }
+}, 200);
+
 const DEVICE_WORD = { live: "สด", stale: "ไม่มีข้อมูลใหม่", off: "ไม่พบ", held: "หยุดชั่วคราว" };
 
 function renderCamState() {

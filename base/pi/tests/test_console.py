@@ -367,6 +367,42 @@ class DevicesTest(unittest.TestCase):
         s = d.status()
         self.assertEqual((s["held"], s["camera"]["state"], s["lidar"]["state"]), (True, "held", "held"))
 
+    def test_skeleton_sends_with_pose_only_while_on_and_closes_with_the_devices(self):
+        from link import Answer, Seen
+        kp = [[1.0, 2.0, 0.9]] * 17
+
+        class FakeLink:
+            def __init__(self):
+                self.sent, self.started, self.stopped, self.error = [], False, False, None
+
+            def start(self):
+                self.started = True
+
+            def send(self, frame, pose=False):
+                self.sent.append((frame.jpeg, frame.width, pose))
+
+            def latest(self):
+                return Answer(0.0, [Seen(0.0, 0.9, (), [0, 0, 10, 20], kp)]) if self.sent else None
+
+            def stop(self):
+                self.stopped = True
+
+        links = []
+        d = console.Devices(P, open_camera=lambda: FakeCamera(), open_lidar=lambda: FakeLidar(), encode=lambda f: b"jpeg",
+                            points=lambda s: [], retry=0.05, size_of=lambda j: (640, 480),
+                            open_link=lambda p: links.append(FakeLink()) or links[-1])
+        d.start()
+        self.assertTrue(wait_for(lambda: d.status()["camera"]["state"] == "live"))
+        self.assertEqual(links, [])  # off: no link, the detector stays free
+        d.skeleton_on = True
+        self.assertTrue(wait_for(lambda: d.skeleton_status()["people"]))
+        s = d.skeleton_status()
+        self.assertEqual((s["w"], s["h"], s["people"][0]["kp"]), (640, 480, kp))
+        self.assertEqual(links[0].sent[0], (b"jpeg", 640, True))
+        d.stop()  # a job takes the camera: the detector link closes with it
+        self.assertTrue(links[0].stopped)
+        self.assertEqual(len(links), 1)
+
 
 class VersionTest(unittest.TestCase):
     def test_the_deployed_commit_is_read_and_bad_files_give_none(self):

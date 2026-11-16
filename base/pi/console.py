@@ -40,6 +40,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -74,6 +75,7 @@ CANCEL_S = 3.0  # s: a start refuses to run a job when STOP came within this lon
 RETRY = 5.0  # s between tries to open a missing camera or LiDAR
 REFRESH = 3.0  # s between Jetson checks
 LIVE_AGE = 1.0  # s; newer than this is live
+SKELETON_HZ = 5.0  # frames a second to the Jetson pose detector while the page shows the skeleton
 STALE_WHEEL_TEST = 6 * 3600  # s; an older wheel test is a warning
 RUN_NAME = re.compile(r"^\d{8}-\d{6}$")  # run_follow's log folder names
 FILES = {
@@ -507,13 +509,35 @@ def _open_lidar():
     return lidar.LidarSession()
 
 
+def _open_pose_link(p):
+    import link
+    return link.JetsonLink(link.hosts(p), p["jetson_port"], p["camera_hfov_deg"], encode=lambda f: f.jpeg)
+
+
+def jpeg_size(jpeg):
+    """(width, height) of JPEG bytes."""
+    import cv2
+    import numpy as np
+    image = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise ValueError("not a JPEG")
+    return image.shape[1], image.shape[0]
+
+
 class Devices:
-    """The camera and LiDAR readers of the live view. stop() closes both before a job; start() reopens."""
+    """The camera and LiDAR readers of the live view. stop() closes both before a job; start() reopens.
+
+    With skeleton on, the shown frames also go to the Jetson detector with pose, SKELETON_HZ a second. The
+    detector serves one client and a new one replaces the old, so this link lives only while the devices
+    are open: a job (run_follow) takes the camera and then the detector link for itself."""
 
     def __init__(self, p, open_camera=_open_child_camera, open_lidar=_open_lidar, encode=_as_is,
-                 points=None, clock=time.monotonic, retry=RETRY):
+                 points=None, clock=time.monotonic, retry=RETRY, open_link=_open_pose_link, size_of=jpeg_size):
         self.p = p
         self.open_camera, self.open_lidar, self.encode = open_camera, open_lidar, encode
+        self.open_link, self.size_of = open_link, size_of
+        self.skeleton_on = False
+        self.skeleton = {"people": [], "w": None, "h": None, "at": None, "error": None}
         self.points = points or self._scan_points
         self.clock, self.retry = clock, retry
         self.latest, self.scan = camera_view.Latest(), camera_view.Scan()
@@ -537,7 +561,8 @@ class Devices:
             self.camera = {"error": "opening", "at": None}
             self.lidar = {"error": "opening", "at": None}
             self.threads = [threading.Thread(target=self._camera_loop, args=(event,), daemon=True),
-                            threading.Thread(target=self._lidar_loop, args=(event,), daemon=True)]
+                            threading.Thread(target=self._lidar_loop, args=(event,), daemon=True),
+                            threading.Thread(target=self._skeleton_loop, args=(event,), daemon=True)]
             for t in self.threads:
                 t.start()
 
@@ -550,7 +575,7 @@ class Devices:
         for t in threads:
             t.join(10)
             if t.is_alive():
-                raise RuntimeError("the %s reader did not close" % ("camera" if t is threads[0] else "LiDAR"))
+                raise RuntimeError("the %s reader did not close" % ("camera", "LiDAR", "skeleton")[threads.index(t)])
 
     def _camera_loop(self, event):
         while not event.is_set():
@@ -604,6 +629,46 @@ class Devices:
                 except Exception:
                     pass
             event.wait(self.retry)
+
+    def _skeleton_loop(self, event):
+        link, n = None, 0
+        try:
+            while not event.is_set():
+                if not self.skeleton_on:
+                    if link is not None:
+                        link.stop()
+                        link = None
+                    self.skeleton = dict(self.skeleton, people=[], at=None)
+                    event.wait(0.2)
+                    continue
+                try:
+                    if link is None:
+                        link = self.open_link(self.p)
+                        link.start()
+                    jpeg, m = self.latest.jpeg, self.latest.n
+                    if jpeg is not None and m != n:
+                        n = m
+                        w, h = self.size_of(jpeg)
+                        self.skeleton.update(w=w, h=h)
+                        link.send(types.SimpleNamespace(time=self.clock(), width=w, height=h, jpeg=jpeg), pose=True)
+                    answer = link.latest()
+                    if answer is not None:
+                        people = [{"box": s.box, "kp": s.kp} for s in answer.people]
+                        self.skeleton.update(people=people, at=self.clock(), error=None)
+                    elif link.error:
+                        self.skeleton["error"] = link.error
+                except Exception as error:
+                    self.skeleton["error"] = "%s" % (error,)
+                event.wait(1 / SKELETON_HZ)
+        finally:
+            if link is not None:
+                link.stop()
+
+    def skeleton_status(self):
+        s = self.skeleton
+        age = None if s["at"] is None else round(self.clock() - s["at"], 2)
+        return {"on": self.skeleton_on, "held": self.held, "w": s["w"], "h": s["h"], "age": age,
+                "people": s["people"] if age is not None and age < LIVE_AGE else [], "error": s["error"]}
 
     def status(self):
         now = self.clock()
@@ -1315,6 +1380,11 @@ class Console:
             return code, (dict(reply, session=token) if isinstance(reply, dict) else reply)
         if path.startswith("/api/jetson/"):
             return self.jetson.act(path[len("/api/jetson/"):], body.get("name"))
+        if path == "/api/skeleton":
+            if not isinstance(body.get("on"), bool):
+                return 400, {"error": "send on: true or false"}
+            self.devices.skeleton_on = body["on"]
+            return 200, dict(self.devices.skeleton_status(), error=None)
         return 404, {"error": "not found"}
 
 
@@ -1354,6 +1424,8 @@ def handler_for(console):
                     self._send(200, {"results": link_test(console.jetson.hosts)})
                 elif path == "/scan":
                     self._send(*console.scan())
+                elif path == "/api/skeleton":
+                    self._send(200, console.devices.skeleton_status())
                 elif path == "/stream":
                     self._stream()
                 elif path == "/usb-stream":
