@@ -88,10 +88,11 @@ FILES = {
 COMMANDS = ("follow", "wait", "resume", "return", "bag", "bag_again", "bag_near")
 NO_PIN = ("/api/stop", "/api/arm/stop", "/api/bank/full", "/api/bank/reading")  # STOPs, and the owner's battery marks
 CLIENT = re.compile(r"^[\w.@:%-]{1,64}$")  # a program's name (X-HMC-Client), e.g. robotctl's "xohm@192.168.31.50"
-ARM_CMDS = ("home", "rest", "center", "torque", "pick_bag", "drop_bag")
-ARM_JOBS = ("pick_bag", "drop_bag")  # bag_arm's bag jobs: allowed during a task run, not while its bag task drives
+ARM_CMDS = ("home", "rest", "center", "torque", "pick_bag", "drop_bag", "bagpick")
+ARM_JOBS = ("pick_bag", "drop_bag", "bagpick")  # bag_arm's bag jobs: allowed during a task run, not while its bag task drives
 ARM_TIMEOUT = 95.0  # s: the agent answers an arm command when it is done, within its own ARM_TIMEOUT (90 s)
 ARM_JOB_TIMEOUT = 245.0  # s: and a bag job within its ARM_JOB_TIMEOUT (240 s: home 60 + pick 150 + the camera looks)
+ARM_BAGPICK_TIMEOUT = 335.0  # s: and the arm team's bagpick within its ARM_BAGPICK_TIMEOUT (330 s)
 ARM_STOP_WAIT = 0.5  # s STOP's answer waits for the arm's stop; the base's stop is already under way
 COMMANDS_MAX = 200  # lines GET /api/commands gives at most
 RUN_TAIL = 1 << 20  # bytes at the end of the newest run log that GET /api/commands reads for the voice flow's commands
@@ -1460,9 +1461,10 @@ class Console:
         return None
 
     def bag_job(self, cmd, body, task):
-        """POST /api/arm pick_bag {"x", "y" (robot frame m)[, "top", "yaw"]} or drop_bag {"x", "y"}: bag_arm's own bag
-        job, answered when it is done. A pick without x and y takes the running task's last reached bag. Refused while
-        the task's bag task moves the base, and while a task runs whose status does not say."""
+        """POST /api/arm pick_bag {"x", "y" (robot frame m)[, "top", "yaw"]}, drop_bag {"x", "y"} or bagpick
+        {"putback": bool} (the arm team's camera pick): bag_arm's own bag job, answered when it is done. A pick without x
+        and y takes the running task's last reached bag. Refused while the task's bag task moves the base, and while a
+        task runs whose status does not say."""
         record = None
         if task:
             code, status = self.run_status()
@@ -1471,6 +1473,13 @@ class Console:
                 return 503, {"error": "the run's status does not answer: cannot tell whether a bag task moves the base"}
             if record.get("phase") == "bag":
                 return 409, {"error": "a bag task is moving the base: the arm waits until it ended"}
+        if cmd == "bagpick":
+            putback = body.get("putback", False)
+            if not isinstance(putback, bool):
+                return 400, {"error": "bagpick takes putback: true or false"}
+            out = {"cmd": cmd, "putback": putback}
+            code, answer = self.jetson.arm(out, timeout=ARM_BAGPICK_TIMEOUT)
+            return code, (dict(answer, sent=out) if isinstance(answer, dict) else answer)
         if cmd == "pick_bag" and body.get("x") is None and body.get("y") is None:
             result = ((record or {}).get("bag_task") or {}).get("result")
             if not (isinstance(result, dict) and result.get("ok")):

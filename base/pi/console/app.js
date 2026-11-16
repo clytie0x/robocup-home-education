@@ -926,8 +926,9 @@ $("btn-stop-all").addEventListener("click", async () => {
 // ------------------------------------------------------------ the arm (Jetson tab)
 
 const ARM_MOVES = { home: { cmd: "home" }, rest: { cmd: "rest" }, center: { cmd: "center" },
+  bagpick: { cmd: "bagpick", putback: false },
   "torque-on": { cmd: "torque", on: true }, "torque-off": { cmd: "torque", on: false } };
-let armSending = false; // a move this tab sent is not answered yet (center takes up to 90 s)
+let armSending = false; // a move this tab sent is not answered yet (center takes up to 90 s, bagpick up to 300 s)
 
 async function fetchArm() {
   try { arm = await getJSON("/api/arm"); } catch (e) { arm = { error: "คอนโซลไม่ตอบ" }; }
@@ -964,6 +965,8 @@ for (const b of document.querySelectorAll("[data-arm]")) {
     const name = b.dataset.arm;
     if (name === "center" && !(await confirmBox("ยืดแขนไปกลางระยะไหม",
       "แขนจะยื่นออกไปราว 0.5 ม. หน้าหุ่น หน้าหุ่นโล่งและไม่มีคนหรือของอยู่ใกล้แล้วใช่ไหม", "ใช่ ยืดแขน", true))) return;
+    if (name === "bagpick" && !(await confirmBox("ให้แขนหยิบถุงไหม",
+      "แขนจะยื่นออกไปและก้มลงถึงพื้นหน้าหุ่นเพื่อหยิบถุง ไม่มีคน มือ หรือของอื่นอยู่หน้าหุ่นแล้วใช่ไหม", "ใช่ หยิบถุง", true))) return;
     armSending = true;
     renderArm();
     const r = await post("/api/arm", ARM_MOVES[name]);

@@ -30,7 +30,12 @@ one JSON line out ({"ok", "error", ...}): {"cmd": "home" | "rest" | "center" | "
 {"cmd": "torque", "on": true | false}, {"cmd": "pick_bag", "x", "y"[, "top", "yaw"]} and {"cmd": "drop_bag", "x",
 "y"} (the params of /robot/command, run as the same bag job: one at a time from either side; the answer comes when
 it is done, with "code", "message" and "reading", their grasp reading; the job's event still goes out on
-/robot/event). Refused while a bag job runs, except stop and state; torque off only
+/robot/event), {"cmd": "bagpick", "putback": true | false} (the arm team's camera pick, arm/tools/bagpick: python3
+bagpick.py [--putback] in BAGPICK_DIR with this environment, so its console gate sees HMC_CONSOLE_JOB; at most
+BAGPICK_TIMEOUT, then its process group is killed; ok only on "RESULT holding", "code" from its RESULT line
+(bagpick_result), "message" that line, "tail" its last output lines; while it runs a bag job is BUSY and the
+other way round, and stop ends it: SIGINT, SIGTERM, then SIGKILL). Refused while a bag job runs, except stop and
+state; torque off only
 while /arm/state is "resting" (the arm drops when released elsewhere). center = /arm/home, then MoveIt to
 the middle of each arm joint's limits (the robot description's), then the gripper to the middle of its own.
 While center or torque on holds the arm in the owner's pose, their rest_after_s is 0 (their auto rest would
@@ -46,7 +51,10 @@ fold it); the old value comes back on home, rest or a bag job. state = /arm/stat
 import argparse
 import json
 import math
+import os
+import signal
 import socketserver
+import subprocess
 import sys
 import threading
 import time
@@ -77,6 +85,13 @@ ARM_CMD_PORT = ports.ARM_CMD  # TCP on 127.0.0.1: the console's arm commands fro
 CENTER_HOME_TIMEOUT = 30.0  # center's steps fit in agent.py's ARM_TIMEOUT (90 s)
 CENTER_MOVE_TIMEOUT = 45.0
 GRIP_TIMEOUT = 10.0
+BAGPICK_DIR = "~/so100_ws"  # bagpick.py, bagvision.py and gcam.py (arm/tools/bagpick, copied by deploy.sh --arm)
+BAGPICK_TIMEOUT = 300.0     # s for one bagpick.py run (up to 4 tries, the raise, --putback); agent.py waits 330 s
+BAGPICK_TAIL = 20           # its last output lines in the answer
+BAGPICK_STOP_STEPS = ((signal.SIGINT, 3.0), (signal.SIGTERM, 3.0))  # then SIGKILL, as agent.py stops a program
+KILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+BAGPICK_CODES = (("holding", "HOLDING_BAG"), ("missed", "MISSED"), ("too far", "TOO_FAR"), ("no bag", "NO_BAG"),
+                 ("lost", "LOST"))  # bagpick.py's "RESULT <words> ..." -> code
 
 
 def arm_yaw(yaw, mount):
@@ -318,6 +333,22 @@ def mid_pose(limits):
     return {n: (limits[n][0] + limits[n][1]) / 2 for n in JOINTS}
 
 
+def bagpick_result(lines, exit_code=None):
+    """(ok, code, message) from bagpick.py's output lines: its last line starting with RESULT (with --putback
+    "put back" follows it); ok only for "RESULT holding". Without one: FAILED (a crash, or its console gate)."""
+    result = next((ln.strip() for ln in reversed(lines) if ln.startswith("RESULT")), None)
+    if result is None:
+        return False, "FAILED", "bagpick.py ended (exit %s) without a RESULT line%s" % (
+            exit_code, ": %s" % lines[-1].strip() if lines else "")
+    words = result[len("RESULT"):].strip()
+    code = next((c for w, c in BAGPICK_CODES if words.startswith(w)), "FAILED")
+    return code == "HOLDING_BAG", code, result
+
+
+def _signal_group(proc, sig):
+    os.killpg(proc.pid, sig)
+
+
 def _finite(d):
     """d with NaN and inf as None (JSON has neither); None stays None."""
     if d is None:
@@ -329,10 +360,12 @@ class ArmCommands:
     """The console's arm commands (the module docstring) over an api with task / stop / torque / state / joints /
     limits / move / grip / get_param / set_param (RosConsoleArm; pure: tests use a fake)."""
 
-    def __init__(self, jobs, api, log=print):
+    def __init__(self, jobs, api, log=print, popen=subprocess.Popen, signal_group=_signal_group):
         self.jobs, self.api, self.log = jobs, api, log
         self.saved_rest = None  # their rest_after_s while the owner's pose holds it at 0
         self.stopped = False
+        self.popen, self.signal_group = popen, signal_group  # bagpick.py's process (tests: a fake)
+        self.bagpick = None  # its process while it runs
 
     def handle(self, text):
         try:
@@ -346,13 +379,19 @@ class ArmCommands:
         if name == "stop":
             self.stopped = True
             self.log("console: stop")
+            proc = self.bagpick
+            if proc is not None:  # the answer does not wait for the signal steps
+                threading.Thread(target=self._stop_bagpick, args=(proc,), daemon=True).start()
             self.api.stop()
             return {"ok": True, "error": None}
         if name in ("pick_bag", "drop_bag"):
             return self._bag_job(name, cmd)
+        if name == "bagpick":
+            return self._bagpick(cmd)
         moves = {"home": self._task, "rest": self._task, "center": self._center, "torque": self._torque}
         if name not in moves:
-            return {"ok": False, "error": "cmd must be one of home, rest, center, torque, pick_bag, drop_bag, stop, state"}
+            return {"ok": False, "error": "cmd must be one of home, rest, center, torque, pick_bag, drop_bag, bagpick, "
+                                          "stop, state"}
         if name == "torque" and not isinstance(cmd.get("on"), bool):
             return {"ok": False, "error": "torque needs \"on\": true or false"}
         if not self.jobs.claim(name):
@@ -396,6 +435,63 @@ class ArmCommands:
         if not got:
             return self._answer(False, "FAILED", "the %s job ended without a result (see the bag_arm log)" % name)
         return self._answer(got[0].ok, got[0].code, got[0].message, reading=self.jobs.arm._reading())
+
+    def _bagpick(self, cmd):
+        """bagpick.py [--putback] under the console's claim (a bag job waits, and it waits for one), answered when it
+        ended."""
+        putback = cmd.get("putback", False)
+        if not isinstance(putback, bool):
+            return {"ok": False, "error": "bagpick takes \"putback\": true or false"}
+        if not self.jobs.claim("bagpick"):
+            return self._answer(False, "BUSY", "a bag job is running" if self.jobs.busy()
+                                else "the arm is busy with %s" % (self.jobs.console or "another command"))
+        self.stopped, lines, why = False, [], None
+        argv = ["python3", "bagpick.py"] + (["--putback"] if putback else [])
+        self.log("console: %s in %s" % (" ".join(argv), BAGPICK_DIR))
+        try:
+            try:
+                proc = self.popen(argv, cwd=os.path.expanduser(BAGPICK_DIR), stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, errors="replace", start_new_session=True)
+            except OSError as exc:
+                return self._answer(False, "FAILED", "bagpick.py not started in %s: %s" % (BAGPICK_DIR, exc))
+            self.bagpick = proc
+
+            def read():
+                for line in proc.stdout:  # its RESULT comes on stderr (sys.exit), merged in here
+                    lines.append(line.rstrip("\n")[:500])  # short lines: the answer fits agent.py's 64 KB line
+                    self.log("bagpick: %s" % lines[-1])
+            reader = threading.Thread(target=read, daemon=True)
+            reader.start()
+            try:
+                exit_code = proc.wait(timeout=BAGPICK_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                why = "bagpick.py took longer than %.0f s: its process group was killed" % BAGPICK_TIMEOUT
+                try:
+                    self.signal_group(proc, KILL)
+                except OSError:  # it ended just now
+                    pass
+                exit_code = proc.wait()
+            reader.join(5.0)
+        finally:
+            self.bagpick = None
+            self.jobs.claim(None)
+        ok, code, msg = bagpick_result(lines, exit_code)
+        if why is not None or self.stopped:
+            ok, code, msg = False, "FAILED" if why else "STOPPED", "%s (%s)" % (why or "stopped from the console", msg)
+        return self._answer(ok, code, msg, tail=lines[-BAGPICK_TAIL:])
+
+    def _stop_bagpick(self, proc):
+        """Ctrl+C to bagpick.py's process group, then SIGTERM, then SIGKILL, each when it did not end in time."""
+        for sig, wait in BAGPICK_STOP_STEPS + ((KILL, 0.0),):
+            try:
+                self.signal_group(proc, sig)
+            except OSError:  # gone already
+                return
+            try:
+                proc.wait(timeout=wait)
+                return
+            except subprocess.TimeoutExpired:
+                continue
 
     def _task(self, name, _cmd):
         self.release()

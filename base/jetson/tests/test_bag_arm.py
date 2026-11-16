@@ -3,7 +3,9 @@ import io
 import json
 import math
 import os
+import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -518,6 +520,157 @@ class ArmCommandsTest(unittest.TestCase):
             self.assertTrue(json.loads(f.readline())["ok"])
             self.assertTrue(json.loads(f.readline())["ok"])
         self.assertEqual(bag_arm.ARM_CMD_PORT, 5607)
+
+
+class FakeProc:
+    """bagpick.py's process: its output lines, then its end (hang: only on a signal, after the first `ignore`)."""
+
+    def __init__(self, lines=(), code=0, hang=False, ignore=0):
+        self.pid, self.code, self.ignore, self.signals = 4242, code, ignore, []
+        self.ended = threading.Event()
+        if not hang:
+            self.ended.set()
+        self.stdout = self._out([ln + "\n" for ln in lines])
+
+    def _out(self, lines):
+        yield from lines
+        self.ended.wait(10)
+
+    def wait(self, timeout=None):
+        if not self.ended.wait(timeout):
+            raise subprocess.TimeoutExpired("bagpick.py", timeout)
+        return self.code
+
+    def signal(self, sig):
+        self.signals.append(sig)
+        if len(self.signals) > self.ignore:
+            self.code = -int(sig)
+            self.ended.set()
+
+
+HOLDING = 'RESULT holding the bag {"left": 0.0, "tips": 0.33}'
+
+
+class BagpickTest(unittest.TestCase):
+    def setUp(self):
+        self.arm = ApiArm()
+        self.jobs = bag_arm.Jobs(make(self.arm), log=lambda _s: None)
+        self.api = FakeApi()
+        self.proc, self.started = FakeProc([HOLDING]), []
+
+        def popen(argv, **kw):
+            self.started.append((argv, kw))
+            if isinstance(self.proc, OSError):
+                raise self.proc
+            return self.proc
+        self.cmds = bag_arm.ArmCommands(self.jobs, self.api, log=lambda _s: None, popen=popen,
+                                        signal_group=lambda proc, sig: proc.signal(sig))
+
+    def send(self, cmd):
+        return self.cmds.handle(json.dumps(cmd))
+
+    def run_hanging(self, cmd=None, **kw):
+        """A bagpick on a thread that runs until a signal ends it; the list gets its answer."""
+        self.proc, out = FakeProc(["scan left +0.00: bag area 900"], hang=True, **kw), []
+        th = threading.Thread(target=lambda: out.append(self.send(cmd or {"cmd": "bagpick"})), daemon=True)
+        th.start()
+        self.assertTrue(wait_until(lambda: self.cmds.bagpick is not None))
+        return th, out
+
+    def test_the_result_line_gives_ok_and_the_code(self):
+        cases = [(HOLDING, True, "HOLDING_BAG"),
+                 ('RESULT holding the bag (lift NOT verified by the Xtion) {"left": 0.1}', True, "HOLDING_BAG"),
+                 ("RESULT missed 4 times (bag not off the floor): it may be too far", False, "MISSED"),
+                 ("RESULT too far: the bag is beyond reach of the arm, move the robot closer", False, "TOO_FAR"),
+                 ("RESULT no bag in view", False, "NO_BAG"),
+                 ("RESULT lost the bag after a try (knocked over or pushed away?)", False, "LOST"),
+                 ("RESULT dancing", False, "FAILED")]
+        for line, ok, code in cases:
+            self.assertEqual(bag_arm.bagpick_result(["try 1: bearing +0.0 deg", line], 0), (ok, code, line), line)
+        self.assertEqual(bag_arm.bagpick_result([HOLDING, "put back"], 0), (True, "HOLDING_BAG", HOLDING))  # --putback
+        ok, code, msg = bag_arm.bagpick_result(["Traceback (most recent call last):", "RuntimeError: no webcam frame"], 1)
+        self.assertEqual((ok, code), (False, "FAILED"))
+        self.assertIn("exit 1", msg)
+        self.assertIn("no webcam frame", msg)
+        self.assertEqual(bag_arm.bagpick_result([], None)[:2], (False, "FAILED"))
+        self.assertEqual(bag_arm.bagpick_result(["  RESULT holding (indented, not its line)"], 0)[:2], (False, "FAILED"))
+
+    def test_it_runs_bagpick_in_the_arm_workspace_with_this_environment(self):
+        self.proc = FakeProc(["line %d" % i for i in range(25)] + [HOLDING, "put back"])
+        out = self.send({"cmd": "bagpick", "putback": True})
+        self.assertEqual((out["ok"], out["code"], out["message"], out["error"]), (True, "HOLDING_BAG", HOLDING, None))
+        self.assertEqual(len(out["tail"]), bag_arm.BAGPICK_TAIL)
+        self.assertEqual(out["tail"][-2:], [HOLDING, "put back"])
+        argv, kw = self.started[0]
+        self.assertEqual(argv, ["python3", "bagpick.py", "--putback"])
+        self.assertEqual(kw["cwd"], os.path.expanduser(bag_arm.BAGPICK_DIR))
+        self.assertEqual((kw["stderr"], kw["start_new_session"]), (subprocess.STDOUT, True))  # RESULT is on stderr
+        self.assertNotIn("env", kw)                    # HMC_CONSOLE_JOB from the agent passes its gate
+        self.proc = FakeProc(["RESULT no bag in view"], code=1)
+        out = self.send({"cmd": "bagpick"})
+        self.assertEqual(self.started[1][0], ["python3", "bagpick.py"])
+        self.assertEqual((out["ok"], out["code"]), (False, "NO_BAG"))
+        self.assertIn("RESULT no bag in view", out["error"])
+        self.assertFalse(self.send({"cmd": "state"})["busy"])
+        self.assertEqual(self.api.calls, [])           # nothing of the arm team's API is asked
+
+    def test_bad_putback_and_a_missing_workspace(self):
+        self.assertIn("putback", self.send({"cmd": "bagpick", "putback": "yes"})["error"])
+        self.proc = FileNotFoundError("no such directory")
+        out = self.send({"cmd": "bagpick"})
+        self.assertEqual((out["ok"], out["code"]), (False, "FAILED"))
+        self.assertIn("not started", out["error"])
+        self.assertEqual(len(self.started), 1)
+        self.assertIsNone(self.jobs.console)           # the claim is given back
+
+    def test_a_bag_job_and_bagpick_are_busy_both_ways_and_stop_ends_it(self):
+        th, out = self.run_hanging()
+        self.assertTrue(self.send({"cmd": "state"})["busy"])
+        self.assertEqual(self.send({"cmd": "pick_bag", "x": 0.31, "y": 0.0})["code"], "BUSY")
+        self.jobs.on_command(json.dumps({"action": "pick_bag", "params": {"x": 0.31, "y": 0.0}}))
+        self.assertEqual(self.arm.sent, ["grab_failed|BUSY|the console is moving the arm (bagpick)"])
+        self.assertIn("busy with bagpick", self.send({"cmd": "home"})["error"])
+        self.assertEqual(self.send({"cmd": "bagpick"})["code"], "BUSY")
+        self.assertTrue(self.send({"cmd": "stop"})["ok"])
+        th.join(10)
+        self.assertEqual(self.proc.signals, [signal.SIGINT])
+        self.assertEqual(self.api.calls, ["stop"])     # and /arm/stop, as before
+        self.assertEqual((out[0]["ok"], out[0]["code"]), (False, "STOPPED"))
+        self.assertEqual(out[0]["tail"], ["scan left +0.00: bag area 900"])
+        self.assertFalse(self.send({"cmd": "state"})["busy"])
+        self.assertEqual(len(self.started), 1)
+
+        gate = threading.Event()
+
+        def slow(name, timeout, **goal):
+            gate.wait(10)
+            return True, "SUCCESS", ""
+        self.arm.arm_task = slow
+        self.jobs.on_command(json.dumps({"action": "drop_bag", "params": {"x": 0.31, "y": 0.0}}))
+        out = self.send({"cmd": "bagpick"})
+        self.assertEqual((out["ok"], out["code"]), (False, "BUSY"))
+        self.assertIn("bag job", out["error"])
+        self.assertEqual(len(self.started), 1)         # never started
+        gate.set()
+        self.jobs.thread.join(10)
+
+    def test_stop_goes_on_to_sigterm_and_sigkill(self):
+        with mock.patch.object(bag_arm, "BAGPICK_STOP_STEPS", ((signal.SIGINT, 0.05), (signal.SIGTERM, 0.05))):
+            th, out = self.run_hanging(ignore=2)
+            self.send({"cmd": "stop"})
+            th.join(10)
+        self.assertEqual(self.proc.signals, [signal.SIGINT, signal.SIGTERM, bag_arm.KILL])
+        self.assertEqual(out[0]["code"], "STOPPED")
+
+    def test_a_run_past_its_timeout_is_killed(self):
+        with mock.patch.object(bag_arm, "BAGPICK_TIMEOUT", 0.2):
+            th, out = self.run_hanging()
+            th.join(10)
+        self.assertEqual(self.proc.signals, [bag_arm.KILL])
+        self.assertEqual((out[0]["ok"], out[0]["code"]), (False, "FAILED"))
+        self.assertIn("longer than", out[0]["error"])
+        self.assertEqual(bag_arm.BAGPICK_TIMEOUT, 300.0)
+        self.assertEqual(bag_arm.BAGPICK_DIR, "~/so100_ws")
 
 
 class GateTest(unittest.TestCase):

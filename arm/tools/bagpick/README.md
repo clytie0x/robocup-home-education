@@ -12,10 +12,19 @@ enough to keep the robot's front clear. They run on the Jetson next to the arm s
 
 ## Run
 
+Through the robot console (bag_arm on the Jetson runs it in `~/so100_ws` and answers with its RESULT line), on the Pi:
+
+```bash
+hmc-base/robotctl arm bagpick --putback   # pick, raise, then put the bag back (testing)
+hmc-base/robotctl arm bagpick             # pick and keep holding the bag high
+```
+
+or the Bagpick button on the console's Arm card. Started by hand it refuses to move the arm unless
+`HMC_MAINTENANCE=<reason>` is set for a repair (logged):
+
 ```bash
 cd ~/so100_ws
-python3 bagpick.py --putback      # pick, raise, then put the bag back (testing)
-python3 bagpick.py                # pick and keep holding the bag high
+HMC_MAINTENANCE="<reason>" python3 bagpick.py --putback
 ```
 
 Each step saves `bp_*.jpg` frames in the current folder. The last line printed starts with

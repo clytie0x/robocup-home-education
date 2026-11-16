@@ -23,7 +23,8 @@ Programs (run from this folder, ~/hmc-follow; the ROS ones with /opt/ros/jazzy a
                                    server (127.0.0.1:5607, see its docstring) and its answer back: 200 when it
                                    says ok, 409 when it refuses or fails, 503 when bag_arm.py does not answer,
                                    502 when it drops the line, 504 after ARM_TIMEOUT (center: home, a MoveIt move and the gripper)
-                                   or, for pick_bag and drop_bag (a whole bag job), ARM_JOB_TIMEOUT
+                                   or, for pick_bag and drop_bag (a whole bag job), ARM_JOB_TIMEOUT, for bagpick
+                                   (the arm team's camera pick) ARM_BAGPICK_TIMEOUT
   GET  /arm                        {"cmd": "state"}'s answer: /arm/state, the joints (rad), "busy"
 
 GET /status (the robot console shows it; base/pi/telemetry.py stores the metrics). Every metric is a
@@ -117,6 +118,7 @@ HOLD_SETTLE = 0.3  # s for the bridge (a 50 ms timer) to pass the wait on
 ARM_CMD_PORT = ports.ARM_CMD  # bag_arm.py's command server (TCP 127.0.0.1)
 ARM_TIMEOUT = 90.0  # s: bag_arm's center takes at most 30 + 45 + 10 s
 ARM_JOB_TIMEOUT = 240.0  # s for pick_bag and drop_bag: home 60 + pick 150 + the camera looks (the flow's grab_timeout)
+ARM_BAGPICK_TIMEOUT = 330.0  # s for bagpick: bag_arm's BAGPICK_TIMEOUT 300 + its kill and answer
 UP_WAIT = 60.0  # s start-all waits for the detector's port (the TensorRT engines take a while)
 SETTLE = 3.0  # s start-all waits after a program without a port, before the next
 
@@ -302,7 +304,9 @@ def send_hold(port=HOLD_PORT, settle=HOLD_SETTLE):
 def arm_command(body, port=ARM_CMD_PORT, timeout=None):
     """(http code, answer) of one command sent to bag_arm.py's command server (timeout None: the command's own)."""
     if timeout is None:
-        timeout = ARM_JOB_TIMEOUT if body.get("cmd") in ("pick_bag", "drop_bag") else ARM_TIMEOUT
+        cmd = body.get("cmd")
+        timeout = (ARM_BAGPICK_TIMEOUT if cmd == "bagpick" else ARM_JOB_TIMEOUT if cmd in ("pick_bag", "drop_bag")
+                   else ARM_TIMEOUT)
     try:
         s = socket.create_connection(("127.0.0.1", port), 2.0)
     except OSError as error:  # refused, or on Windows a refused localhost connect that times out

@@ -585,6 +585,18 @@ class ArmRelayTest(unittest.TestCase):
         self.assertLess(took["center"], 0.7)
         self.assertGreaterEqual(min(took["pick_bag"], took["drop_bag"]), 0.75)
 
+    def test_bagpick_gets_the_longest_timeout(self):
+        from unittest import mock
+        self.assertGreaterEqual(agent.ARM_BAGPICK_TIMEOUT, 300.0 + 10.0)  # bag_arm's BAGPICK_TIMEOUT and its kill
+        with socket.socket() as s, mock.patch.object(agent, "ARM_JOB_TIMEOUT", 0.2),                 mock.patch.object(agent, "ARM_BAGPICK_TIMEOUT", 0.8):
+            s.bind(("127.0.0.1", 0))
+            s.listen(4)
+            t0 = time.monotonic()
+            self.assertEqual(agent.arm_command({"cmd": "bagpick", "putback": True}, s.getsockname()[1])[0], 504)
+            took = time.monotonic() - t0
+        self.assertGreaterEqual(took, 0.75)
+        self.assertLess(took, 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

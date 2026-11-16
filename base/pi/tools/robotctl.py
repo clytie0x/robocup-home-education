@@ -8,6 +8,7 @@
   robotctl run follow|wait|resume|return|stop|bag|bag_again|bag_near
   robotctl arm home|rest|center|stop|state | arm torque on|off
   robotctl arm pick [X Y [TOP YAW]] | arm drop X Y   robot frame m, rad; a pick without X Y: the run's reached bag
+  robotctl arm bagpick [--putback]                  the arm team's camera pick of the bag in front (up to 300 s)
   robotctl fetch                                    run bag_near, wait for the bag (FETCH_S), then arm pick
   robotctl jetson start|stop|restart NAME | jetson start-all|stop-all
 
@@ -63,6 +64,8 @@ def request(argv, who="local"):
         body = {"cmd": "pick_bag" if rest[0] == "pick" else "drop_bag"}
         body.update(zip(("x", "y", "top", "yaw"), map(float, rest[1:])))
         return "POST", "/api/arm", body
+    if cmd == "arm" and rest in (["bagpick"], ["bagpick", "--putback"]):
+        return "POST", "/api/arm", {"cmd": "bagpick", "putback": len(rest) == 2}
     if cmd == "jetson" and len(rest) == 2 and rest[0] in JETSON:
         return "POST", "/api/jetson/" + rest[0], {"name": rest[1]}
     if cmd == "jetson" and len(rest) == 1 and rest[0] in ("start-all", "stop-all"):
@@ -81,7 +84,7 @@ def headers(who, pin_file=PIN_FILE):
     return out
 
 
-def send(method, path, body, heads, base=CONSOLE, timeout=260.0):  # a pick: the console answers within 245 s
+def send(method, path, body, heads, base=CONSOLE, timeout=350.0):  # a bagpick: the console answers within 335 s
     """(HTTP code, JSON answer). OSError when the console does not answer."""
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(base + path, data, heads, method=method)

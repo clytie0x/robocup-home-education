@@ -13,7 +13,10 @@
 #   base/tools/deploy.sh --arm [--arm-ref arm-system]
 #                                        also the arm packages (branch arm-system, arm/so100_*, API.md, README.md)
 #                                        -> Jetson ~/so100_ws/src, then colcon build of the three packages; the
-#                                        running arm stack keeps the old code until it is restarted
+#                                        running arm stack keeps the old code until it is restarted; and
+#                                        arm/tools/bagpick/{bagpick,bagvision,gcam}.py -> ~/so100_ws (the console's
+#                                        arm bagpick runs them there), backed up first to
+#                                        ~/so100_ws/backups/deploy-<time>-bagpick.tar.gz
 #
 # What goes where (as before 2026-11-15):
 #   Pi      hmc/src/hmc -> ~/hmc-base/hmc, base/pi -> ~/hmc-base, base/params.json -> ~/hmc-base/params.json,
@@ -106,11 +109,11 @@ VERSION=$(printf '{"commit": "%s", "describe": "%s", "branch": "%s", "deployed":
   "$COMMIT" "$(git describe --always "$COMMIT")" "$BRANCH" "$(date -Iseconds)")
 
 # One host's file set: "<git tree path>=<subfolder of the host folder>" pairs, plus single files.
-backup() { # <host> <folder>; the file list on stdin (paths relative to the folder)
-  local host=$1 dir=$2
+backup() { # <host> <folder> [<name suffix>]; the file list on stdin (paths relative to the folder)
+  local host=$1 dir=$2 name=deploy-$STAMP${3:-}.tar.gz
   ssh "$host" "cd ~/$dir && mkdir -p backups && files=\$(while read -r f; do [ -e \"\$f\" ] && echo \"\$f\"; done; \
     if [ -e VERSION.json ]; then echo VERSION.json; fi) && n=\$(printf '%s\n' \"\$files\" | grep -c . || true) && \
-    printf '%s\n' \"\$files\" | tar -czf backups/deploy-$STAMP.tar.gz -T - && echo \"$host: backed up \$n files to $dir/backups/deploy-$STAMP.tar.gz\""
+    printf '%s\n' \"\$files\" | tar -czf backups/$name -T - && echo \"$host: backed up \$n files to $dir/backups/$name\""
 }
 send() { # <host> <folder> <git tree path> <subfolder>
   # autocrlf off: git archive of a subtree does not see the root .gitattributes, and on Windows it would
@@ -194,6 +197,9 @@ if [ $ARM = 1 ]; then  # the arm packages from their own branch; calibration and
     git -c core.autocrlf=false -c core.eol=lf archive --format=tar "$ARM_COMMIT:arm/$d" | ssh "$JETSON" "mkdir -p ~/so100_ws/src/$d && tar -C ~/so100_ws/src/$d -xf -"
   done
   for f in API.md README.md; do git show "$ARM_COMMIT:arm/$f" | ssh "$JETSON" "cat > ~/so100_ws/src/$f"; done
+  # bagpick's three files sit in the workspace root (arm/tools/bagpick/README.md); its gcam.py is the one there
+  printf '%s\n' bagpick.py bagvision.py gcam.py | backup "$JETSON" so100_ws -bagpick
+  for f in bagpick.py bagvision.py gcam.py; do git show "$ARM_COMMIT:arm/tools/bagpick/$f" | ssh "$JETSON" "cat > ~/so100_ws/$f"; done
   printf '{"commit": "%s", "describe": "%s", "branch": "%s", "deployed": "%s"}' "$ARM_COMMIT"     "$(git describe --always "$ARM_COMMIT")" "$ARM_REF" "$(date -Iseconds)" | ssh "$JETSON" "cat > ~/so100_ws/src/VERSION.json"
   ssh "$JETSON" 'source /opt/ros/jazzy/setup.bash && cd ~/so100_ws && colcon build --symlink-install --packages-select so100_interfaces so100_driver so100_moveit_config 2>&1 | tail -4'
 fi

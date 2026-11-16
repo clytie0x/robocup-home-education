@@ -221,6 +221,31 @@ class ControlTest(unittest.TestCase):
         self.assertEqual(self.request("/api/arm", {"cmd": "pick_bag", "x": 0.3, "y": 0.0})[0], 503)
         self.assertEqual(len(self.agent.posts), 1)
 
+    def test_bagpick_waits_for_the_whole_run_with_the_pick_rules(self):
+        code, body = self.request("/api/arm", {"cmd": "bagpick"})
+        self.assertEqual((code, body["sent"]), (200, {"cmd": "bagpick", "putback": False}))
+        self.assertEqual(self.request("/api/arm", {"cmd": "bagpick", "putback": True})[0], 200)
+        self.assertEqual(self.request("/api/arm", {"cmd": "bagpick", "putback": "yes"})[0], 400)
+        self.assertEqual(self.request("/api/arm", {"cmd": "bagpick"}, pin=None)[0], 401)
+        self.assertEqual(self.agent.posts[1], {"cmd": "bagpick", "putback": True})
+        self.assertEqual(self.agent.timeouts, [console.ARM_BAGPICK_TIMEOUT] * 2)
+        self.assertGreaterEqual(console.ARM_BAGPICK_TIMEOUT, 330.0)  # the agent's ARM_BAGPICK_TIMEOUT
+        self.console.fetch = run = FakeRun()
+        self.jobs.running = {"kind": "task", "label": "Drive task"}
+        run.record = {"phase": "bag", "bag_task": {"state": "creep", "result": None}}
+        code, body = self.request("/api/arm", {"cmd": "bagpick"})
+        self.assertEqual(code, 409)
+        self.assertIn("moving the base", body["error"])
+        run.record = {"phase": "follow", "bag_task": {"state": "reached", "result": None}}
+        self.assertEqual(self.request("/api/arm", {"cmd": "bagpick"})[0], 200)  # a task runs: allowed
+        run.down = True
+        self.assertEqual(self.request("/api/arm", {"cmd": "bagpick"})[0], 503)
+        self.assertEqual(len(self.agent.posts), 3)
+        self.jobs.running = None
+        self.console.hold = {"who": "deploy", "since": 0.0}
+        self.assertEqual(self.request("/api/arm", {"cmd": "bagpick"})[0], 409)
+        self.assertEqual(len(self.agent.posts), 3)
+
     def test_stop_stops_the_arm_too_and_the_base_without_the_agent(self):
         code, body = self.request("/api/stop", {}, pin=None, page=False)
         self.assertEqual((code, body["error"], body["arm"]), (200, None, "arm stopped"))
@@ -356,6 +381,8 @@ class RobotctlTest(unittest.TestCase):
             (["arm", "pick", "0.31", "0", "0.27", "-0.5"],
              ("POST", "/api/arm", {"cmd": "pick_bag", "x": 0.31, "y": 0.0, "top": 0.27, "yaw": -0.5})),
             (["arm", "drop", "0.3", "-0.1"], ("POST", "/api/arm", {"cmd": "drop_bag", "x": 0.3, "y": -0.1})),
+            (["arm", "bagpick"], ("POST", "/api/arm", {"cmd": "bagpick", "putback": False})),
+            (["arm", "bagpick", "--putback"], ("POST", "/api/arm", {"cmd": "bagpick", "putback": True})),
         ]
         for argv, want in cases:
             self.assertEqual(robotctl.request(argv, who="me"), want, argv)
@@ -363,7 +390,8 @@ class RobotctlTest(unittest.TestCase):
                      ["arm", "torque"], ["arm", "wave"], ["jetson", "start"], ["log", "x"], ["state", "extra"],
                      ["task", "dry", "0.08", "2", "--other", "1.2.3.4"], ["arm", "pick", "0.3"],
                      ["arm", "pick", "0.3", "0", "0.27"], ["arm", "drop"], ["arm", "drop", "x", "0"],
-                     ["task", "drop", "1", "2"], ["run", "bag_far"]):
+                     ["task", "drop", "1", "2"], ["run", "bag_far"], ["arm", "bagpick", "--hold"],
+                     ["arm", "bagpick", "--putback", "x"], ["arm", "--putback"]):
             with self.assertRaises(ValueError, msg=argv):
                 robotctl.request(argv)
 
