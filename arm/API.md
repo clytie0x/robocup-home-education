@@ -164,6 +164,10 @@ ros2 run so100_driver arm_cli place 0.28 0.0
 
 **สั่งแขนได้ทีละโปรแกรม:** ระหว่างที่ trajectory ของแขนกำลังวิ่ง driver ปฏิเสธ goal `FollowJointTrajectory` จากโปรแกรมอื่น (error_string `arm busy: another program has it`) ยกเว้น goal ของ `so100_pick_place` เอง โปรแกรมดูจาก `trajectory.header.frame_id` (MoveIt ใส่ `base` สคริปต์ส่วนใหญ่ใส่ว่าง)
 
+**ต้องสั่งผ่านคอนโซล:** `ArmClient(node)` และ `arm_cli` ปฏิเสธ (`RuntimeError: REFUSED: ...`) ถ้าคอนโซลของหุ่นไม่ได้เปิดโปรแกรมนั้น
+(`HMC_CONSOLE_JOB` หรือ `HMC_CONSOLE=1`) ซ่อมด้วยมือให้ตั้ง `HMC_MAINTENANCE=<เหตุผล>` (บันทึกลง `~/hmc-follow/logs/commands.jsonl`)
+ดู README.md ส่วนต้น ตัว action/service `/arm/*` เองไม่ได้ถูกกั้น
+
 ## ตัวอย่างจาก terminal
 ```
 ros2 topic echo /arm/state

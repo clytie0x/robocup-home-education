@@ -31,6 +31,8 @@ from std_srvs.srv import SetBool, Trigger
 from so100_interfaces.action import Home, Pick, PickBag, PickPlace, Place, Rest
 from so100_interfaces.msg import ArmState
 
+from . import console_gate
+
 PAN_AXIS = (0.0, -0.0452)      # arm pan axis in the base frame (URDF); "forward" = base -y
 FLOOR_Z = -0.331               # floor below the arm base with the arm on the robot (launch floor_z)
 
@@ -56,6 +58,7 @@ def make_pose(where, yaw=None, frame='base'):
 
 class ArmClient:
     def __init__(self, node):
+        console_gate.require(f'ArmClient in {node.get_name()}')  # arm_cli, api_selftest, camera_test
         self.node = node
         cb = ReentrantCallbackGroup()
         self._actions = {name: ActionClient(node, kind, f'/arm/{name}', callback_group=cb)

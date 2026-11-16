@@ -12,7 +12,7 @@ import math
 import sys
 import time
 
-from . import feetech as ft
+from . import console_gate, feetech as ft
 from .calib import DEFAULT_PATH, IDS, JOINTS, Calibration
 
 PORT = '/dev/serial/by-id/usb-1a86_USB_Single_Serial_58FA093250-if00'
@@ -141,6 +141,7 @@ def main():
     args = sys.argv[1:]
     if not args or args[0] not in ('status', 'release', 'zero', 'sweep', 'flip'):
         sys.exit(__doc__)
+    console_gate.require(f'calibrate {args[0]}')
     if args[0] == 'flip':
         cal = load()
         name = args[1] if len(args) > 1 else ''
