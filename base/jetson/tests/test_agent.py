@@ -1,6 +1,7 @@
 import json
 import os
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -338,11 +339,18 @@ class TaskProgramsTest(unittest.TestCase):
     """The programs start-all runs for the whole task, in the order each needs the one before."""
 
     def test_start_all_order(self):
-        self.assertEqual(agent.ORDER, ["detector", "whisper", "voice", "bridge", "armstack", "arm", "flow"])
+        self.assertEqual(agent.ORDER, ["detector", "whisper", "voice", "bridge", "armstack", "webcam", "arm", "flow"])
         self.assertIn("armstack", agent.SHARED)  # the arm stack started by hand before 2026-11-15 is used as it is
+        self.assertIn("webcam", agent.SHARED)  # a hand-started webcam_view already holds 8082 and /dev/video0
         self.assertIn("arm.launch.py mount:=robot", agent.PROGRAMS["armstack"][0])
         self.assertEqual(list(agent.PROGRAMS), agent.ORDER)
         self.assertEqual(set(agent.SCRIPTS) | set(agent.EXECUTABLES), set(agent.ORDER))
+
+    def test_webcam_runs_the_arm_teams_view_before_bag_arm(self):
+        cmd, ros, port = agent.PROGRAMS["webcam"]
+        self.assertEqual((ros, port), (False, 8082))  # bag_arm and the console read :8082/snap.jpg
+        self.assertIn("webcam_view.py", cmd)
+        self.assertLess(agent.ORDER.index("webcam"), agent.ORDER.index("arm"))
 
     def test_whisper_runs_the_server_of_servers_sh_in_the_foreground(self):
         cmd, ros, port = agent.PROGRAMS["whisper"]
@@ -473,6 +481,87 @@ class HttpTest(unittest.TestCase):
         code, body = self.post(base + "/start", {"name": "flow"})
         self.assertEqual(code, 403)
         self.assertIn("console", body["error"])
+        self.assertEqual(self.post(base + "/arm", {"cmd": "home"})[0], 403)
+
+
+class FakeBagArm:
+    """bag_arm.py's command server: answers each JSON line with `answer(cmd)`, records what came."""
+
+    def __init__(self, answer):
+        self.got = []
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(4)
+        self.port = self.sock.getsockname()[1]
+        self.answer = answer
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn, conn.makefile("rwb") as f:
+                cmd = json.loads(f.readline())
+                self.got.append(cmd)
+                f.write((json.dumps(self.answer(cmd)) + "\n").encode())
+                f.flush()
+
+    def close(self):
+        self.sock.close()
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class ArmRelayTest(unittest.TestCase):
+    def serve(self, arm_port):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        a = agent.Agent({}, logs=Path(tmp.name), find_outside=lambda ours: {}, arm_port=arm_port)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), agent.handler_for(a, ("127.0.0.1",)))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return "http://127.0.0.1:%d" % server.server_address[1]
+
+    def test_post_and_get_arm_go_to_bag_arm(self):
+        fake = FakeBagArm(lambda cmd: {"ok": cmd["cmd"] != "center", "error": None if cmd["cmd"] != "center"
+                                       else "a bag job is running", "busy": False})
+        self.addCleanup(fake.close)
+        base = self.serve(fake.port)
+        code, body = HttpTest.post(None, base + "/arm", {"cmd": "torque", "on": True})
+        self.assertEqual((code, body["ok"]), (200, True))
+        code, body = HttpTest.post(None, base + "/arm", {"cmd": "center"})
+        self.assertEqual((code, body["error"]), (409, "a bag job is running"))
+        with urllib.request.urlopen(base + "/arm", timeout=5) as r:
+            self.assertEqual(json.load(r)["busy"], False)
+        self.assertEqual(fake.got, [{"cmd": "torque", "on": True}, {"cmd": "center"}, {"cmd": "state"}])
+
+    def test_no_bag_arm_is_a_clear_error(self):
+        base = self.serve(free_port())
+        code, body = HttpTest.post(None, base + "/arm", {"cmd": "home"})
+        self.assertEqual(code, 503)
+        self.assertIn("bag_arm.py is not answering", body["error"])
+        try:
+            urllib.request.urlopen(base + "/arm", timeout=5)
+            self.fail("GET /arm answered without bag_arm")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 503)
+
+    def test_a_silent_bag_arm_times_out(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            code, body = agent.arm_command({"cmd": "center"}, s.getsockname()[1], timeout=0.3)
+        self.assertEqual(code, 504)
+        self.assertIn("did not answer", body["error"])
+        self.assertEqual(agent.ARM_CMD_PORT, 5607)
+        self.assertGreaterEqual(agent.ARM_TIMEOUT, 85.0)
 
 
 if __name__ == "__main__":

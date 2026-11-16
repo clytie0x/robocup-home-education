@@ -23,25 +23,19 @@ BASH = shutil.which("bash")
 
 
 class Scripts(unittest.TestCase):
-    def test_a_drive_runs_under_safe_run_with_the_virtual_operator(self):
+    def test_a_drive_starts_through_robotctl_with_the_virtual_operator(self):
         script = remote.start_script(DRIVE, "192.168.31.50", 5610)
-        self.assertIn(".venv/bin/python tools/safe_run.py .venv/bin/python run_follow.py --drive --seconds 300"
-                      " --max-speed 0.12 --remote --dashboard-host 127.0.0.1 --virtual-operator 5610"
-                      " --virtual-allow 192.168.31.50", script)
-        self.assertIn("setsid ", script)
-        self.assertIn("< /dev/null &", script)
-        self.assertIn("echo $! > logs/virtual/run.pid", script)
+        self.assertIn("./robotctl --who virtual-operator task drive 0.12 5 --virtual 192.168.31.50", script)
 
-    def test_a_dry_run_has_no_drive_and_no_safe_run(self):
-        script = remote.start_script(DRY, "192.168.31.50", 5610)
-        self.assertNotIn("--drive", script)
-        self.assertNotIn("safe_run", script)
+    def test_a_dry_run(self):
+        self.assertIn("task dry 0.08 10 --virtual", remote.start_script(DRY, "192.168.31.50", 5610))
 
-    def test_through_the_console_when_it_runs_with_the_pin_read_on_the_pi(self):
-        script = remote.start_script(DRY, "192.168.31.50", 5610)
-        self.assertIn("cat ~/.config/hmc-console-pin", script)
-        self.assertIn('"virtual": true', script)
-        self.assertIn('"virtual_host": "192.168.31.50"', script)
+    def test_only_through_the_console_never_run_follow_itself(self):
+        # the PIN stays on the Pi: robotctl reads it there
+        for script in (remote.start_script(DRIVE, "10.0.0.5", 5610), remote.stop_script()):
+            for word in ("run_follow", "safe_run", "setsid", "run.pid", "hmc-console-pin", "kill ", "pkill"):
+                self.assertNotIn(word, script)
+        self.assertIn("./robotctl --who virtual-operator stop", remote.stop_script())
 
     def test_bad_settings_never_reach_the_shell(self):
         for settings, pc in ((dict(DRY, speed=0.5), "192.168.31.50"), (dict(DRY, minutes=999), "192.168.31.50"),
@@ -49,14 +43,18 @@ class Scripts(unittest.TestCase):
             with self.assertRaises((ValueError, OSError)):
                 remote.start_script(settings, pc, 5610)
 
-    def test_nothing_is_killed_by_a_name_pattern(self):
-        for script in (remote.start_script(DRIVE, "10.0.0.5", 5610), remote.stop_script(), remote.last_record_script()):
-            for word in ("pkill", "pgrep", "killall", "kill -9 $(", "ps "):
-                self.assertNotIn(word, script)
-        stop = remote.stop_script()
-        self.assertIn('kill -TERM -- "-$PID"', stop)  # the process group from the pid file
-        self.assertLess(stop.index("/api/stop"), stop.index("kill -TERM"))  # STOP and the run's own end first
-        self.assertLess(stop.index('{"end": true}'), stop.index("kill -TERM"))
+    @unittest.skipIf(BASH is None, "no bash here")
+    def test_robotctls_answer_or_its_error_comes_back_as_one_line(self):
+        with tempfile.TemporaryDirectory() as home:
+            tool = Path(home) / "hmc-base" / "robotctl"
+            tool.parent.mkdir()
+            for body, want in (('echo \'{"error": null}\'', 'CONSOLE {"error": null}'),
+                               ('echo \'{"error": "held"}\'; echo held >&2; exit 1', "ERROR held")):
+                tool.write_bytes(("#!/bin/sh\n%s\n" % body).encode())
+                tool.chmod(0o755)
+                done = subprocess.run([BASH, "-c", 'HOME="$1" bash -s', "-", home], input=remote.stop_script().encode(),
+                                      capture_output=True)
+                self.assertEqual(done.stdout.decode().strip(), want, done.stderr)
 
     @unittest.skipIf(BASH is None, "no bash here")
     def test_the_scripts_are_valid_bash(self):
@@ -78,7 +76,7 @@ class FakeRun:
 
 class SshTest(unittest.TestCase):
     def test_the_lab_wifi_first_then_tailscale(self):
-        run = FakeRun([(255, ""), (0, "STARTED 4242 logs/virtual/x.log\n")])
+        run = FakeRun([(255, ""), (0, "CONSOLE {\"error\": null}\n")])
         ssh = remote.Ssh(run=run)
         self.assertIsNone(ssh.start(DRY, "192.168.31.50", 5610))
         self.assertEqual([c[0][-3] for c in run.calls], ["xohm@192.168.31.21", "xohm@100.73.128.36"])
@@ -88,7 +86,7 @@ class SshTest(unittest.TestCase):
 
     def test_the_script_goes_as_lf_bytes(self):
         # text mode on Windows turned \n into \r\n and bash read "set -u\r" (2026-11-16)
-        run = FakeRun([(0, "STARTED 4242 logs/virtual/x.log\n")])
+        run = FakeRun([(0, "CONSOLE {\"error\": null}\n")])
         remote.Ssh(run=run).start(DRY, "10.0.0.5", 5610)
         sent = run.calls[0][1]
         self.assertIsInstance(sent, bytes)
@@ -96,9 +94,11 @@ class SshTest(unittest.TestCase):
 
     def test_the_answers(self):
         cases = [("CONSOLE {\"error\": null}\n", None), ("CONSOLE {\"error\": \"busy\"}\n", "busy"),
-                 ("ERROR a virtual operator run is already running (pid 7)\n", "a virtual operator run is already running (pid 7)")]
+                 ("ERROR the console does not answer on http://127.0.0.1:8081\n",
+                  "the console does not answer on http://127.0.0.1:8081")]
         for out, want in cases:
             self.assertEqual(remote.Ssh(run=FakeRun([(0, out)])).start(DRY, "10.0.0.5", 5610), want)
+            self.assertEqual(remote.Ssh(run=FakeRun([(0, out)])).stop(), want)  # STOP answers the same way
 
     def test_the_end_from_the_newest_log(self):
         line = json.dumps({"time": 1.0, "stop": None, "end": "done: back at the start"})

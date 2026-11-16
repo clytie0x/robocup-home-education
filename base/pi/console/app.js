@@ -15,7 +15,7 @@ const PROGRAM_TEXT = {
   flow: "ลำดับงาน รับเสียง พูด และสถานะ (hmc_flow.py)",
 };
 const PROGRAM_NAME = { detector: "ตรวจจับคน", whisper: "ฟังเสียง", voice: "เสียง", bridge: "สะพาน",
-  armstack: "ระบบแขน", arm: "งานแขน", flow: "HmcFlow" };
+  armstack: "ระบบแขน", webcam: "กล้องแขน", arm: "งานแขน", flow: "HmcFlow" };
 const PHASE_TEXT = { idle: "รอ Follow", follow: "กำลังตามคน", return: "กำลังกลับ", done: "เสร็จแล้ว" };
 const ACT_TEXT = { start: "เปิด", stop: "ปิด", restart: "เปิดใหม่" };
 const STOP_TEXT = { // run_follow's stop reasons

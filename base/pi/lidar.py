@@ -4,6 +4,7 @@
 import math
 import time
 
+import console_gate
 import params
 
 LIDAR_PORT = "/dev/rct_ahr_lidar"
@@ -155,6 +156,7 @@ class LidarSession:
 
     def __init__(self, port=LIDAR_PORT, handle=None, clock=time.monotonic):
         if handle is None:
+            console_gate.require("lidar")
             import serial
 
             handle = serial.Serial(port, 230400, timeout=0.05, exclusive=True)
@@ -189,6 +191,7 @@ class LidarSession:
 
 
 def read_scan(port=LIDAR_PORT, seconds=1.2):
+    console_gate.require("lidar")
     import serial
 
     handle = serial.Serial(port, 230400, timeout=0.05, exclusive=True)

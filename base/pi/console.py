@@ -51,6 +51,7 @@ HERE = Path(__file__).resolve().parent
 TOOLS = HERE / "tools"
 sys.path.insert(0, str(TOOLS))  # camera_view (Latest, Scan, jpeg_of, relay)
 import camera_view  # noqa: E402
+import console_gate  # noqa: E402
 
 try:  # the telemetry database (base/pi/telemetry.py) for the Data tab and the power bank estimate
     import telemetry
@@ -84,7 +85,14 @@ FILES = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
 COMMANDS = ("follow", "wait", "resume", "return")
-NO_PIN = ("/api/stop", "/api/bank/full", "/api/bank/reading")  # STOP, and the owner's battery marks
+NO_PIN = ("/api/stop", "/api/arm/stop", "/api/bank/full", "/api/bank/reading")  # STOPs, and the owner's battery marks
+CLIENT = re.compile(r"^[\w.@:%-]{1,64}$")  # a program's name (X-HMC-Client), e.g. robotctl's "xohm@192.168.31.50"
+ARM_CMDS = ("home", "rest", "center", "torque")
+ARM_TIMEOUT = 95.0  # s: the agent answers an arm command when it is done, within its own ARM_TIMEOUT (90 s)
+ARM_STOP_WAIT = 0.5  # s STOP's answer waits for the arm's stop; the base's stop is already under way
+COMMANDS_MAX = 200  # lines GET /api/commands gives at most
+HELD = ("the console is held by %s (a deploy or a repair): no starts, arm moves or Jetson start/stop until"
+        " robotctl release (STOP still works)")
 MAX_BODY = 65536  # bytes of a POST body
 SESSION = re.compile(r"^[0-9a-f]{32}$")  # a page tab's token (X-HMC-Session), from its first command
 WHEEL_TEST_EVERY = 10.0  # s at least between two wheel tests
@@ -139,14 +147,82 @@ def _one_computer(address):
     return not (a.is_unspecified or a.is_multicast or address.endswith(".255"))
 
 
-def check_command(name, py=sys.executable):
-    """(argv, label, moves) for a check, or None."""
+ARG_KINDS = {"number": re.compile(r"^\d+(\.\d+)?$"), "signed": re.compile(r"^-?\d+(\.\d+)?$"),
+             "speed": re.compile(r"^\d+(\.\d+)?$"), "side": re.compile(r"^(right|left)$")}
+# The tools the console runs as checks by name: (moves, positional kinds, {option: kind}). A "speed" is m/s and never
+# above params.json max_speed. Paths (--out, --avoid, --state, after-base-check) and the ladder's limit raisers
+# (--max-turn-rate, --linear-scale) are left out: those stay tools for a person at the robot; air_check (raw packets) too.
+TOOL_CHECKS = {
+    "base_check": (True, [], {"--line": "speed", "--turn": "signed", "--metres": "number", "--degrees": "number",
+                              "--max-speed": "speed", "--velocity-loop": "flag", "--yes-owner-at-robot": "flag"}),
+    "approach": (True, [], {"--to": "number", "--yes-close-approach": "flag"}),
+    "back_up": (True, [], {"--metres": "number", "--yes-back-up": "flag"}),
+    "lap_check": (True, [], {"--seconds": "number", "--yes-floor-run": "flag"}),
+    "walk_check": (False, [], {"--seconds": "number"}),
+}
+TETHER = {  # tether_run's subcommands: (positional kinds, {option: kind}); every one runs under safe_run
+    "init": ([], {"--length": "number"}), "turn": (["signed"], {}),
+    "line": (["number"], {"--speed": "speed", "--back-up-if-blocked": "flag"}),
+    "uturn": (["side"], {}), "precheck-line": (["number", "speed"], {})}
+PRESENCE = "%s says a person is at the robot: only the console's page may send it, never a program"
+
+
+def tool_args(args, positional, options, max_speed, page):
+    """Checks one tool's arguments against its allow-list; ValueError names the one refused."""
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        raise ValueError("args must be a list of strings")
+    left, i = list(positional), 0
+    while i < len(args):
+        if args[i].startswith("--"):
+            name, eq, value = args[i].partition("=")
+            kind = options.get(name)
+            if kind is None:
+                raise ValueError("%s is not allowed through the console" % name)
+            if name.startswith("--yes-") and not page:
+                raise ValueError(PRESENCE % name)
+            if kind == "flag":
+                if eq:
+                    raise ValueError("%s takes no value" % name)
+                i += 1
+                continue
+            if not eq:
+                i += 1
+                if i == len(args):
+                    raise ValueError("%s needs a value" % name)
+                value = args[i]
+        elif left:
+            name, kind, value = "argument", left.pop(0), args[i]
+        else:
+            raise ValueError("%r is not allowed through the console" % args[i])
+        if not ARG_KINDS[kind].match(value):
+            raise ValueError("%s: %r is not a %s" % (name, value, "plain number" if kind != "side" else "right or left"))
+        if kind == "speed" and float(value) > max_speed + 1e-9:
+            raise ValueError("%s %s m/s is above max_speed %.2f in params.json" % (name, value, max_speed))
+        i += 1
+
+
+def check_command(name, py=sys.executable, args=(), max_speed=0.0, page=True):
+    """(argv, label, moves) for a check, or None for an unknown name; ValueError for arguments it does not allow.
+    page: sent from the console's own page (a person pressed it), not by a program."""
     guard = [py, str(TOOLS / "job_guard.py")]
+    if name in ("wheel", "floor") and args:
+        raise ValueError("the %s check takes no arguments" % name)
     if name == "wheel":
         return guard + [py, str(TOOLS / "safe_run.py"), py, str(TOOLS / "wheel_test.py")], "ทดสอบล้อ", True
     if name == "floor":
         return guard + [py, str(TOOLS / "sensor_check.py"), "--floor"], "ตรวจมุมกล้อง", False
-    return None
+    if name == "tether_run":
+        if not isinstance(args, list) or not args or not isinstance(args[0], str) or args[0] not in TETHER:
+            raise ValueError("tether_run takes one of %s" % ", ".join(TETHER))
+        moves, (positional, options), rest = True, TETHER[args[0]], args[1:]
+    elif isinstance(name, str) and name in TOOL_CHECKS:
+        moves, positional, options = TOOL_CHECKS[name]
+        rest = args
+    else:
+        return None
+    tool_args(rest, positional, options, max_speed, page)
+    run = [py, str(TOOLS / (name + ".py"))] + list(args)
+    return guard + ([py, str(TOOLS / "safe_run.py")] if moves else []) + run, " ".join([name] + list(args)), moves
 
 
 def signal_group(proc, hard):
@@ -266,7 +342,8 @@ class Jobs:
                 if self._cancelled(started):
                     raise _Refused("STOP was pressed while %s was starting: not started" % label)
                 proc = self.popen(cmd, cwd=str(HERE), stdin=subprocess.DEVNULL, stdout=out,
-                                  stderr=subprocess.STDOUT, env=dict(os.environ, PYTHONUNBUFFERED="1"), **group)
+                                  stderr=subprocess.STDOUT, env=dict(os.environ, PYTHONUNBUFFERED="1",
+                                                                     **{console_gate.ENV: path.stem}), **group)
                 self.proc = proc
                 self.stopped, self.hurry = threading.Event(), threading.Event()
                 self.job = {"kind": kind, "label": label, "info": info or {}, "pid": proc.pid, "log": str(path),
@@ -779,6 +856,23 @@ class Jetson:
             return code, body
         return 502, {"error": last}
 
+    def arm(self, body=None, timeout=None):
+        """(code, body) of the agent's GET /arm, or its POST /arm with body. A command goes to the next address only
+        when this one could not be reached: one sent and not answered in time is never sent a second time."""
+        last = "the Jetson does not answer"
+        for host in self.order():
+            try:
+                code, answer = self.fetch("http://%s:%d/arm" % (host, AGENT_PORT), body,
+                                          timeout=timeout or (2.0 if body is None else ARM_TIMEOUT))
+            except urllib.error.URLError as error:  # no connection: the command was never sent
+                last = "no answer from agent.py on %s (%s)" % (host, error.reason)
+                continue
+            except (OSError, ValueError) as error:
+                return 504, {"error": "agent.py on %s did not answer in time (%s)" % (host, error)}
+            self.host = host
+            return code, answer
+        return 502, {"error": last}
+
     def webcam_url(self):
         return "http://%s:%d/stream" % (self.host or self.hosts[0], WEBCAM_PORT)
 
@@ -1114,6 +1208,7 @@ class Console:
         self.guard = threading.Lock()  # the PIN lockout and the data query count
         self.pin_fails, self.pin_locked_until, self.pin_lock_s = 0, None, PIN_LOCK_S
         self.data_running = 0  # /api/data/* queries now
+        self.hold = None  # {"who", "since"} while a deploy or a repair holds the console; a restart clears it
         self.db_path = Path(db_path) if db_path is not None else (
             telemetry.DB_PATH if telemetry is not None else HERE / "data" / "robot.db")
 
@@ -1253,7 +1348,7 @@ class Console:
                 "pi": pi, "devices": devices, "job": self.jobs.status(), "jetson": jetson, "wheel_test": wheel,
                 "max_speed": self.p["max_speed"], "speeds": [s for s in SPEEDS if s <= self.p["max_speed"] + 1e-9],
                 "minutes_max": MINUTES_MAX, "pin": self.pin is not None, "virtual_port": VIRTUAL_PORT,
-                "version": deployed_version()}
+                "version": deployed_version(), "hold": self.hold}
 
     def live_from_run(self):
         """True while run_follow holds the camera and the LiDAR: its own page serves them (live_feed.py)."""
@@ -1317,13 +1412,102 @@ class Console:
                     self.pin_lock_s = min(self.pin_lock_s * 2, PIN_LOCK_MAX_S)
         return 401, {"error": "the PIN is wrong or missing", "pin": True}
 
-    def post(self, path, body, session=None, client=None):
+    def busy(self):
+        """Why the console is busy now, or None: a job runs or is starting, or the agent's GET /arm says busy. A Jetson
+        that does not answer has no arm command of the console's under way: not busy."""
+        if self.jobs.busy:  # set from the start of start(), before the job is in status()
+            return "a job is running or starting"
+        try:
+            code, arm = self.jetson.arm()
+        except Exception:
+            return None
+        if code == 200 and isinstance(arm, dict) and arm.get("busy") is True:
+            return "the arm is busy (%s)" % (arm.get("state") or "moving")
+        return None
+
+    def stop_arm(self):
+        """The arm's stop beside the base's STOP, best effort: a note, never an error, never waits long."""
+        out = []
+
+        def ask():
+            try:
+                code, answer = self.jetson.arm({"cmd": "stop"}, timeout=5.0)
+                out.append("arm stopped" if code == 200 else "arm stop: HTTP %d (%s)" % (
+                    code, answer.get("error") if isinstance(answer, dict) else answer))
+            except Exception as error:
+                out.append("arm stop failed: %s" % error)
+        asked = threading.Thread(target=ask, daemon=True)
+        asked.start()
+        asked.join(ARM_STOP_WAIT)
+        return out[0] if out else "arm stop sent, no answer yet"
+
+    def log_command(self, client, address, path, body, code, answer):
+        """One line for one POST in logs/console/commands.jsonl (console_gate writes its maintenance lines there too).
+        Never a PIN: it travels in a header, and a "pin" key in a body is dropped."""
+        line = {"time": time.time(), "client": client, "address": address, "path": path,
+                "body": {k: v for k, v in body.items() if k.lower() != "pin"} if isinstance(body, dict) else None,
+                "code": code, "error": answer.get("error") if isinstance(answer, dict) else None}
+        log = self.log_root / "console" / "commands.jsonl"
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with self.guard, open(log, "a", encoding="utf-8") as f:
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+        except (OSError, TypeError, ValueError):
+            pass  # a full disk must not cost the answer
+
+    def commands(self, n):
+        """The last n lines of the command log (those in its last 16 KB)."""
+        out = []
+        for text in tail_lines(self.log_root / "console" / "commands.jsonl", n):
+            try:
+                out.append(json.loads(text))
+            except ValueError:
+                pass  # the first line, cut by the 16 KB window
+        return {"commands": out}
+
+    def post(self, path, body, session=None, client=None, program=None):
         """(code, body) for one POST from the page. session: the tab's X-HMC-Session token, if it has one.
-        client: the address the POST came from (a virtual operator run takes the person from there)."""
+        client: the address the POST came from (a virtual operator run takes the person from there).
+        program: the X-HMC-Client name of a program on the Pi (robotctl), None for the console's own page."""
         if path == "/api/stop":
-            return 200, {"error": None, "note": self.jobs.stop()}
+            note = self.jobs.stop()  # the base first: the arm's stop never delays it
+            return 200, {"error": None, "note": note, "arm": self.stop_arm()}
+        if path == "/api/arm/stop":
+            return self.jetson.arm({"cmd": "stop"}, timeout=5.0)
         if path in ("/api/bank/full", "/api/bank/reading"):
             return self.bank_post(path, body)
+        if path == "/api/hold":
+            who = body.get("who") or program or "page"
+            if not isinstance(who, str) or not CLIENT.match(who):
+                return 400, {"error": "who: 1 to 64 letters, digits and . @ : % - _"}
+            with self.guard:
+                if self.hold is not None:
+                    return 409, {"error": "already held by %s" % self.hold["who"], "hold": dict(self.hold)}
+                self.hold = {"who": who, "since": time.time()}  # first: a start from now on is refused
+            why = self.busy()
+            if why:
+                with self.guard:
+                    self.hold = None
+                return 409, {"error": "not held: %s" % why}
+            return 200, {"error": None, "hold": dict(self.hold)}
+        if path == "/api/release":
+            with self.guard:
+                was, self.hold = self.hold, None
+            return 200, {"error": None, "released": was}
+        hold = self.hold
+        if hold is not None and (path in ("/api/task/start", "/api/check/start", "/api/arm")
+                                 or path.startswith("/api/jetson/")):
+            return 409, {"error": HELD % hold["who"], "hold": dict(hold)}
+        if path == "/api/arm":
+            cmd = body.get("cmd")
+            if cmd not in ARM_CMDS:
+                return 400, {"error": "cmd must be one of %s" % ", ".join(ARM_CMDS)}
+            if cmd == "torque" and not isinstance(body.get("on"), bool):
+                return 400, {"error": "torque takes on: true or false"}
+            job = self.jobs.status()
+            if job["running"] and job["job"] and job["job"]["kind"] == "task":
+                return 409, {"error": "a task run drives the arm itself: arm buttons wait until it ended (STOP works)"}
+            return self.jetson.arm({"cmd": cmd, "on": body["on"]} if cmd == "torque" else {"cmd": cmd})
         if path == "/api/task/start":
             virtual = body.get("virtual", False)
             if not isinstance(virtual, bool):
@@ -1345,14 +1529,19 @@ class Console:
                 self.commander = None  # a new run: no tab leads it until one sends a command
             return (409 if error else 200), {"error": error}
         if path == "/api/check/start":
-            found = check_command(body.get("check"))
+            try:
+                found = check_command(body.get("check"), args=body.get("args", []), max_speed=self.p["max_speed"],
+                                      page=program is None)
+            except ValueError as error:
+                return 400, {"error": "%s" % error}
             if found is None:
                 return 400, {"error": "unknown check"}
             cmd, label, moves = found
             if moves:
                 if self.pin is None:
                     return 403, {"error": NEED_PIN}
-                refused = self.wheel_refusal()
+                # the wheel test drives without looking; the other tools watch the LiDAR themselves
+                refused = self.wheel_refusal() if body["check"] == "wheel" else None
                 if refused:
                     return refused[0], {"error": refused[1]}
             error = self.jobs.start("check-%s" % body["check"], label, cmd, {"moves": moves})
@@ -1420,6 +1609,15 @@ def handler_for(console):
                     self._send(*console.run_status(heartbeat=query.get("heartbeat") == ["1"], session=session))
                 elif path == "/api/logs":
                     self._send(200, {"runs": list_runs(console.log_root)})
+                elif path == "/api/commands":
+                    query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                    try:
+                        n = max(1, min(COMMANDS_MAX, int((query.get("n") or ["20"])[0])))
+                    except ValueError:
+                        n = 20
+                    self._send(200, console.commands(n))
+                elif path == "/api/arm":
+                    self._send(*console.jetson.arm())
                 elif path == "/api/linktest":
                     self._send(200, {"results": link_test(console.jetson.hosts)})
                 elif path == "/scan":
@@ -1475,28 +1673,43 @@ def handler_for(console):
 
         def do_POST(self):
             path = self.path.split("?")[0]
+            program = self.headers.get("X-HMC-Client")
+            self.body = None
+            code, answer = self._post(path, program)
+            session = self.headers.get("X-HMC-Session") or ""
+            try:
+                self._send(code, answer)
+            finally:  # the page's session token only in part: it also picks the run's heartbeat
+                console.log_command(program[:64] if program is not None else "page" + (" " + session[:6] if session else ""),
+                                    self.client_address[0], path, self.body, code, answer)
+
+        def _post(self, path, program):
             try:
                 length = max(0, int(self.headers.get("Content-Length", "0")))
             except ValueError:
                 length = 0
             raw = self.rfile.read(min(length, MAX_BODY)) if length else b""  # read first: an answer before the
             if length > MAX_BODY:                                             # body makes Windows reset the socket
-                return self._send(413, {"error": "too big"})
-            if path != "/api/stop":  # STOP always works; anything else only from the console's own page
-                kind = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
-                if kind != "application/json" or self.headers.get("X-HMC-Console") != "1":
-                    return self._send(403, {"error": "only the console's own page may send this"})
+                return 413, {"error": "too big"}
+            if path != "/api/stop":  # STOP always works; anything else only from the console's own page, or a program
+                kind = self.headers.get("Content-Type", "").split(";")[0].strip().lower()  # on the Pi itself (ssh)
+                own = (self.client_address[0] == "127.0.0.1" and bool(CLIENT.match(program))) if program is not None \
+                    else self.headers.get("X-HMC-Console") == "1"
+                if kind != "application/json" or not own:
+                    return 403, {"error": "only the console's own page, or robotctl on the Pi, may send this"}
             if console.pin is not None and path not in NO_PIN:
                 refused = console.check_pin(self.headers.get("X-Console-Pin", ""))
                 if refused:
-                    return self._send(*refused)
+                    return refused
             try:
                 body = json.loads(raw or b"{}")
             except ValueError:
                 body = {} if path == "/api/stop" else None
             if not isinstance(body, dict):
-                return self._send(400, {"error": "send a JSON object"})
-            self._send(*console.post(path, body, session=self.headers.get("X-HMC-Session"), client=self.client_address[0]))
+                return 400, {"error": "send a JSON object"}
+            self.body = body
+            return console.post(path, body, session=self.headers.get("X-HMC-Session"), client=self.client_address[0],
+                                program=program)
     return Handler
 
 
@@ -1505,6 +1718,7 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--no-devices", action="store_true", help="never open the camera or the LiDAR (viewing elsewhere)")
     args = ap.parse_args(argv)
+    os.environ[console_gate.CONSOLE_ENV] = "1"  # its own live view, camera_pipe and S# open the devices
     import params
     p = params.load()
     devices = Devices(p)

@@ -1,9 +1,11 @@
 # Copied from xohm@pi:~/pi-drive/test_lidar.py on 2026-11-13.
 import math
+import os
 import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from lidar import (START, STOP, FRONT_LASER_DEG, LidarSession, ScanStream, checksum_ok, complete,
                    parse_revolutions, parse_samples)
@@ -262,7 +264,8 @@ class SessionTest(unittest.TestCase):
         saved = sys.modules.get("serial")
         sys.modules["serial"] = fake
         try:
-            lidar.LidarSession()
+            with mock.patch.dict(os.environ, {"HMC_CONSOLE_JOB": "test"}):  # console_gate
+                lidar.LidarSession()
         finally:
             if saved is None:
                 del sys.modules["serial"]

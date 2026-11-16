@@ -15,9 +15,15 @@ Programs (run from this folder, ~/hmc-follow; the ROS ones with /opt/ros/jazzy a
 
   GET  /status                     the shape below
   POST /start {"name": "flow"}     also /stop and /restart; one name from the list above
-  POST /start-all                  detector, whisper, voice, bridge, arm, then flow (each waits for the one
-                                   before); a whisper-server started by hand is used as it is
-  POST /stop-all                   flow, arm, bridge, voice, whisper, detector
+  POST /start-all                  detector, whisper, voice, bridge, armstack, webcam, arm, then flow (each waits
+                                   for the one before); a whisper-server, arm stack or webcam_view started by hand
+                                   is used as it is
+  POST /stop-all                   flow, arm, webcam, armstack, bridge, voice, whisper, detector
+  POST /arm {"cmd": ...}           the console's arm buttons, relayed as one JSON line to bag_arm.py's command
+                                   server (127.0.0.1:5607, see its docstring) and its answer back: 200 when it
+                                   says ok, 409 when it refuses or fails, 503 when bag_arm.py does not answer,
+                                   502 when it drops the line, 504 after ARM_TIMEOUT (center: home, a MoveIt move and the gripper)
+  GET  /arm                        {"cmd": "state"}'s answer: /arm/state, the joints (rad), "busy"
 
 GET /status (the robot console shows it; base/pi/telemetry.py stores the metrics). Every metric is a
 number or null, never a string; a missing source gives null (or an empty object):
@@ -88,20 +94,25 @@ PROGRAMS = {  # name: (shell command, needs ROS, TCP port that says it is up, or
     # terminal; a copy started that way is used as it is (SHARED)
     "armstack": ("source ~/so100_ws/install/setup.bash && ros2 launch so100_moveit_config arm.launch.py mount:=robot"
                  " rviz:=false", True, None),
+    # the arm's webcam (/dev/video0) for the console's Live tab and bag_arm's /snap.jpg; before 2026-11-16 only
+    # ever started by hand, so a copy started that way is used as it is (SHARED)
+    "webcam": ("cd ~/so100_ws && exec python3 webcam_view.py", False, 8082),
     "arm": ("source ~/so100_ws/install/setup.bash && python3 bag_arm.py", True, None),
     "flow": ("python3 hmc_flow.py " + FLOW_ARGS, True, None),
 }
-ORDER = ["detector", "whisper", "voice", "bridge", "armstack", "arm", "flow"]
+ORDER = ["detector", "whisper", "voice", "bridge", "armstack", "webcam", "arm", "flow"]
 SCRIPTS = {"detector": "server.py", "voice": "hmc_voice.launch.py", "bridge": "base_bridge.py", "arm": "bag_arm.py",
-           "armstack": "arm.launch.py",
+           "armstack": "arm.launch.py", "webcam": "webcam_view.py",
            "flow": "hmc_flow.py"}  # a python* argv with this file name (ros2 is python: its launch file counts)
 EXECUTABLES = {"whisper": "whisper-server"}  # argv[0]'s file name
-SHARED = ("whisper", "armstack")  # start-all uses a copy started by hand (servers.sh start-stt) instead of stopping there
+SHARED = ("whisper", "armstack", "webcam")  # start-all uses a copy started by hand (servers.sh start-stt) instead of stopping there
 LOG_LINES = 20
 STOP_STEPS = ((signal.SIGINT, 5.0), (signal.SIGTERM, 3.0))  # ROS nodes end cleanly on Ctrl+C; SIGKILL after
 KILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 HOLD_PORT = 5605  # base_bridge.py's HoldListener
 HOLD_SETTLE = 0.3  # s for the bridge (a 50 ms timer) to pass the wait on
+ARM_CMD_PORT = 5607  # bag_arm.py's command server (TCP 127.0.0.1)
+ARM_TIMEOUT = 90.0  # s: bag_arm's center takes at most 30 + 45 + 10 s
 UP_WAIT = 60.0  # s start-all waits for the detector's port (the TensorRT engines take a while)
 SETTLE = 3.0  # s start-all waits after a program without a port, before the next
 
@@ -282,6 +293,29 @@ def send_hold(port=HOLD_PORT, settle=HOLD_SETTLE):
     time.sleep(settle)
 
 
+def arm_command(body, port=ARM_CMD_PORT, timeout=ARM_TIMEOUT):
+    """(http code, answer) of one command sent to bag_arm.py's command server."""
+    try:
+        s = socket.create_connection(("127.0.0.1", port), 2.0)
+    except OSError as error:  # refused, or on Windows a refused localhost connect that times out
+        return 503, {"ok": False, "error": "bag_arm.py is not answering on 127.0.0.1:%d (start the arm program): %s"
+                     % (port, error)}
+    try:
+        with s:
+            s.settimeout(timeout)
+            s.sendall((json.dumps(body) + "\n").encode())
+            line = s.makefile("rb").readline(65536)
+    except socket.timeout:
+        return 504, {"ok": False, "error": "bag_arm.py did not answer within %.0f s" % timeout}
+    except OSError as error:
+        return 502, {"ok": False, "error": "bag_arm.py dropped the connection: %s" % error}
+    try:
+        out = json.loads(line)
+    except ValueError:
+        return 502, {"ok": False, "error": "bag_arm.py closed without an answer"}
+    return (200 if out.get("ok") else 409), out
+
+
 def _number(path, scale=1.0):
     """float(text of path) * scale, or None when it does not read (missing, "No data available", ...)."""
     try:
@@ -379,8 +413,9 @@ class Metrics:
 class Agent:
     def __init__(self, programs=None, logs=LOGS, order=None, popen=subprocess.Popen, clock=time.time,
                  sleep=time.sleep, port_open=port_open, metrics=None, find_outside=outside, hold=send_hold,
-                 read_args=cmdline):
+                 read_args=cmdline, arm_port=ARM_CMD_PORT):
         programs = PROGRAMS if programs is None else programs
+        self.arm_port = arm_port
         self.programs = {}
         for name, (cmd, ros, port) in programs.items():
             self.programs[name] = Program(name, (ROS + cmd) if ros else cmd, logs, popen, clock, sleep)
@@ -520,6 +555,8 @@ def handler_for(agent, allow):
         def do_GET(self):
             if self.path.split("?")[0] == "/status":
                 self._send(200, agent.status())
+            elif self.path.split("?")[0] == "/arm":
+                self._send(*arm_command({"cmd": "state"}, agent.arm_port))
             else:
                 self._send(404, {"error": "not found"})
 
@@ -533,6 +570,8 @@ def handler_for(agent, allow):
                 return self._send(400, {"error": "not JSON"})
             if not isinstance(body, dict):
                 return self._send(400, {"error": "send a JSON object"})
+            if self.path.strip("/") == "arm":
+                return self._send(*arm_command(body, agent.arm_port))
             code, out = agent.act(self.path.strip("/"), body.get("name"))
             self._send(code, out)
     return Handler

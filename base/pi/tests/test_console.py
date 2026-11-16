@@ -81,6 +81,15 @@ class JobsTest(unittest.TestCase):
         self.assertTrue(status["tail"][0].startswith("$ "))  # the command line heads the job's log file
         self.assertIsNone(self.jobs.start("check-floor", "again", [sys.executable, "-c", "pass"]))  # free again
 
+    def test_every_job_gets_the_console_job_variable(self):
+        # console_gate lets the job open the LiDAR, the camera and the wheel port
+        self.assertIsNone(self.jobs.start("check-floor", "Camera pitch check", [
+            sys.executable, "-c", "import os; print('job=' + os.environ.get('HMC_CONSOLE_JOB', 'none'))"]))
+        self.jobs.watcher.join(10)
+        name = Path(self.jobs.status()["job"]["log"]).stem
+        self.assertTrue(name.endswith("-check-floor"))
+        self.assertIn("job=" + name, self.jobs.status()["tail"])
+
     def test_devices_that_do_not_close_refuse_the_job(self):
         def stuck():
             raise RuntimeError("the LiDAR reader did not close")

@@ -4,7 +4,7 @@
 #   base/tools/deploy.sh                 deploy HEAD to the Pi and the Jetson
 #   base/tools/deploy.sh --ref b22c5b2   deploy that commit
 #   base/tools/deploy.sh --dry-run       show what would happen, change nothing
-#   base/tools/deploy.sh --restart       afterwards restart the Pi console (only when no job runs) and the
+#   base/tools/deploy.sh --restart       afterwards restart the Pi console (only when the deploy holds it) and the
 #                                        Jetson agent and its programs (stop-all, new agent, start-all)
 #   base/tools/deploy.sh --params        also overwrite the Pi's params.json when it differs from git
 #   base/tools/deploy.sh --rollback      put back the files the newest deploy backup holds, on both hosts
@@ -118,11 +118,34 @@ if [ $DRY = 1 ]; then
   echo "dry run: nothing changed"; exit 0
 fi
 
+# Ask the console first (design 2026-11-16): a hold is refused while a job runs or starts or the arm moves; while
+# held the console starts nothing. This tree's robotctl.py runs with the Pi's python3, so the hold works before
+# the new one is installed. Released at the end, also when the deploy fails.
+robotctl() { ssh "$PI" "python3 - $*" < base/pi/tools/robotctl.py; }
+HELD=0
+set +e; HOLD_OUT=$(robotctl hold 2>&1); HOLD_CODE=$?; set -e
+if [ $HOLD_CODE = 0 ]; then
+  HELD=1; echo "console held for the deploy"
+elif [ $HOLD_CODE = 2 ]; then  # nothing answers on 8081: no console, so no job of its can be cut
+  echo "note: the Pi console does not answer: deploying without a hold (--restart will not restart it)" >&2
+else
+  echo "deploy refused: the console did not give a hold: $HOLD_OUT" >&2; exit 1
+fi
+release_hold() {
+  if [ $HELD = 1 ]; then
+    robotctl release >/dev/null 2>&1 && echo "console released" \
+      || echo "could not release the console: ssh $PI hmc-base/robotctl release" >&2
+  fi
+}
+trap release_hold EXIT
+
 echo "$PI_LIST" | backup "$PI" hmc-base
 echo "$JET_LIST" | backup "$JETSON" hmc-follow
 
 send "$PI" hmc-base base/pi .
 send "$PI" hmc-base hmc/src/hmc hmc
+# ~/hmc-base/robotctl: the console's API for programs and AI sessions (ssh xohm@<pi> hmc-base/robotctl state)
+ssh "$PI" 'printf "#!/bin/sh\nexec python3 \"\$HOME/hmc-base/tools/robotctl.py\" \"\$@\"\n" > ~/hmc-base/robotctl && chmod +x ~/hmc-base/robotctl'
 [ "${SKIP_PARAMS:-0}" = 1 ] || git show "$COMMIT:base/params.json" | ssh "$PI" "cat > ~/hmc-base/params.json"
 for f in server.py slam_bridge.py pointing.py; do
   git show "$COMMIT:base/jetson/$f" | ssh "$PI" "mkdir -p ~/hmc-base/jetson && cat > ~/hmc-base/jetson/$f"
@@ -164,9 +187,14 @@ fi
 
 if [ $RESTART = 1 ]; then
   # Pi: the run_console.sh keeper (or base/systemd's hmc-console unit) starts the console again 2 s after it ends;
-  # only when no job runs. Jetson: through systemd when hmc-agent.service is installed, else a nohup copy.
-  ssh "$PI" 'busy=$(curl -s -m 4 http://127.0.0.1:8081/api/state | python3 -c "import sys,json; print(json.load(sys.stdin)[\"job\"][\"running\"])" 2>/dev/null || echo unknown)
-    if [ "$busy" = False ]; then pid=$(pgrep -f "^.venv/bin/python -X faulthandler -u console.py"); [ -n "$pid" ] && kill $pid && echo "Pi console restarted (keeper)"; else echo "Pi console NOT restarted: job running = $busy"; fi'
+  # only while this deploy holds it (no job can be running or starting). The restart clears the hold.
+  # Jetson: through systemd when hmc-agent.service is installed, else a nohup copy.
+  if [ $HELD = 1 ]; then
+    ssh "$PI" 'pid=$(pgrep -f "^.venv/bin/python -X faulthandler -u console.py"); if [ -n "$pid" ]; then kill $pid && echo "Pi console restarted (keeper)"; else echo "Pi console not found: not restarted"; fi'
+    HELD=0
+  else
+    echo "Pi console NOT restarted: the deploy has no hold"
+  fi
   # Jetson: stop the programs, start the new agent, start the programs again.
   ssh "$JETSON" 'cd ~/hmc-follow && curl -s -m 30 -X POST http://127.0.0.1:8090/stop-all >/dev/null || true
     if systemctl --user is-enabled hmc-agent.service >/dev/null 2>&1; then systemctl --user restart hmc-agent.service
