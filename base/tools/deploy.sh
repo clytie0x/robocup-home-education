@@ -123,13 +123,20 @@ fi
 # the new one is installed. Released at the end, also when the deploy fails.
 robotctl() { ssh "$PI" "python3 - $*" < base/pi/tools/robotctl.py; }
 HELD=0
+OLD_CONSOLE=0
 set +e; HOLD_OUT=$(robotctl hold 2>&1); HOLD_CODE=$?; set -e
 if [ $HOLD_CODE = 0 ]; then
   HELD=1; echo "console held for the deploy"
 elif [ $HOLD_CODE = 2 ]; then  # nothing answers on 8081: no console, so no job of its can be cut
   echo "note: the Pi console does not answer: deploying without a hold (--restart will not restart it)" >&2
 else
-  echo "deploy refused: the console did not give a hold: $HOLD_OUT" >&2; exit 1
+  # a console from before the hold (no "hold" in /api/state) refuses robotctl: the old rule, no job running
+  OLD=$(ssh "$PI" 'curl -s -m 4 http://127.0.0.1:8081/api/state | python3 -c "import sys,json; d=json.load(sys.stdin); print(\"hold\" not in d, d[\"job\"][\"running\"])"' 2>/dev/null || true)
+  if [ "$OLD" = "True False" ]; then
+    OLD_CONSOLE=1; echo "note: the Pi console predates the hold and runs no job: deploying without a hold" >&2
+  else
+    echo "deploy refused: the console did not give a hold: $HOLD_OUT" >&2; exit 1
+  fi
 fi
 release_hold() {
   if [ $HELD = 1 ]; then
@@ -192,6 +199,9 @@ if [ $RESTART = 1 ]; then
   if [ $HELD = 1 ]; then
     ssh "$PI" 'pid=$(pgrep -f "^.venv/bin/python -X faulthandler -u console.py"); if [ -n "$pid" ]; then kill $pid && echo "Pi console restarted (keeper)"; else echo "Pi console not found: not restarted"; fi'
     HELD=0
+  elif [ $OLD_CONSOLE = 1 ]; then  # the pre-hold rule: restart only while no job runs
+    ssh "$PI" 'busy=$(curl -s -m 4 http://127.0.0.1:8081/api/state | python3 -c "import sys,json; print(json.load(sys.stdin)[\"job\"][\"running\"])" 2>/dev/null || echo unknown)
+      if [ "$busy" = False ]; then pid=$(pgrep -f "^.venv/bin/python -X faulthandler -u console.py"); [ -n "$pid" ] && kill $pid && echo "Pi console restarted (keeper)"; else echo "Pi console NOT restarted: job running = $busy"; fi'
   else
     echo "Pi console NOT restarted: the deploy has no hold"
   fi
