@@ -20,6 +20,7 @@ import rclpy
 
 import bagvision as bv
 import gcam
+from so100_driver.console_gate import require as console_gate
 from so100_driver.ik import ARM, GraspPlanner, Kinematics, deck_box
 
 XTION = 'http://192.168.31.21:8081/stream'
@@ -58,6 +59,7 @@ def xtion():
 
 
 def main():
+    console_gate('bagpick')
     putback = '--putback' in sys.argv
     hold = float(sys.argv[sys.argv.index('--hold') + 1]) if '--hold' in sys.argv else 2.0
     rclpy.init()

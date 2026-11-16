@@ -23,6 +23,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectoryPoint
 
+from so100_driver.console_gate import require as console_gate
 from so100_driver.ik import ARM, GraspPlanner, Kinematics, deck_box
 
 FLOOR, DECK_Z = -0.31, -0.068
@@ -107,6 +108,7 @@ def describe(kin, q):
 
 
 def main():
+    console_gate('bagpick gcam')
     a = sys.argv[1:]
     rclpy.init()
     n = G()

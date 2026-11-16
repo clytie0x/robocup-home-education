@@ -18,6 +18,8 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectoryPoint
 
+from . import console_gate
+
 ARM = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll']
 READY = [0, 90, -90, 0, 0]
 SEQUENCE = [  # (label, target deg, seconds)
@@ -177,6 +179,7 @@ def run_native(t):
 
 
 def main():
+    console_gate.require('motion_test')
     rclpy.init()
     t = Tester()
     ex = rclpy.executors.SingleThreadedExecutor()

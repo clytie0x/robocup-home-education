@@ -22,6 +22,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectoryPoint
 
+from so100_driver.console_gate import require as console_gate
 from so100_driver.ik import ARM, GraspPlanner, Kinematics, deck_box
 
 FLOOR, DECK_Z = -0.31, -0.068
@@ -94,6 +95,7 @@ def targets():
 
 
 def main():
+    console_gate('cam_calib_run')
     out_dir = sys.argv[1]
     dry = '--dry' in sys.argv
     os.makedirs(out_dir, exist_ok=True)

@@ -10,6 +10,8 @@ from rcl_interfaces.srv import SetParameters
 from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
 
+from . import console_gate
+
 FONT = ('Noto Sans Thai', 12)
 BIG = ('Noto Sans Thai', 13, 'bold')
 
@@ -52,6 +54,7 @@ class Panel(Node):
 
 
 def main():
+    console_gate.require('control_panel')
     rclpy.init()
     node = Panel()
     threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()

@@ -6,6 +6,12 @@
 - `so100_moveit_config`: โมเดล 3D (URDF), ค่าตั้ง MoveIt, RViz, launch (`camera:=true` = ทดสอบกับกล้อง Xtion)
 - `calibration.json`: ค่า calibrate ของแขนตัวที่ใช้แข่ง (ใช้ได้กับแขนตัวนี้ตัวเดียว)
 
+**ต้องสั่งผ่านคอนโซล (2026-11-16):** โปรแกรมที่ขยับแขนได้ (`arm_cli`, `ArmClient`, `api_selftest`, `camera_test`,
+`calibrate`, `motion_test`, `control_panel`, `gcam.py`, `cam_calib_run.py`, `tools/bagpick/bagpick.py`, `tools/bagpick/gcam.py`)
+รันได้เมื่อคอนโซลของหุ่นเป็นคนเปิด (`HMC_CONSOLE_JOB` หรือ `HMC_CONSOLE=1`) ถ้ารันเองจะขึ้น `REFUSED: ...`
+ซ่อมด้วยมือให้ตั้ง `HMC_MAINTENANCE=<เหตุผล>` จะผ่านและบันทึกหนึ่งบรรทัดลง `~/hmc-follow/logs/commands.jsonl`
+(เปลี่ยนที่ได้ด้วย `HMC_COMMAND_LOG`) โหนดที่ launch เปิด (driver, pick_place, scene_setup) ไม่ถูกกั้น
+
 ## ติดตั้งบน Jetson (ROS 2 Jazzy) จาก repo นี้
 ```
 git clone -b arm-system https://github.com/clytie0x/robocup-home-education.git ~/robocup-home-education
