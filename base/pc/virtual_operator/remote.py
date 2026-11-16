@@ -9,16 +9,21 @@ Start and stop go only through the robot console, with ~/hmc-base/robotctl on th
 ~/.config/hmc-console-pin there, so the PIN never comes here): `robotctl task dry|drive SPEED MINUTES --virtual
 <this PC>` and `robotctl stop`. Without a console the app says so; it never starts run_follow itself.
 """
+import importlib.util
 import json
 import shlex
 import socket
 import subprocess
 import threading
+from pathlib import Path
 
 USER = "xohm"
 HOSTS = ("192.168.31.21", "100.73.128.36")  # lab Wi-Fi, then Tailscale
 TUNNEL_PORT = 18080  # this PC's end of the tunnel to run_follow's page (the Pi's 127.0.0.1:8080)
-RUN_PORT = 8080
+_spec = importlib.util.spec_from_file_location("ports", Path(__file__).resolve().parents[2] / "jetson" / "ports.py")
+ports = importlib.util.module_from_spec(_spec)  # base/jetson/ports.py, the one port table
+_spec.loader.exec_module(ports)
+RUN_PORT = ports.DASHBOARD
 SPEEDS = (0.08, 0.12)
 SSH_OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5",
                "-o", "ServerAliveCountMax=2"]

@@ -43,6 +43,9 @@ Commands go down the left column; status comes back the same way.
 | agent | bag_arm | TCP JSON line (127.0.0.1) | Jetson 5607 | arm commands | on demand |
 | agent | base_bridge | UDP (127.0.0.1) | Jetson 5605 | hold before a restart | rare |
 | bag_arm, front_camera, console | webcam_view | HTTP JPEG | Jetson 8082 | arm camera frames | on demand |
+| voice stt_node | whisper-server | HTTP (127.0.0.1) | Jetson 8080 | speech to text | per sentence |
+| voice llm_node | llama-server | HTTP (127.0.0.1) | Jetson 8081 | the LLM brain | per sentence |
+| browser | voice control_panel | HTTP | Jetson 8091 | the voice team's own page | on demand |
 | PC virtual operator | run_follow | UDP | Pi 5610 | the simulated person | 10/s |
 
 ## What is shared, and how

@@ -39,8 +39,8 @@ import remote  # noqa: E402
 import sim  # noqa: E402
 
 PORT = 8095
-CONSOLES = ("http://192.168.31.21:8081", "http://100.73.128.36:8081")  # lab Wi-Fi, Tailscale
-VIRTUAL_PORT = 5610  # the console's VIRTUAL_PORT, until /api/state says otherwise
+CONSOLES = tuple("http://%s:%d" % (host, remote.ports.CONSOLE) for host in remote.HOSTS)  # lab Wi-Fi, Tailscale
+VIRTUAL_PORT = remote.ports.VIRTUAL  # the console's VIRTUAL_PORT, until /api/state says otherwise
 CSV_PATH = HERE / "episodes.csv"
 SEND_EVERY = 0.1  # s between datagrams to the robot
 RUN_EVERY = 0.2  # s between status reads

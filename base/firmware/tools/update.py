@@ -63,6 +63,15 @@ class Failed(Exception):
     pass
 
 
+def console_gate(what):
+    """The wheel port opens only in a console job or a logged HMC_MAINTENANCE repair (design 2026-11-16): the
+    Pi's gate, ~/hmc-base/console_gate.py (these tools run from ~/firmware-new)."""
+    sys.path.insert(0, os.path.expanduser("~/hmc-base"))
+    import console_gate as gate
+
+    gate.require(what)
+
+
 def fail(what, state):
     raise Failed(f"FAILED: {what}\n{state}")
 
@@ -213,6 +222,7 @@ def main(argv=None):
     mode.add_argument("--force", action="store_true",
                       help="send Uforce#: skip the wheel-speed check (still needs zero PWM, no drive command)")
     args = ap.parse_args(argv)
+    console_gate("wheels: update.py")
     try:
         update(args.app_bin, args.port, args.rescue, force=args.force, escape=args.escape)
     except Failed as e:

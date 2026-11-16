@@ -20,7 +20,7 @@
 #
 # What goes where (as before 2026-11-15):
 #   Pi      hmc/src/hmc -> ~/hmc-base/hmc, base/pi -> ~/hmc-base, base/params.json -> ~/hmc-base/params.json,
-#           base/jetson/{server,slam_bridge,pointing,ports}.py -> ~/hmc-base/jetson (the Pi tests, bag.py and
+#           base/jetson/{server,slam_bridge,pointing,ports,console_gate}.py -> ~/hmc-base/jetson (the Pi tests, bag.py and
 #           base/pi/ports.py use them; base/jetson/ports.py is the one port table of both hosts)
 #   Jetson  base/jetson -> ~/hmc-follow
 # Each host gets VERSION.json ({"commit", "describe", "branch", "deployed"}) in its folder; the console shows it.
@@ -131,7 +131,7 @@ stale() { # <host> <folder>; tracked list on stdin: .py/.html/.js/.css/.sh files
 }
 
 PI_LIST=$( { listing base/pi ""; listing hmc/src/hmc hmc/; echo params.json; \
-  for f in server.py slam_bridge.py pointing.py ports.py; do echo "jetson/$f"; done; } )
+  for f in server.py slam_bridge.py pointing.py ports.py console_gate.py; do echo "jetson/$f"; done; } )
 JET_LIST=$(listing base/jetson "")
 
 # params.json holds values measured on the robot: never overwritten silently.
@@ -163,7 +163,7 @@ send "$PI" hmc-base hmc/src/hmc hmc
 # ~/hmc-base/robotctl: the console's API for programs and AI sessions (ssh xohm@<pi> hmc-base/robotctl state)
 ssh "$PI" 'printf "#!/bin/sh\nexec python3 \"\$HOME/hmc-base/tools/robotctl.py\" \"\$@\"\n" > ~/hmc-base/robotctl && chmod +x ~/hmc-base/robotctl'
 [ "${SKIP_PARAMS:-0}" = 1 ] || git show "$COMMIT:base/params.json" | ssh "$PI" "cat > ~/hmc-base/params.json"
-for f in server.py slam_bridge.py pointing.py ports.py; do
+for f in server.py slam_bridge.py pointing.py ports.py console_gate.py; do
   git show "$COMMIT:base/jetson/$f" | ssh "$PI" "mkdir -p ~/hmc-base/jetson && cat > ~/hmc-base/jetson/$f"
 done
 send "$JETSON" hmc-follow base/jetson .

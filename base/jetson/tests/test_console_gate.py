@@ -9,6 +9,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import console_gate  # noqa: E402
 
+ARM_COPY = Path(__file__).resolve().parents[3] / "arm" / "so100_driver" / "so100_driver" / "console_gate.py"
+
 
 class GateTest(unittest.TestCase):
     def setUp(self):
@@ -22,7 +24,7 @@ class GateTest(unittest.TestCase):
         console_gate.require("arm", environ=environ, clock=lambda: 1234.5, log=self.log)
 
     def test_refuses_outside_the_console(self):
-        for environ in ({}, {console_gate.ENV: ""}, {console_gate.MAINTENANCE_ENV: "  "}, {"HMC_CONSOLE": "1"}):
+        for environ in ({}, {console_gate.ENV: ""}, {console_gate.MAINTENANCE_ENV: "  "}, {console_gate.CONSOLE_ENV: "0"}):
             with self.assertRaisesRegex(RuntimeError, "REFUSED: arm: .*HMC_MAINTENANCE=<reason>"):
                 self.require(environ)
         self.assertFalse(self.log.exists())
@@ -42,8 +44,12 @@ class GateTest(unittest.TestCase):
                          (1234.5, "arm", "gripper servo swap", "robotpsu"))
         self.assertNotIn("abc", lines[0])
 
-    def test_the_log_is_in_the_jetson_folder(self):
-        self.assertEqual(console_gate.LOG, Path(console_gate.__file__).resolve().parent / "logs" / "commands.jsonl")
+    def test_the_log_is_in_the_jetson_folder(self):  # base/jetson is ~/hmc-follow on the Jetson
+        self.assertEqual(console_gate.LOG, Path.home() / "hmc-follow" / "logs" / "commands.jsonl")
+
+    @unittest.skipUnless(ARM_COPY.exists(), "no arm/ next to base/ (the Jetson's ~/hmc-follow)")
+    def test_the_arm_package_has_a_byte_copy(self):  # one gate: change this file, then copy it there
+        self.assertEqual(ARM_COPY.read_bytes(), Path(console_gate.__file__).read_bytes())
 
 
 if __name__ == "__main__":
