@@ -29,7 +29,7 @@ FAKE_LOG = LOG_DIR / 'robot_voice_fake_arm.log'
 ARM_LOG = LOG_DIR / 'robot_voice_arm.log'
 ARM_HW = {'real', 'sim'}                 # so100_moveit_config arm.launch.py hardware:=
 ARM_MATCH = 'so100_moveit_config arm.launch.py'
-PORT = int(os.environ.get('PANEL_PORT', '8091'))   # 8090 is used by the arm team's panel
+PORT = int(os.environ.get('PANEL_PORT', '8091'))  # base/jetson/ports.py VOICE_PANEL (8090 is agent.py's)
 ROS_SETUP = ('for f in /opt/ros/jazzy/setup.bash "$HOME/so100_ws/install/setup.bash" "$HOME/ros2_ws/install/setup.bash"; do '
              '[ -f "$f" ] && source "$f"; done; export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-42}"; '
              'export PYTHONUNBUFFERED=1; ')

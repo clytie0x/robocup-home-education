@@ -1,9 +1,16 @@
 """Live view of the arm's webcam in a browser: http://<jetson>:8082/  (also /snap.jpg = one frame)."""
+import os
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
+
+# the console gate without a sourced workspace (the agent runs "cd ~/so100_ws && python3 webcam_view.py")
+_here = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [os.path.join(_here, 'src', 'so100_driver'), os.path.join(_here, 'so100_driver')]
+from so100_driver.console_gate import require as console_gate  # noqa: E402
 
 latest = {'jpg': None}
 
@@ -63,5 +70,6 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(PAGE)
 
 
+console_gate('webcam_view')  # /dev/video0 has one owner: the agent's webcam program
 threading.Thread(target=grab, daemon=True).start()
 ThreadingHTTPServer(('0.0.0.0', 8082), H).serve_forever()

@@ -33,6 +33,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
 
+from . import console_gate
 from .calib import ARM_JOINTS, DEFAULT_PATH, JOINTS, Calibration
 from .hardware import RealArm, SimArm
 from .motion import Motion, Trajectory, ids_to_names, names_to_ids
@@ -93,6 +94,7 @@ class Driver(Node):
             self.arm.pos = {i: float(v) for i, v in names_to_ids(
                 {n: self.calib.clamp_raw(n, self.calib.data[n]['zero']) for n in JOINTS}).items()}
         else:
+            console_gate.require('arm driver')  # arm.launch.py: the agent's armstack, or start_arm.sh for a repair
             self.arm = RealArm(port, gripper_torque_limit=grip_limit,
                                p=p('servo_p', [12, 16, 16, 16, 16, 16]).value,  # base 12: less backlash hunting (P8 too soft)
                                d=p('servo_d', [32] * 6).value,

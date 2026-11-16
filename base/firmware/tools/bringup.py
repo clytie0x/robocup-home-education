@@ -9,6 +9,7 @@ coast for it), both wheels forward, a left turn, U# refused while driving, S# st
 the 0.3 s timeout stops. Prints PASS or FAIL for each and sends S# however it ends.
 """
 import argparse
+import os
 import re
 import sys
 import time
@@ -21,6 +22,15 @@ P_REPLY = re.compile(r"Px:[+-]\d{7},y:[+-]\d{7},th:[+-]\d{7},t:\d{10}#")
 V_REPLY = re.compile(r"Vversion:\d+,build:[0-9a-z-]+#")
 TIMEOUT_FLAG = 0x04
 QUARTER_TURN = 9600  # counts, about 38 600 per wheel turn (config.h)
+
+
+def console_gate(what):
+    """The wheel port opens only in a console job or a logged HMC_MAINTENANCE repair (design 2026-11-16): the
+    Pi's gate, ~/hmc-base/console_gate.py (these tools run from ~/firmware-new)."""
+    sys.path.insert(0, os.path.expanduser("~/hmc-base"))
+    import console_gate as gate
+
+    gate.require(what)
 
 
 def parse_e(text):
@@ -116,6 +126,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", default=PORT)
     args = ap.parse_args()
+    console_gate("wheels: bringup.py")
     input("Wheels lifted off the floor and the red button within reach? Press Enter to start ")
     import serial
 

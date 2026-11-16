@@ -1,11 +1,16 @@
 """base/jetson/ports.py is the one port table (base/docs/communication.md, finding 2)."""
 import ast
+import re
 import unittest
 from pathlib import Path
 
 import ports
 
 BASE = Path(__file__).resolve().parents[2]  # base/ on the laptop; on the Pi only hmc-base/ is there
+# an address with a port in a string ("http://127.0.0.1:8081/", "<jetson>:8082") or a bind tuple ('0.0.0.0', 8082)
+ADDRESS = re.compile(r"(?:localhost|\d+\.\d+\.\d+\.\d+|<[\w -]+>):(\d{4,5})\b"
+                     r"""|\(\s*['"](?:0\.0\.0\.0|localhost|127\.0\.0\.1)?['"]\s*,\s*(\d{4,5})\s*\)""")
+OUTSIDE = ("arm", "voice")  # code that cannot import ports.py (other workspaces on the Jetson): numbers only
 
 
 def numbers():
@@ -52,7 +57,7 @@ class PortsTest(unittest.TestCase):
     def test_the_table_has_the_known_ports(self):
         pi, jetson = ([getattr(ports, n) for n in ports.HOSTS[h]] for h in ("pi", "jetson"))
         self.assertEqual(sorted(pi), [5603, 5604, 5610, 8080, 8081])
-        self.assertEqual(sorted(jetson), [5601, 5602, 5605, 5606, 5607, 8080, 8082, 8090])
+        self.assertEqual(sorted(jetson), [5601, 5602, 5605, 5606, 5607, 8080, 8081, 8082, 8090, 8091])
 
     def test_scan_finds_a_literal(self):
         table = set(numbers().values())
@@ -65,7 +70,7 @@ class PortsTest(unittest.TestCase):
     def test_no_module_keeps_its_own_port_number(self):
         table = set(numbers().values())
         left = []
-        for folder in (BASE / "pi", BASE / "jetson"):
+        for folder in (BASE / "pi", BASE / "jetson", BASE / "pc"):
             for path in sorted(folder.rglob("*.py")):
                 rel = path.relative_to(BASE)
                 if "tests" in rel.parts or path.name == "ports.py":
@@ -73,6 +78,26 @@ class PortsTest(unittest.TestCase):
                 tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
                 left += ["%s:%d %s" % (rel.as_posix(), line, text) for line, text in literal_ports(tree, table)]
         self.assertEqual(left, [], "use ports.py instead")
+
+    def test_address_scan(self):
+        found = [m.group(1) or m.group(2) for m in ADDRESS.finditer(
+            "u = 'http://127.0.0.1:8081/x'\nv = '<jetson-ip>:8091'\nS(('0.0.0.0', 8082), H)\np('rate', 16000)\n")]
+        self.assertEqual(found, ["8081", "8091", "8082"])
+
+    @unittest.skipUnless((BASE.parent / "arm").exists(), "arm/ and voice/ are not here")
+    def test_other_teams_use_only_table_ports(self):  # a stale or new number there is a port nobody planned
+        table = set(numbers().values())
+        left = []
+        for folder in OUTSIDE:
+            for path in sorted((BASE.parent / folder).rglob("*.py")):
+                if "test" in path.parts or path.name.startswith("test_"):
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+                for m in ADDRESS.finditer(text):
+                    if int(m.group(1) or m.group(2)) not in table:
+                        left.append("%s:%d %s" % (path.relative_to(BASE.parent).as_posix(),
+                                                  text.count("\n", 0, m.start()) + 1, m.group(0)))
+        self.assertEqual(left, [], "add the port to base/jetson/ports.py (and communication.md) or use one there")
 
 
 if __name__ == "__main__":
