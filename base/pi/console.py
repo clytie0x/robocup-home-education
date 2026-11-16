@@ -52,6 +52,7 @@ TOOLS = HERE / "tools"
 sys.path.insert(0, str(TOOLS))  # camera_view (Latest, Scan, jpeg_of, relay)
 import camera_view  # noqa: E402
 import console_gate  # noqa: E402
+import ports  # noqa: E402
 
 try:  # the telemetry database (base/pi/telemetry.py) for the Data tab and the power bank estimate
     import telemetry
@@ -63,10 +64,10 @@ LOG_ROOT = HERE / "logs"  # run_follow's logs/<start time>/ folders; on the Pi ~
 JOB_LOGS = LOG_ROOT / "console"
 WHEEL_TEST_LAST = LOG_ROOT / "wheel-test" / "last.json"  # written by tools/wheel_test.py
 PIN_FILE = Path.home() / ".config" / "hmc-console-pin"
-PORT = 8081
-RUN_URL = "http://127.0.0.1:8080"  # run_follow's own dashboard while it runs
-AGENT_PORT = 8090  # base/jetson/agent.py
-WEBCAM_PORT = 8082  # the arm team's ~/so100_ws/webcam_view.py: only shown, never started or stopped
+PORT = ports.CONSOLE
+RUN_URL = "http://127.0.0.1:%d" % ports.DASHBOARD  # run_follow's own dashboard while it runs
+AGENT_PORT = ports.AGENT  # base/jetson/agent.py
+WEBCAM_PORT = ports.WEBCAM  # the arm team's ~/so100_ws/webcam_view.py: only shown, never started or stopped
 JETSON_HOSTS = ("10.0.0.2", "192.168.31.137")  # LAN cable first, then Wi-Fi
 SPEEDS = (0.08, 0.12)  # m/s the page offers
 MINUTES_MAX = 30
@@ -84,13 +85,17 @@ FILES = {
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
-COMMANDS = ("follow", "wait", "resume", "return")
+COMMANDS = ("follow", "wait", "resume", "return", "bag", "bag_again", "bag_near")
 NO_PIN = ("/api/stop", "/api/arm/stop", "/api/bank/full", "/api/bank/reading")  # STOPs, and the owner's battery marks
 CLIENT = re.compile(r"^[\w.@:%-]{1,64}$")  # a program's name (X-HMC-Client), e.g. robotctl's "xohm@192.168.31.50"
-ARM_CMDS = ("home", "rest", "center", "torque")
+ARM_CMDS = ("home", "rest", "center", "torque", "pick_bag", "drop_bag")
+ARM_JOBS = ("pick_bag", "drop_bag")  # bag_arm's bag jobs: allowed during a task run, not while its bag task drives
 ARM_TIMEOUT = 95.0  # s: the agent answers an arm command when it is done, within its own ARM_TIMEOUT (90 s)
+ARM_JOB_TIMEOUT = 245.0  # s: and a bag job within its ARM_JOB_TIMEOUT (240 s: home 60 + pick 150 + the camera looks)
 ARM_STOP_WAIT = 0.5  # s STOP's answer waits for the arm's stop; the base's stop is already under way
 COMMANDS_MAX = 200  # lines GET /api/commands gives at most
+RUN_TAIL = 1 << 20  # bytes at the end of the newest run log that GET /api/commands reads for the voice flow's commands
+VOICE_CLIENT = "voice (Jetson)"  # their client name in the command list
 HELD = ("the console is held by %s (a deploy or a repair): no starts, arm moves or Jetson start/stop until"
         " robotctl release (STOP still works)")
 MAX_BODY = 65536  # bytes of a POST body
@@ -107,7 +112,7 @@ JOB_SCRIPTS = ("run_follow.py", "safe_run.py", "wheel_test.py", "job_guard.py", 
 NEED_PIN = ("ตั้ง PIN ก่อน ถึงจะขับจริงหรือทดสอบล้อได้ ใส่ PIN ในไฟล์ ~/.config/hmc-console-pin บน Pi"
             " แล้วเปิดคอนโซลใหม่ (ดู base/docs/robot-console.md) ส่วนงานทดลองเริ่มได้เลย")
 JETSON_ACTIONS = ("start", "stop", "restart", "start-all", "stop-all")
-VIRTUAL_PORT = 5610  # UDP: run_follow --virtual-operator takes the PC's simulated person here (virtual_operator.py)
+VIRTUAL_PORT = ports.VIRTUAL  # UDP: run_follow --virtual-operator takes the PC's simulated person here (virtual_operator.py)
 NEED_PIN_VIRTUAL = ("ตั้ง PIN ก่อน ถึงจะทดสอบด้วยคนเสมือนได้ ใส่ PIN ในไฟล์ ~/.config/hmc-console-pin บน Pi"
                     " แล้วเปิดคอนโซลใหม่ (ดู base/docs/robot-console.md)")
 
@@ -238,11 +243,11 @@ def signal_group(proc, hard):
         pass
 
 
-def tail_lines(path, n=30):
+def tail_lines(path, n=30, size=16384):
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
-            f.seek(max(0, f.tell() - 16384))
+            f.seek(max(0, f.tell() - size))
             data = f.read()
     except OSError:
         return []
@@ -1089,6 +1094,35 @@ def _last_record(path):
         return None
 
 
+def voice_commands(root=LOG_ROOT, size=RUN_TAIL):
+    """The voice flow's commands (run_follow's remote_cmd lines, and its remote_refused ones from the client) in the
+    last `size` bytes of the newest run log, as command-log entries. Their "wall" is the time: a line from before
+    run_follow wrote it has only its monotonic "time" and is left out."""
+    try:
+        newest = max((d for d in Path(root).iterdir() if RUN_NAME.match(d.name) and d.is_dir()), default=None)
+    except OSError:
+        return []
+    out = []
+    for text in tail_lines(newest / "log.jsonl", size, size) if newest else []:  # every line of the window
+        if '"remote_cmd"' not in text and '"remote_refused"' not in text:
+            continue  # the cycles: most of the log, never parsed
+        try:
+            r = json.loads(text)
+        except ValueError:
+            continue  # the first line, cut by the window
+        if not isinstance(r, dict) or not isinstance(r.get("wall"), (int, float)):
+            continue
+        if "remote_cmd" in r:
+            cmd, code, error = r["remote_cmd"], 200, None
+        elif r.get("by") == "client":  # a refused page press is in the console's own log already
+            cmd, code, error = r.get("remote_refused"), None, r.get("why") or "refused"
+        else:
+            continue
+        out.append({"time": r["wall"], "client": VOICE_CLIENT, "address": None, "path": str(cmd), "body": None,
+                    "code": code, "error": error})
+    return out
+
+
 def list_runs(root=LOG_ROOT, limit=20):
     """The newest run_follow log folders: [{"name", "start", "seconds", "end", "size"}]."""
     try:
@@ -1425,6 +1459,35 @@ class Console:
             return "the arm is busy (%s)" % (arm.get("state") or "moving")
         return None
 
+    def bag_job(self, cmd, body, task):
+        """POST /api/arm pick_bag {"x", "y" (robot frame m)[, "top", "yaw"]} or drop_bag {"x", "y"}: bag_arm's own bag
+        job, answered when it is done. A pick without x and y takes the running task's last reached bag. Refused while
+        the task's bag task moves the base, and while a task runs whose status does not say."""
+        record = None
+        if task:
+            code, status = self.run_status()
+            record = status.get("record") if code == 200 and isinstance(status, dict) else None
+            if not isinstance(record, dict):
+                return 503, {"error": "the run's status does not answer: cannot tell whether a bag task moves the base"}
+            if record.get("phase") == "bag":
+                return 409, {"error": "a bag task is moving the base: the arm waits until it ended"}
+        if cmd == "pick_bag" and body.get("x") is None and body.get("y") is None:
+            result = ((record or {}).get("bag_task") or {}).get("result")
+            if not (isinstance(result, dict) and result.get("ok")):
+                return 409, {"error": "no reached bag in a running task: give x and y, or run bag or bag_near first"}
+            body = result
+        out = {"cmd": cmd}
+        for key in ("x", "y", "top", "yaw") if cmd == "pick_bag" else ("x", "y"):
+            value = body.get(key)
+            if value is None and key in ("top", "yaw"):
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not -10.0 < value < 10.0:  # NaN too
+                return 400, {"error": "%s takes x and y in metres (robot frame)%s" % (
+                    cmd, ", top (m) and yaw (rad) when known" if cmd == "pick_bag" else "")}
+            out[key] = float(value)
+        code, answer = self.jetson.arm(out, timeout=ARM_JOB_TIMEOUT)
+        return code, (dict(answer, sent=out) if isinstance(answer, dict) else answer)
+
     def stop_arm(self):
         """The arm's stop beside the base's STOP, best effort: a note, never an error, never waits long."""
         out = []
@@ -1456,14 +1519,17 @@ class Console:
             pass  # a full disk must not cost the answer
 
     def commands(self, n):
-        """The last n lines of the command log (those in its last 16 KB)."""
+        """The last n lines of the command log (those in its last 16 KB) and the voice flow's commands in the newest
+        run log, oldest first (the page turns it round)."""
         out = []
         for text in tail_lines(self.log_root / "console" / "commands.jsonl", n):
             try:
                 out.append(json.loads(text))
             except ValueError:
                 pass  # the first line, cut by the 16 KB window
-        return {"commands": out}
+        out += voice_commands(self.log_root)
+        out.sort(key=lambda c: c.get("time") or 0)
+        return {"commands": out[-n:]}
 
     def post(self, path, body, session=None, client=None, program=None):
         """(code, body) for one POST from the page. session: the tab's X-HMC-Session token, if it has one.
@@ -1505,7 +1571,10 @@ class Console:
             if cmd == "torque" and not isinstance(body.get("on"), bool):
                 return 400, {"error": "torque takes on: true or false"}
             job = self.jobs.status()
-            if job["running"] and job["job"] and job["job"]["kind"] == "task":
+            task = bool(job["running"] and job["job"] and job["job"]["kind"] == "task")
+            if cmd in ARM_JOBS:
+                return self.bag_job(cmd, body, task)
+            if task:
                 return 409, {"error": "a task run drives the arm itself: arm buttons wait until it ended (STOP works)"}
             return self.jetson.arm({"cmd": cmd, "on": body["on"]} if cmd == "torque" else {"cmd": cmd})
         if path == "/api/task/start":

@@ -17,7 +17,9 @@ import time
 from hmc import navigation, world
 from hmc.world import Box, Circle
 
-PORT = 5603
+import ports
+
+PORT = ports.PLAN
 KINDS = {"Circle": Circle, "Box": Box}
 
 

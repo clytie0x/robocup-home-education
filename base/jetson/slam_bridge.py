@@ -22,6 +22,8 @@ import zlib
 from bisect import bisect_left
 from pathlib import Path
 
+import ports
+
 LASER_X = 0.175  # metres, the laser sits ahead of the turning centre (params.json lidar_x)
 RANGE_MIN = 0.12  # metres; lidar.is_body treats anything closer as the robot itself
 RANGE_MAX = 8.0  # metres; the same as max_laser_range in slam/params.yaml
@@ -121,7 +123,7 @@ def map_pixels(data, width, height):
 class SlamServer:
     """One Pi at a time (a new connection replaces the old one). Hands each record to on_record."""
 
-    def __init__(self, on_record, host="0.0.0.0", port=5602, idle=5.0):
+    def __init__(self, on_record, host="0.0.0.0", port=ports.SLAM, idle=5.0):
         self._on_record = on_record
         self._idle = idle
         self._current = None
@@ -297,7 +299,7 @@ def make_bridge(port, log_dir, laser_x):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=5602)
+    parser.add_argument("--port", type=int, default=ports.SLAM)
     parser.add_argument("--log-dir", default=str(Path.home() / "hmc-follow" / "logs"))
     parser.add_argument("--laser-x", type=float, default=LASER_X)
     args = parser.parse_args()

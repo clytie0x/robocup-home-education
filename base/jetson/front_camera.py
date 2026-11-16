@@ -25,9 +25,11 @@ import urllib.request
 
 import numpy as np
 
+import ports
+
 DEFAULT_FILE = os.path.expanduser("~/hmc-follow/front_camera.json")
-SNAP_URL = "http://127.0.0.1:8082/snap.jpg"
-PORT = 5606  # TCP: bag measurements for the Pi (base/pi/bag.py Look)
+SNAP_URL = "http://127.0.0.1:%d/snap.jpg" % ports.WEBCAM
+PORT = ports.LOOK  # TCP: bag measurements for the Pi (base/pi/bag.py Look)
 WIDTH, HEIGHT = 640, 480
 F_GUESS = 480.0  # px: the same AX1080P webcam as gripper_camera.F_GUESS (about 67 deg across); the fit sets it
 X_GUESS = 0.20  # m ahead of the turning centre ("about 0.2 m", the lane brief); measure it with a tape

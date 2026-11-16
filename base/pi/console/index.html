@@ -267,6 +267,18 @@
         <div class="act" id="jetson-outside-text"></div>
       </div>
       <div class="cols" id="programs"></div>
+      <div class="panel prog" id="arm-panel">
+        <div class="ph"><span>แขน</span><span class="num" id="arm-word">-</span></div>
+        <div class="meta"><span class="num" id="arm-line">-</span><br><span id="arm-held" hidden></span></div>
+        <div class="buttons">
+          <button type="button" class="btn" data-arm="home">Home</button>
+          <button type="button" class="btn" data-arm="rest">Rest</button>
+          <button type="button" class="btn" data-arm="center">Center</button>
+          <button type="button" class="btn" data-arm="torque-on">Torque on</button>
+          <button type="button" class="btn" data-arm="torque-off" title="ปิดแรงบิดได้เฉพาะตอนแขนพัก (resting)">Torque off</button>
+          <button type="button" class="btn" id="btn-arm-stop">Stop</button>
+        </div>
+      </div>
       <div class="panel desk-only">
         <div class="ph">เว็บแคมของแขน<span id="badge-webcam-desk">-</span></div>
         <div class="slot" data-slot="webcam"></div>
@@ -304,6 +316,10 @@
     <section class="tab" id="tab-logs" hidden>
       <p class="note">งานที่วิ่งล่าสุด (logs/ บน Pi)</p>
       <div class="panel rows" id="runs"><p class="note">กำลังโหลด</p></div>
+      <div class="panel rows">
+        <div class="ph">คำสั่งล่าสุด<span class="num">30 บรรทัด ใหม่สุดก่อน</span></div>
+        <div class="table-wrap"><table class="tbl" id="commands-table"></table></div>
+      </div>
     </section>
 
     <!-- Help -->

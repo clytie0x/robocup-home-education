@@ -27,7 +27,10 @@ Events go out on /robot/event, the names hmc_flow.py reads.
 
 The console's arm buttons (agent.py POST /arm) on TCP 127.0.0.1:ARM_CMD_PORT, one JSON object per line in,
 one JSON line out ({"ok", "error", ...}): {"cmd": "home" | "rest" | "center" | "stop" | "state"},
-{"cmd": "torque", "on": true | false}. Refused while a bag job runs, except stop and state; torque off only
+{"cmd": "torque", "on": true | false}, {"cmd": "pick_bag", "x", "y"[, "top", "yaw"]} and {"cmd": "drop_bag", "x",
+"y"} (the params of /robot/command, run as the same bag job: one at a time from either side; the answer comes when
+it is done, with "code", "message" and "reading", their grasp reading; the job's event still goes out on
+/robot/event). Refused while a bag job runs, except stop and state; torque off only
 while /arm/state is "resting" (the arm drops when released elsewhere). center = /arm/home, then MoveIt to
 the middle of each arm joint's limits (the robot description's), then the gripper to the middle of its own.
 While center or torque on holds the arm in the owner's pose, their rest_after_s is 0 (their auto rest would
@@ -51,8 +54,10 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
+import console_gate
 import front_camera
 import gripper_camera as gc
+import ports
 from floor_pick import JAW_OPEN, READY, Failure, FloorPick, Planner, Result
 from so100_ik import ARM, JOINTS, Kinematics, Mount, Unreachable, load_limits
 
@@ -68,7 +73,7 @@ LOOK_CLEAR = 0.08         # m, the gripper stays this far above the assumed top 
 HOME_TIMEOUT = 60.0
 PICK_TIMEOUT = 150.0      # their pick: up to 3 tries, slow carry (bag_speed 0.08)
 PLACE_TIMEOUT = 120.0
-ARM_CMD_PORT = 5607       # TCP on 127.0.0.1: the console's arm commands from agent.py (ArmCommands)
+ARM_CMD_PORT = ports.ARM_CMD  # TCP on 127.0.0.1: the console's arm commands from agent.py (ArmCommands)
 CENTER_HOME_TIMEOUT = 30.0  # center's steps fit in agent.py's ARM_TIMEOUT (90 s)
 CENTER_MOVE_TIMEOUT = 45.0
 GRIP_TIMEOUT = 10.0
@@ -260,17 +265,21 @@ class Jobs:
             return
         if action not in ("pick_bag", "drop_bag"):
             return
-        fail = "grab_failed" if action == "pick_bag" else "drop_failed"
+        refused = self.start(action, p)
+        if refused is not None:
+            self.arm.event("%s|%s|%s" % ("grab_failed" if action == "pick_bag" else "drop_failed", *refused))
+
+    def start(self, action, p, done=None):
+        """One pick_bag or drop_bag job with params p on the thread; done(Result) when it ends. None when it started,
+        else (CODE, message) why not (on /robot/command that is the failed event)."""
         try:
             x, y = float(p["x"]), float(p["y"])
             top = float(p["top"]) if p.get("top") is not None else None
             yaw = float(p["yaw"]) if p.get("yaw") is not None else None
         except (KeyError, TypeError, ValueError):
-            self.arm.event("%s|FAILED|%s needs x and y" % (fail, action))
-            return
+            return "FAILED", "%s needs x and y" % action
         if not (math.isfinite(x) and math.isfinite(y)):
-            self.arm.event("%s|FAILED|%s needs finite x and y" % (fail, action))
-            return
+            return "FAILED", "%s needs finite x and y" % action
         run = (lambda: self.arm.pick(x, y, top, yaw)) if action == "pick_bag" else (lambda: self.arm.place(x, y))
 
         def job():
@@ -278,16 +287,17 @@ class Jobs:
                 self.before()
             except Exception as exc:  # noqa: BLE001 (the bag job goes on without the console's auto rest)
                 self.log("rest_after_s not put back: %s" % exc)
-            run()
+            result = run()
+            if done is not None:
+                done(result)
         with self.lock:
             if self.console is not None:
-                self.arm.event("%s|BUSY|the console is moving the arm (%s)" % (fail, self.console))
-                return
+                return "BUSY", "the console is moving the arm (%s)" % self.console
             if self.busy():
-                self.arm.event("%s|BUSY|another arm job is running" % fail)
-                return
+                return "BUSY", "another arm job is running"
             self.thread = threading.Thread(target=job, daemon=True)
             self.thread.start()
+        return None
 
 
 def urdf_limits(urdf_xml):
@@ -338,9 +348,11 @@ class ArmCommands:
             self.log("console: stop")
             self.api.stop()
             return {"ok": True, "error": None}
+        if name in ("pick_bag", "drop_bag"):
+            return self._bag_job(name, cmd)
         moves = {"home": self._task, "rest": self._task, "center": self._center, "torque": self._torque}
         if name not in moves:
-            return {"ok": False, "error": "cmd must be one of home, rest, center, torque, stop, state"}
+            return {"ok": False, "error": "cmd must be one of home, rest, center, torque, pick_bag, drop_bag, stop, state"}
         if name == "torque" and not isinstance(cmd.get("on"), bool):
             return {"ok": False, "error": "torque needs \"on\": true or false"}
         if not self.jobs.claim(name):
@@ -371,6 +383,19 @@ class ArmCommands:
     def _answer(ok, code, msg, **extra):
         return dict({"ok": bool(ok), "error": None if ok else "%s: %s" % (code, msg), "code": code,
                      "message": msg}, **extra)
+
+    def _bag_job(self, name, cmd):
+        """pick_bag / drop_bag from the console: the same Jobs job as /robot/command's (one BUSY rule for both),
+        answered when it ends, with their grasp reading."""
+        got = []
+        refused = self.jobs.start(name, cmd, done=got.append)
+        if refused is not None:
+            return self._answer(False, *refused)
+        self.log("console: %s" % name)
+        self.jobs.thread.join()
+        if not got:
+            return self._answer(False, "FAILED", "the %s job ended without a result (see the bag_arm log)" % name)
+        return self._answer(got[0].ok, got[0].code, got[0].message, reading=self.jobs.arm._reading())
 
     def _task(self, name, _cmd):
         self.release()
@@ -551,13 +576,15 @@ def parse(argv=None):
     ap.add_argument("--place", nargs=2, type=float, metavar=("X", "Y"))
     ap.add_argument("--top", type=float, help="pick: the bag top above the floor (m), skip the camera")
     ap.add_argument("--camera-file", default=gc.DEFAULT_FILE)
-    ap.add_argument("--snap-url", default="http://127.0.0.1:8082/snap.jpg")
+    ap.add_argument("--snap-url", default="http://127.0.0.1:%d/snap.jpg" % ports.WEBCAM)
     ap.add_argument("--front-camera-file", default=front_camera.DEFAULT_FILE)
     return ap.parse_args(argv)
 
 
 def main(argv=None):
     a = parse(argv)
+    if a.pick or a.place:  # a shell move; bag_arm as the agent's node takes its moves from the console and the task
+        console_gate.require("arm: bag_arm.py --pick/--place")
     from floor_pick import RosArm  # noqa: PLC0415 (ROS only here)
     kin = Kinematics(Mount(), load_limits())
     try:

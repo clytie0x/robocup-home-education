@@ -11,7 +11,8 @@
                               adds heartbeat=1 only to a status read a browser just asked it for).
   POST /control  {"pause": true} | {"search": false} | {"close_plan": true} | {"max_speed": 0.08} | {"end": true}
                  -> {"error": null or text, "controls": the switches}; 400 when refused
-  POST /command  {"command": "follow" | "wait" | "resume" | "return"} -> {"error": null, "command": name},
+  POST /command  {"command": "follow" | "wait" | "resume" | "return" | "bag" | "bag_again" | "bag_near"}
+                 -> {"error": null, "command": name},
                  400 {"error": text} for anything else. The task buttons, when voice or the Jetson is down:
                  taken in the next cycle as the --remote client's commands are, except that a page "wait"
                  holds (status held "page") until the page's own resume, follow or return; without --remote
@@ -36,11 +37,13 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-PORT = 8080
+import ports
+
+PORT = ports.DASHBOARD
 PAGE = Path(__file__).resolve().parent / "dashboard.html"
 # the task buttons: the --remote client's commands but stop and ping ("bag": the virtual operator's word for the
-# flow's find_bag, run_follow's BAG phase)
-COMMANDS = ("follow", "wait", "resume", "return", "bag")
+# flow's find_bag, run_follow's BAG phase; all three bag commands: the console's step commands)
+COMMANDS = ("follow", "wait", "resume", "return", "bag", "bag_again", "bag_near")
 COMMANDS_KEPT = 10  # presses kept while nobody takes them (run_follow waiting for Enter): the newest
 CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS"}  # reading only
 CONSOLE_HEADER = "X-HMC-Console"  # a custom header: a page of another site cannot send it without a CORS yes

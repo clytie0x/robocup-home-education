@@ -127,7 +127,8 @@ instead of after 20 s and 30 s; do not also keep the crontab lines.
   Jetson terminal, then Start all. The new agent does not own it, so the console cannot stop
   it.
 - Rollback: from the laptop, `base/tools/deploy.sh --rollback` restores the newest
-  `backups/deploy-<time>.tar.gz` on both hosts. It does not restart anything, so restart the
+  `backups/deploy-<time>.tar.gz` on both hosts. Like a deploy it asks the console for the hold
+  first (refused while a job runs or the arm moves) and releases it at the end. It does not restart anything, so restart the
   console and the agent as above afterwards.
 - Jetson USB-A ports dead: only a full power cycle brings them back (hardware assessment
   2026-11-14). Do not replug USB near the running Jetson; power off, unplug, plug in.

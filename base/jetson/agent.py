@@ -23,6 +23,7 @@ Programs (run from this folder, ~/hmc-follow; the ROS ones with /opt/ros/jazzy a
                                    server (127.0.0.1:5607, see its docstring) and its answer back: 200 when it
                                    says ok, 409 when it refuses or fails, 503 when bag_arm.py does not answer,
                                    502 when it drops the line, 504 after ARM_TIMEOUT (center: home, a MoveIt move and the gripper)
+                                   or, for pick_bag and drop_bag (a whole bag job), ARM_JOB_TIMEOUT
   GET  /arm                        {"cmd": "state"}'s answer: /arm/state, the joints (rad), "busy"
 
 GET /status (the robot console shows it; base/pi/telemetry.py stores the metrics). Every metric is a
@@ -67,9 +68,11 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import ports
+
 HERE = Path(__file__).resolve().parent
 LOGS = HERE / "logs"
-PORT = 8090
+PORT = ports.AGENT
 ALLOW = ("127.0.0.1", "10.0.0.1", "192.168.31.21")  # localhost and the Pi on the LAN cable and the Wi-Fi
 ROS = "source /opt/ros/jazzy/setup.bash && export ROS_DOMAIN_ID=42 && "
 # Where the voice side lives on the Jetson. Both must be checked on the robot before the first start-all:
@@ -80,14 +83,14 @@ VOICE_WS = "~/ros2_ws"
 # servers.sh start_whisper without its "&" (the agent must see the server run) and without the download:
 # small.en when it is there, else base.en, as pick_model does offline
 WHISPER = ("M=%(r)s/models/whisper/ggml-small.en-q5_1.bin; [ -s \"$M\" ] || M=%(r)s/models/whisper/ggml-base.en-q5_1.bin; "
-           "exec %(r)s/src/whisper.cpp/build/bin/whisper-server -m \"$M\" -l en -t 4 --host 127.0.0.1 --port 8080"
-           % {"r": VOICE_ROOT})
+           "exec %(r)s/src/whisper.cpp/build/bin/whisper-server -m \"$M\" -l en -t 4 --host 127.0.0.1 --port %(p)d"
+           % {"r": VOICE_ROOT, "p": ports.WHISPER})
 # bag_arm: a real pick took 30.4 s and a real place 30.0 s on the arm, but bag_arm may need /arm/home 60 s +
 # pick 150 s, so the flow waits 240 s for a pick and 60 s for a place
 FLOW_ARGS = "--ros-args -p use_arm:=true -p grab_timeout:=240.0 -p drop_timeout:=60.0"
 PROGRAMS = {  # name: (shell command, needs ROS, TCP port that says it is up, or None)
-    "detector": ("python3 server.py", False, 5601),
-    "whisper": (WHISPER, False, 8080),
+    "detector": ("python3 server.py", False, ports.DETECTOR),
+    "whisper": (WHISPER, False, ports.WHISPER),
     "voice": ("source %s/install/setup.bash && ros2 launch voice_assistant hmc_voice.launch.py" % VOICE_WS, True, None),
     "bridge": ("python3 base_bridge.py --pi-host 10.0.0.1,192.168.31.21", True, None),
     # the arm stack (driver, MoveIt, pick_place with /arm/*): before 2026-11-15 it was started by hand from a
@@ -96,7 +99,7 @@ PROGRAMS = {  # name: (shell command, needs ROS, TCP port that says it is up, or
                  " rviz:=false", True, None),
     # the arm's webcam (/dev/video0) for the console's Live tab and bag_arm's /snap.jpg; before 2026-11-16 only
     # ever started by hand, so a copy started that way is used as it is (SHARED)
-    "webcam": ("cd ~/so100_ws && exec python3 webcam_view.py", False, 8082),
+    "webcam": ("cd ~/so100_ws && exec python3 webcam_view.py", False, ports.WEBCAM),
     "arm": ("source ~/so100_ws/install/setup.bash && python3 bag_arm.py", True, None),
     "flow": ("python3 hmc_flow.py " + FLOW_ARGS, True, None),
 }
@@ -109,10 +112,11 @@ SHARED = ("whisper", "armstack", "webcam")  # start-all uses a copy started by h
 LOG_LINES = 20
 STOP_STEPS = ((signal.SIGINT, 5.0), (signal.SIGTERM, 3.0))  # ROS nodes end cleanly on Ctrl+C; SIGKILL after
 KILL = getattr(signal, "SIGKILL", signal.SIGTERM)
-HOLD_PORT = 5605  # base_bridge.py's HoldListener
+HOLD_PORT = ports.HOLD  # base_bridge.py's HoldListener
 HOLD_SETTLE = 0.3  # s for the bridge (a 50 ms timer) to pass the wait on
-ARM_CMD_PORT = 5607  # bag_arm.py's command server (TCP 127.0.0.1)
+ARM_CMD_PORT = ports.ARM_CMD  # bag_arm.py's command server (TCP 127.0.0.1)
 ARM_TIMEOUT = 90.0  # s: bag_arm's center takes at most 30 + 45 + 10 s
+ARM_JOB_TIMEOUT = 240.0  # s for pick_bag and drop_bag: home 60 + pick 150 + the camera looks (the flow's grab_timeout)
 UP_WAIT = 60.0  # s start-all waits for the detector's port (the TensorRT engines take a while)
 SETTLE = 3.0  # s start-all waits after a program without a port, before the next
 
@@ -190,8 +194,10 @@ class Program:
                 "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
             shell = ["bash", "-c", self.cmd] if os.name == "posix" else self.cmd
             try:
+                # the console starts every program through the agent: the arm gate lets HMC_CONSOLE_JOB through
                 self.proc = self.popen(shell, cwd=str(HERE), stdin=subprocess.DEVNULL, stdout=out,
-                                       stderr=subprocess.STDOUT, shell=os.name != "posix", **kwargs)
+                                       stderr=subprocess.STDOUT, shell=os.name != "posix",
+                                       env=dict(os.environ, HMC_CONSOLE_JOB="agent:%s" % self.name), **kwargs)
             except OSError as error:
                 return "%s did not start: %s" % (self.name, error)
             finally:
@@ -293,8 +299,10 @@ def send_hold(port=HOLD_PORT, settle=HOLD_SETTLE):
     time.sleep(settle)
 
 
-def arm_command(body, port=ARM_CMD_PORT, timeout=ARM_TIMEOUT):
-    """(http code, answer) of one command sent to bag_arm.py's command server."""
+def arm_command(body, port=ARM_CMD_PORT, timeout=None):
+    """(http code, answer) of one command sent to bag_arm.py's command server (timeout None: the command's own)."""
+    if timeout is None:
+        timeout = ARM_JOB_TIMEOUT if body.get("cmd") in ("pick_bag", "drop_bag") else ARM_TIMEOUT
     try:
         s = socket.create_connection(("127.0.0.1", port), 2.0)
     except OSError as error:  # refused, or on Windows a refused localhost connect that times out

@@ -33,13 +33,15 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+import ports
+
 HERE = Path(__file__).resolve().parent
 DB_PATH = HERE / "data" / "robot.db"  # on the Pi: ~/hmc-base/data/robot.db
 LOGS = HERE / "logs"  # run_follow.py's run logs (its LOG_ROOT)
 JETSON_HOSTS = ("10.0.0.2", "192.168.31.137")  # in the order tried: the LAN cable, then Wi-Fi
 HOST_NAMES = {"10.0.0.2": "cable", "192.168.31.137": "wifi", "100.108.202.48": "tailscale"}
-AGENT_PORT = 8090  # jetson/agent.py: GET /status
-LINK_PORTS = (8090, 5601)  # the agent, then the person detector
+AGENT_PORT = ports.AGENT  # jetson/agent.py: GET /status
+LINK_PORTS = (ports.AGENT, ports.DETECTOR)  # the agent, then the person detector
 PROBE_TIMEOUT_S = 0.3
 FETCH_TIMEOUT_S = 1.0
 MAX_STATUS = 1_000_000  # bytes; a bigger /status reply is broken

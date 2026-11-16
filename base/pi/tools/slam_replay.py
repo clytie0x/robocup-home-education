@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # lidar.py, params.py, slam_link.py
 import lidar  # noqa: E402
 import params  # noqa: E402
+import ports  # noqa: E402
 import slam_link  # noqa: E402
 
 
@@ -84,7 +85,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("logdir", type=Path)
     parser.add_argument("--host", default=params.load()["jetson_host"])
-    parser.add_argument("--port", type=int, default=5602)
+    parser.add_argument("--port", type=int, default=ports.SLAM)
     parser.add_argument("--speed", type=float, default=1.0, help="1.0 is real time")
     parser.add_argument("--fill", action="store_true", help="a record every cycle, for rate checks")
     parser.add_argument("--repair", action="store_true", help="fix the poses of an old log (see repaired_poses)")

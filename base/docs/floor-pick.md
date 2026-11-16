@@ -225,6 +225,7 @@ Run on the Jetson:
 ```
 source /opt/ros/jazzy/setup.bash; source ~/so100_ws/install/setup.bash; export ROS_DOMAIN_ID=42
 cd ~/hmc-follow   # wherever base/jetson is deployed
+export HMC_MAINTENANCE="floor pick bench"   # floor_pick.py moves the arm only for a logged repair (console_gate.py)
 ```
 
 0. `ros2 topic echo /arm/state --once`: the state must be idle or resting, with no fault.
