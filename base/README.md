@@ -21,6 +21,7 @@ Docs:
 - [Person-follow design](docs/superpowers/specs/2026-11-13-person-follow-design.md)
 - [Person-follow plan](docs/superpowers/plans/2026-11-13-person-follow.md)
 - [Systemd user units](systemd/README.md)
+- [New base firmware, design](docs/firmware-design.md); code in [firmware/](firmware/README.md), flashed 2026-11-14 (0c020e4)
 
 Run the tests from the repo root (Windows, `;` separates paths):
 
