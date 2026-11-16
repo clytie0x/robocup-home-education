@@ -1,8 +1,9 @@
 """The bag at the car (Help Me Carry 5.1): which bag the operator points at, then up to it until the arm reaches it.
 
 run_follow's BAG phase runs one BagTask, made by the client's "bag" (or "bag_again") while it waits in FOLLOW at
-the car. Pure logic: run_follow gives it each cycle's points, the operator and the pointing (View), sends the
-command it returns through the usual safety stop and the cable rules, and tells it what really went out (after).
+the car, or "bag_near" (no pointing: the nearest bag in front, also from IDLE, a step test from the console).
+Pure logic: run_follow gives it each cycle's points, the operator and the pointing (View), sends the command it
+returns through the usual safety stop and the cable rules, and tells it what really went out (after).
 
   pointing   stand still, asking the Jetson for pose; base/jetson/pointing.py turns the operator's keypoints (or,
              with --virtual-operator, the PC's pointed spot) into a floor point. Steady: about 1 s still.
@@ -47,6 +48,7 @@ import numpy
 import bag_depth
 import geometry
 import legs
+import ports
 import safety
 
 # The arm (owner's numbers, 2026-11-15)
@@ -92,6 +94,8 @@ MIN_POINTS = 3  # LiDAR points that make a sighting
 SIGHT_MIN = 0.16  # m from the laser
 BLIND_MARGIN = 0.03  # m: a bag predicted this near SIGHT_MIN is not lost when it is not seen
 AGAIN_R = 0.25  # m: bag_again looks for the last bag this close to where it was
+NEAR_BAG_R = 2.0  # m: bag_near takes the nearest bag within this of the turning centre
+NEAR_BAG_DEG = 40.0  # and within this of straight ahead
 LAY_KEEP = 0.05  # m beside the body's half width: the cable on the floor nearer the drive line blocks it
 VIRTUAL_R = 0.1  # m, a bag this close to a virtual bag is the virtual one
 # The look (base/docs/bag-sensing.md)
@@ -103,7 +107,7 @@ LOOK_AT = 1.1  # m: a far drive from farther stops here to look
 LOOK_DEPTH_S = 1.0  # s at the look stop waiting for a depth frame
 LOOK_RGB_S = 3.0  # s waiting for the Jetson's front camera answer (a frame over HTTP and the segmentation)
 YAW_OK = 0.5  # cluster_yaw confidence for a yaw to be passed on
-LOOK_PORT = 5606  # TCP on the Jetson: front_camera.serve (started by bag_arm.py)
+LOOK_PORT = ports.LOOK  # TCP on the Jetson: front_camera.serve (started by bag_arm.py)
 POINTING, TURN_STATE, FAR, CREEP_STATE, SETTLE, REACHED, FAILED = (
     "pointing", "turn", "far", "creep", "settle", "reached", "failed")
 
@@ -226,7 +230,8 @@ def camera_pointing(answer, operator, frame, p):
 
 
 class BagTask:
-    """One "bag" (mode "point") or "bag_again" (mode "again": the last bag, measured and approached once more)."""
+    """One "bag" (mode "point"), "bag_again" (mode "again": the last bag, measured and approached once more) or
+    "bag_near" (mode "near": the nearest bag in front, nobody points)."""
 
     def __init__(self, p, now, seq, mode="point", last=None, look=False, rgb=False):
         self.p, self.seq, self.mode = p, seq, mode
@@ -352,6 +357,8 @@ class BagTask:
         now = view.now
         if self.mode == "again":
             return self._again(view)
+        if self.mode == "near":
+            return self._ahead(view)
         if now - self.t0 > POINTING_S:
             if self.no_bag_since is not None:
                 return self._fail("NO_BAG", "no bag where you point")
@@ -385,6 +392,18 @@ class BagTask:
         self._choose(view, bag)
         self.chosen = {"x": round(bag[0], 3), "y": round(bag[1], 3), "side": None, "say": "I will look at the bag again.",
                        "point": None, "candidates": len(near)}
+        return self._plan(view)
+
+    def _ahead(self, view):
+        """bag_near: the nearest bag within NEAR_BAG_R and NEAR_BAG_DEG of straight ahead."""
+        near = [c for c in self._bags(view)
+                if math.hypot(*c) <= NEAR_BAG_R and abs(math.degrees(math.atan2(c[1], c[0]))) <= NEAR_BAG_DEG]
+        if not near:
+            return self._fail("NO_BAG", "no bag within %.1f m in front of me" % NEAR_BAG_R)
+        bag = min(near, key=lambda c: math.hypot(*c))
+        self._choose(view, bag)
+        self.chosen = {"x": round(bag[0], 3), "y": round(bag[1], 3), "side": None,
+                       "say": "I will go to the bag in front of me.", "point": None, "candidates": len(near)}
         return self._plan(view)
 
     def _bags(self, view):

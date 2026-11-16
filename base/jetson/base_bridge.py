@@ -75,8 +75,10 @@ import socket
 import time
 from pathlib import Path
 
-PORT = 5604
-HOLD_PORT = 5605  # UDP on 127.0.0.1: agent.py asks for a hold here (see HoldListener)
+import ports
+
+PORT = ports.COMMAND
+HOLD_PORT = ports.HOLD  # UDP on 127.0.0.1: agent.py asks for a hold here (see HoldListener)
 PING_S = 0.5
 LOST_DEBOUNCE_S = 0.5
 LINK_TIMEOUT_S = 1.5

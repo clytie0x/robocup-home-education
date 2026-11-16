@@ -17,8 +17,10 @@ import json
 import select
 import socket
 
-PORT = 5604
-COMMANDS = ("follow", "wait", "resume", "return", "stop", "ping", "bag", "bag_again")  # bag: run_follow's BAG phase
+import ports
+
+PORT = ports.COMMAND
+COMMANDS = ("follow", "wait", "resume", "return", "stop", "ping", "bag", "bag_again", "bag_near")  # bag: run_follow's BAG phase
 MAX_LINE = 4096  # bytes; a longer line is not a command
 MAX_READ = 16 * MAX_LINE  # bytes taken in one poll; the rest waits for the next cycle
 MAX_UNSENT = 65536  # bytes of status waiting for a client that does not read: drop that client

@@ -16,9 +16,11 @@ still until resume, follow or return. The way back starts where follow came.
 
 BAG (--remote): the client's "bag" while it holds the robot with wait in FOLLOW (at the car) finds the bag the
 operator points at and drives up to it until the arm reaches it (bag.py); "bag_again" measures and approaches
-the last bag once more. The status line carries "bag": its id, state, the chosen bag and the result; the
+the last bag once more; "bag_near" goes to the nearest bag in front, nobody points, also from IDLE (a step test
+from the console). The status line carries "bag": its id, state, the chosen bag and the result; the
 record "bag" is the chosen bag in the odometry frame (the PC's virtual operator app shows it). Wait, resume,
-follow or return cancel it; the drive counts as path for the way back. Then FOLLOW, still waiting.
+follow or return cancel it; the drive counts as path for the way back. Then the phase it came from: FOLLOW,
+still waiting, or IDLE.
 
 The dashboard's task buttons (Follow, Wait, Resume, Go back) work when voice or the Jetson is down:
 with --remote they are taken as the client's commands, without it Go back is Enter and Wait holds
@@ -68,6 +70,7 @@ import link as link_module
 import live_feed
 import motion as motion_module
 import params
+import ports
 import remote_plan
 import safety
 import velocity
@@ -132,7 +135,7 @@ hmc_navigation.plan_path = _plan_path_logged
 
 PERIOD = 0.1  # s, one LiDAR revolution
 SLOW_CYCLE = 0.4  # s; a longer cycle stops the wheels and ends the run
-PLAN_PORT = 5603  # plan_server.py
+PLAN_PORT = ports.PLAN  # plan_server.py
 SAVE_EVERY = 10  # save every 10th JPEG; every scan is saved, so a lost track can be replayed
 SEARCH_AGAIN_EVERY = 10.0  # s; after asking the operator back, turn on the spot again (hmc.follower)
 # hmc.follower's pace and stop-and-go for this base (the simulation keeps its own, set for 1 m/s). It started at
@@ -154,7 +157,7 @@ LOG_ROOT = Path(__file__).resolve().parent / "logs"  # on the Pi: ~/hmc-base/log
 FOLLOW, RETURN, DONE = "follow", "return", "done"  # the phases of a run
 IDLE = "idle"  # --remote only: before the client's follow; the wheels stay stopped
 BAG = "bag"  # --remote only: from FOLLOW held by the client's wait, up to the pointed bag (bag.py), then FOLLOW again
-BAG_COMMANDS = {"bag": "point", "bag_again": "again"}  # command -> bag.BagTask mode
+BAG_COMMANDS = {"bag": "point", "bag_again": "again", "bag_near": "near"}  # command -> bag.BagTask mode
 STATUS_EVERY = 0.2  # s; --remote status lines at most 5 Hz (and after each command)
 REMOTE_SILENCE = 2.0  # s without a command line from the --remote client: hold still until resume, follow or return
 REFUSED_IDLE = {"return": "not following yet", "stop": "idle: nothing to stop"}  # --remote commands IDLE answers with an error
@@ -285,6 +288,7 @@ class State:
         self.virtual = None  # virtual_operator.VirtualOperator (--virtual-operator): a simulated person, or None
         self.bag = None  # bag.BagTask: the running one in BAG, then the last one (its result stays on the status)
         self.bag_seq = 0  # bag tasks so far this run
+        self.bag_from = FOLLOW  # the phase the running bag task came from, and goes back to (bag_near: IDLE too)
         self.bag_odom = None  # odometry (x, y) of the last chosen bag (record "bag", and what bag_again looks for)
         self.bag_look = None  # bag.Look: the Jetson's front camera measures the bag when depth cannot (None: no Jetson)
 
@@ -415,20 +419,24 @@ def _remote_commands(state, now):
     taken = []
     for i, cmd in enumerate(commands + page):
         by_page = i >= len(commands)
-        refused = REFUSED_IDLE.get(cmd) if state.phase == IDLE else None
+        # a return in a bag task from IDLE is IDLE's too: taken, it would wait in go_back and end the next follow
+        idle = state.phase == IDLE or (state.phase == BAG and state.bag_from == IDLE and cmd == "return")
+        refused = REFUSED_IDLE.get(cmd) if idle else None
         if refused is None and cmd in BAG_COMMANDS:
-            refused = _bag_refused(state)
+            refused = _bag_refused(state, cmd)
         if refused is not None:
             if not by_page:
                 remote.send(dict({"error": refused}, **({"refused": cmd} if cmd in BAG_COMMANDS else {})))
-            state.log.write({"time": now, "remote_refused": cmd, "why": refused, "by": "page" if by_page else "client"})
+            state.log.write({"time": now, "remote_refused": cmd, "why": refused, "by": "page" if by_page else "client",
+                             "wall": time.time()})  # wall: the console merges these into its command list
             continue
         taken.append(cmd)
         if cmd == "ping":
             continue
         if not by_page:
             state.ack = cmd  # the client's own last command: the bridge must not take a page press for its own
-        state.log.write({"time": now, "page_cmd" if by_page else "remote_cmd": cmd})
+        state.log.write(dict({"time": now, "page_cmd" if by_page else "remote_cmd": cmd},
+                             **({} if by_page else {"wall": time.time()})))  # wall: for the console's command list
         if by_page:
             _page_command(state, cmd)
         if state.phase == BAG and cmd in ("wait", "resume", "follow", "return"):
@@ -448,18 +456,23 @@ def _remote_commands(state, now):
             state.go_back.set()
         if cmd in ("wait", "resume", "follow", "return"):
             state.waiting = cmd == "wait"  # follow and return may move again, as resume
-        if cmd in ("resume", "follow", "return") and state.silent:
+        # bag_near too: from IDLE with no Jetson the silence latched long before the console's step test
+        if cmd in ("resume", "follow", "return", "bag_near") and state.silent:
             state.silent = False
             state.log.write({"time": now, "remote": "silence hold released by %s" % cmd})
     return taken
 
 
-def _bag_refused(state):
-    """Why a bag command cannot start now, or None: only at the car, in FOLLOW held by the client's wait."""
+def _bag_refused(state, cmd):
+    """Why a bag command cannot start now, or None: only at the car, in FOLLOW held by the client's wait; bag_near
+    also from IDLE (no operator needed: a step test from the console)."""
     if state.phase == BAG:
         return "bag: a bag task is running"
-    if state.phase != FOLLOW or not state.waiting:
-        return "bag: only while waiting at the car (FOLLOW after wait), not in %s" % state.phase.upper()
+    if cmd == "bag_near" and state.phase == IDLE:
+        pass
+    elif state.phase != FOLLOW or not state.waiting:
+        return "bag: only while waiting at the car (FOLLOW after wait)%s, not in %s" % (
+            " or in IDLE" if cmd == "bag_near" else "", state.phase.upper())
     if state.wheels_held:
         return "bag: held for the wheels"
     return None
@@ -469,15 +482,16 @@ def _start_bag(state, now, cmd):
     state.bag_seq += 1
     state.bag = bag_module.BagTask(state.p, now, state.bag_seq, BAG_COMMANDS[cmd], last=state.bag_odom, look=True,
                                    rgb=state.bag_look is not None)
-    state.phase = BAG
+    state.bag_from, state.phase = state.phase, BAG
     state.log.write({"time": now, "bag": "start", "mode": state.bag.mode, "seq": state.bag_seq})
 
 
 def _end_bag(state, now, by=None):
-    """Back to FOLLOW, held by the wait the bag came in (a command that cancelled it then does what it does)."""
+    """Back to the phase it came from: FOLLOW, held by the wait the bag came in, or IDLE (a command that cancelled
+    it then does what it does)."""
     if by is not None:
         state.bag.cancel(now, by)
-    state.phase = FOLLOW
+    state.phase = state.bag_from
     state.body.robot.speed = state.body.robot.turn_speed = 0.0  # the brain ramps up from standstill
     _replan(state)
     state.log.write({"time": now, "bag": "end", "status": state.bag.status()})

@@ -14,7 +14,9 @@ It runs on the Pi, which has the LiDAR clusters, the operator's LiDAR track and 
 `../jetson/pointing.py` on the laptop), so there is one source.
 
 1. `hmc_flow.py` at the car: wait, then "Please point at the bag." and `find_bag`; `base_bridge.py` sends Pi `bag`.
-   The Pi takes it only in FOLLOW held by that wait, and enters BAG.
+   The Pi takes it only in FOLLOW held by that wait, and enters BAG. Without pointing, the console's `bag_near`
+   (`robotctl run bag_near`, also from IDLE) skips steps 2 and 3: the nearest bag-sized LiDAR cluster within
+   `NEAR_BAG_R` 2.0 m and `NEAR_BAG_DEG` 40 deg of straight ahead, else NO_BAG (robot-console.md, step commands).
 2. BAG, pointing: the robot stands; every frame goes to the Jetson with `pose=True` (only now). The camera person
    nearest the operator's LiDAR bearing (within 10 deg) gives `pointing()`; `Steady` needs about 1 s. With
    `--virtual-operator` the PC's pointed spot stands in for it (no camera). No steady pointing in 20 s: NOT_POINTED.

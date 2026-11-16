@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 import numpy as np
 
@@ -133,6 +134,7 @@ class KinematicsTest(unittest.TestCase):
         self.assertLessEqual(hi, 3.5)
 
 
+import console_gate  # noqa: E402
 import floor_pick  # noqa: E402
 import gripper_camera as gc  # noqa: E402
 from floor_pick import CLOSED, GRIP_HELD, JAW_OPEN, REST, FloorPick, Planner  # noqa: E402
@@ -358,6 +360,16 @@ class DryRunTest(unittest.TestCase):
             code = floor_pick.main(["--dry-run", "--place", "0.32", "0.0"])
         self.assertEqual(code, 0, out.getvalue()[-500:])
         self.assertIn("/robot/event: drop_done", out.getvalue())
+
+    def test_a_real_arm_run_needs_the_console_or_a_logged_repair(self):
+        with mock.patch.dict(os.environ):
+            for name in (console_gate.ENV, console_gate.MAINTENANCE_ENV):
+                os.environ.pop(name, None)
+            with mock.patch.object(floor_pick, "RosArm", side_effect=AssertionError("moved")):
+                with self.assertRaisesRegex(RuntimeError, "REFUSED: arm: floor_pick.py"):
+                    floor_pick.main(["--pick", "0.32", "0.0"])
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(floor_pick.main(["--dry-run", "--pick", "0.32", "0.0"]), 0)  # sends nothing
 
 
 def true_camera():

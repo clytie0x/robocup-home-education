@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import camera  # noqa: E402
+import ports  # noqa: E402
 
 SCAN_RANGE = 4.0  # m drawn from the centre
 KEEP_SCANS = 5  # revolutions drawn together (0.5 s at 10 Hz), the older ones fainter
@@ -162,10 +163,10 @@ def handler_for(latest, fps, scan=None, usb_url=None):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--port", type=int, default=8081)
+    ap.add_argument("--port", type=int, default=ports.CONSOLE)
     ap.add_argument("--fps", type=float, default=30.0, help="frames a second to each viewer (the Xtion gives 30)")
     ap.add_argument("--no-lidar", action="store_true", help="camera only (the LiDAR is in use elsewhere)")
-    ap.add_argument("--usb-port", type=int, default=8082,
+    ap.add_argument("--usb-port", type=int, default=ports.WEBCAM,
                     help="port of the arm team's webcam_view.py on jetson_host, relayed as /usb-stream")
     args = ap.parse_args()
     import params

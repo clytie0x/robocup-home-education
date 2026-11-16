@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 from http.server import ThreadingHTTPServer
@@ -32,6 +33,7 @@ class FakeAgent:
 
     def __init__(self):
         self.posts, self.down, self.arm = [], False, {"busy": False, "state": "resting", "error": None}
+        self.timeouts = []  # of the POSTs
 
     def __call__(self, url, body=None, timeout=2.0):
         if self.down:
@@ -41,7 +43,23 @@ class FakeAgent:
         if body is None:
             return 200, dict(self.arm)
         self.posts.append(body)
+        self.timeouts.append(timeout)
         return 200, {"ok": True, "error": None}
+
+
+class FakeRun:
+    """run_follow's dashboard as Console.fetch sees it: /command queues, /status gives record."""
+
+    def __init__(self):
+        self.commands, self.record, self.down = [], None, False
+
+    def __call__(self, url, body=None, timeout=2.0):
+        if self.down:
+            raise OSError("refused")
+        if url.endswith("/command"):
+            self.commands.append(body["command"])
+            return 200, {"error": None, "command": body["command"]}
+        return 200, {"record": self.record}
 
 
 class ControlTest(unittest.TestCase):
@@ -108,6 +126,40 @@ class ControlTest(unittest.TestCase):
         code, body = self.request("/api/commands?n=2")
         self.assertEqual((code, [c["path"] for c in body["commands"]]), (200, ["/api/task/start", "/api/stop"]))
 
+    def run_log(self, name, records):
+        folder = Path(self.tmp.name) / name
+        folder.mkdir(parents=True)
+        (folder / "log.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+    def test_the_voice_flows_commands_join_the_list(self):
+        now = time.time()
+        self.run_log("20261115-090000", [{"time": 5.0, "remote_cmd": "wait", "wall": now - 9}])  # an older run
+        self.run_log("20261116-100000", [
+            {"time": 10.0, "remote_cmd": "follow", "wall": now - 5},
+            {"time": 10.1, "pose": [0, 0, 0]},  # a cycle
+            {"time": 11.0, "remote_refused": "bag", "why": "not following yet", "by": "client", "wall": now - 4},
+            {"time": 11.5, "remote_refused": "bag", "why": "not following yet", "by": "page", "wall": now - 3},
+            {"time": 11.6, "page_cmd": "wait", "wall": now - 3},  # the console's own, logged there already
+            {"time": 12.0, "remote_cmd": "return"},  # from before "wall": no time to place it by
+            {"time": 13.0, "remote_cmd": "return", "wall": now + 60}])
+        self.request("/api/stop", {})
+        code, body = self.request("/api/commands?n=20")
+        self.assertEqual(code, 200)
+        got = [(c["client"], c["path"], c["code"], c["error"]) for c in body["commands"]]
+        self.assertEqual(got, [("voice (Jetson)", "follow", 200, None),
+                               ("voice (Jetson)", "bag", None, "not following yet"),
+                               ("page", "/api/stop", 200, None),
+                               ("voice (Jetson)", "return", 200, None)])
+        self.assertEqual(set(body["commands"][0]), set(self.log()[0]))  # the shape of the console's own lines
+        self.assertEqual([c["path"] for c in self.request("/api/commands?n=2")[1]["commands"]], ["/api/stop", "return"])
+
+    def test_only_the_end_of_the_run_log_is_read(self):
+        self.run_log("20261116-100000", [{"time": 1.0, "remote_cmd": "follow", "wall": 1.0}]
+                     + [{"time": 2.0, "cycle": "x" * 100}] * 50 + [{"time": 3.0, "remote_cmd": "wait", "wall": 3.0}])
+        self.assertEqual([c["path"] for c in console.voice_commands(self.tmp.name, size=2000)], ["wait"])
+        self.assertEqual([c["path"] for c in console.voice_commands(self.tmp.name)], ["follow", "wait"])
+        self.assertEqual(console.voice_commands(Path(self.tmp.name) / "missing"), [])
+
     def test_arm_commands_are_relayed_to_the_agent(self):
         self.assertEqual(self.request("/api/arm", {"cmd": "center"})[0], 200)
         self.assertEqual(self.request("/api/arm", {"cmd": "torque", "on": False})[0], 200)
@@ -125,6 +177,49 @@ class ControlTest(unittest.TestCase):
         self.assertIn("task", body["error"])
         self.assertEqual(self.request("/api/arm/stop", {})[0], 200)
         self.assertEqual(self.agent.posts, [{"cmd": "stop"}])
+
+    def test_the_bag_commands_go_to_the_run(self):
+        self.console.fetch = run = FakeRun()
+        self.jobs.running = {"kind": "task", "label": "Drive task"}
+        for command in ("bag", "bag_again", "bag_near"):
+            self.assertEqual(self.request("/api/run/command", {"command": command})[0], 200, command)
+        self.assertEqual(self.request("/api/run/command", {"command": "bag_far"})[0], 400)
+        self.assertEqual(run.commands, ["bag", "bag_again", "bag_near"])
+
+    def test_pick_and_drop_at_a_given_point_wait_for_the_whole_bag_job(self):
+        pick = {"cmd": "pick_bag", "x": 0.31, "y": 0.01, "top": 0.27, "yaw": 0.4}
+        code, body = self.request("/api/arm", pick)
+        self.assertEqual((code, body["sent"]), (200, pick))
+        self.assertEqual(self.request("/api/arm", {"cmd": "drop_bag", "x": 0.3, "y": -0.1, "top": 9})[0], 200)
+        self.assertEqual(self.agent.posts, [pick, {"cmd": "drop_bag", "x": 0.3, "y": -0.1}])  # a drop has no top
+        self.assertEqual(self.agent.timeouts, [console.ARM_JOB_TIMEOUT] * 2)
+        self.assertGreaterEqual(console.ARM_JOB_TIMEOUT, 60 + 150)  # bag_arm's HOME_TIMEOUT + PICK_TIMEOUT
+        for bad in ({"cmd": "drop_bag", "x": 0.3}, {"cmd": "pick_bag", "x": True, "y": 0.0},
+                    {"cmd": "pick_bag", "x": float("nan"), "y": 0.0}, {"cmd": "pick_bag", "x": 0.3, "y": 0.0, "top": "high"}):
+            self.assertEqual(self.request("/api/arm", bad)[0], 400, bad)
+        code, body = self.request("/api/arm", {"cmd": "pick_bag"})  # no task, no point
+        self.assertEqual(code, 409)
+        self.assertIn("no reached bag", body["error"])
+        self.assertEqual(len(self.agent.posts), 2)
+
+    def test_a_pick_takes_the_runs_reached_bag_and_waits_while_its_bag_task_drives(self):
+        self.console.fetch = run = FakeRun()
+        self.jobs.running = {"kind": "task", "label": "Drive task"}
+        reached = {"ok": True, "code": "OK", "x": 0.305, "y": 0.012, "odometry_m": 0.02, "top": 0.26, "top_by": "depth"}
+        run.record = {"phase": "bag", "bag_task": {"state": "creep", "result": None}}
+        for cmd in ({"cmd": "pick_bag"}, {"cmd": "drop_bag", "x": 0.3, "y": 0.0}):
+            code, body = self.request("/api/arm", cmd)
+            self.assertEqual(code, 409)
+            self.assertIn("moving the base", body["error"])
+        run.record = {"phase": "follow", "bag_task": {"state": "reached", "result": reached}}
+        self.assertEqual(self.request("/api/arm", {"cmd": "pick_bag"})[0], 200)
+        self.assertEqual(self.agent.posts, [{"cmd": "pick_bag", "x": 0.305, "y": 0.012, "top": 0.26}])
+        run.record = {"phase": "idle", "bag_task": {"state": "failed", "result": {"ok": False, "code": "NO_BAG"}}}
+        self.assertEqual(self.request("/api/arm", {"cmd": "pick_bag"})[0], 409)
+        self.assertEqual(self.request("/api/arm", {"cmd": "home"})[0], 409)  # the other moves wait for the task's end
+        run.down = True
+        self.assertEqual(self.request("/api/arm", {"cmd": "pick_bag", "x": 0.3, "y": 0.0})[0], 503)
+        self.assertEqual(len(self.agent.posts), 1)
 
     def test_stop_stops_the_arm_too_and_the_base_without_the_agent(self):
         code, body = self.request("/api/stop", {}, pin=None, page=False)
@@ -254,14 +349,68 @@ class RobotctlTest(unittest.TestCase):
             (["jetson", "start-all"], ("POST", "/api/jetson/start-all", {})),
             (["hold"], ("POST", "/api/hold", {"who": "me"})), (["release"], ("POST", "/api/release", {})),
             (["log"], ("GET", "/api/commands?n=20", None)), (["log", "5"], ("GET", "/api/commands?n=5", None)),
+            (["run", "bag_near"], ("POST", "/api/run/command", {"command": "bag_near"})),
+            (["run", "bag_again"], ("POST", "/api/run/command", {"command": "bag_again"})),
+            (["arm", "pick"], ("POST", "/api/arm", {"cmd": "pick_bag"})),
+            (["arm", "pick", "0.31", "0.01"], ("POST", "/api/arm", {"cmd": "pick_bag", "x": 0.31, "y": 0.01})),
+            (["arm", "pick", "0.31", "0", "0.27", "-0.5"],
+             ("POST", "/api/arm", {"cmd": "pick_bag", "x": 0.31, "y": 0.0, "top": 0.27, "yaw": -0.5})),
+            (["arm", "drop", "0.3", "-0.1"], ("POST", "/api/arm", {"cmd": "drop_bag", "x": 0.3, "y": -0.1})),
         ]
         for argv, want in cases:
             self.assertEqual(robotctl.request(argv, who="me"), want, argv)
         for argv in ([], ["dance"], ["task", "drive", "fast", "5"], ["task", "drive", "0.12"], ["run", "jump"],
                      ["arm", "torque"], ["arm", "wave"], ["jetson", "start"], ["log", "x"], ["state", "extra"],
-                     ["task", "dry", "0.08", "2", "--other", "1.2.3.4"]):
+                     ["task", "dry", "0.08", "2", "--other", "1.2.3.4"], ["arm", "pick", "0.3"],
+                     ["arm", "pick", "0.3", "0", "0.27"], ["arm", "drop"], ["arm", "drop", "x", "0"],
+                     ["task", "drop", "1", "2"], ["run", "bag_far"]):
             with self.assertRaises(ValueError, msg=argv):
                 robotctl.request(argv)
+
+    def fetch(self, statuses, answers=None):
+        """robotctl fetch over a fake console: GET /api/run gives statuses one by one (the last one stays)."""
+        sent, now = [], [0.0]
+
+        def send(method, path, body, heads):
+            sent.append((method, path, body, heads.get("X-HMC-Session")))
+            if path.startswith("/api/run") and method == "GET":
+                status = statuses.pop(0) if len(statuses) > 1 else statuses[0]
+                if isinstance(status, BaseException):
+                    raise status
+                return 200, {"record": {"phase": "bag", "bag_task": status}}
+            return (answers or {}).get(path, (200, {"error": None, "session": "ab" * 16}))
+
+        def sleep(s):
+            now[0] += s
+        out, err = io.StringIO(), io.StringIO()
+        code = robotctl.fetch(send, {"X-HMC-Client": "me"}, out, err, clock=lambda: now[0], sleep=sleep)
+        return code, sent, out.getvalue(), err.getvalue()
+
+    def test_fetch_drives_to_the_bag_then_picks_it(self):
+        old = {"id": 5.0, "state": "reached", "result": {"ok": True, "x": 9.0, "y": 9.0}}  # an earlier task
+        reached = {"ok": True, "code": "OK", "x": 0.305, "y": 0.012, "top": 0.26, "odometry_m": 0.0}
+        code, sent, out, _ = self.fetch([old, old, {"id": 7.0, "state": "far", "result": None},
+                                         {"id": 7.0, "state": "reached", "result": reached}])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sent[1][:3], ("POST", "/api/run/command", {"command": "bag_near"}))
+        self.assertTrue(all(s[3] == "ab" * 16 for s in sent[2:-1]))  # the polls are the run's page heartbeat
+        self.assertEqual(sent[-1][:3], ("POST", "/api/arm", {"cmd": "pick_bag", "x": 0.305, "y": 0.012, "top": 0.26}))
+        self.assertIn("bag task far", out)
+        self.assertIn("bag task reached", out)
+
+    def test_fetch_stops_on_a_failure_a_timeout_a_refusal_and_ctrl_c(self):
+        failed = {"id": 7.0, "state": "failed", "result": {"ok": False, "code": "NO_BAG", "message": "none"}}
+        code, sent, _, err = self.fetch([{}, failed])
+        self.assertEqual((code, sent[-1][1]), (1, "/api/run?heartbeat=1"))
+        self.assertIn("NO_BAG", err)
+        code, sent, _, err = self.fetch([{}])  # the run never starts it
+        self.assertEqual(code, 1)
+        self.assertIn("no bag result", err)
+        self.assertLessEqual(len(sent), 2 + robotctl.FETCH_S / robotctl.POLL_S + 1)
+        code, sent, _, err = self.fetch([{}], {"/api/run/command": (409, {"error": "no task is running"})})
+        self.assertEqual((code, len(sent), err.strip()), (1, 2, "no task is running"))
+        code, sent, _, _ = self.fetch([{}, KeyboardInterrupt()])
+        self.assertEqual((code, sent[-1][:2]), (130, ("POST", "/api/stop")))
 
     def test_who(self):
         self.assertEqual(robotctl.default_who({"USER": "xohm", "SSH_CLIENT": "192.168.31.50 51234 22"}),

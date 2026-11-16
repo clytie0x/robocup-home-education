@@ -17,7 +17,8 @@
 #
 # What goes where (as before 2026-11-15):
 #   Pi      hmc/src/hmc -> ~/hmc-base/hmc, base/pi -> ~/hmc-base, base/params.json -> ~/hmc-base/params.json,
-#           base/jetson/{server,slam_bridge,pointing}.py -> ~/hmc-base/jetson (the Pi tests and bag.py use them)
+#           base/jetson/{server,slam_bridge,pointing,ports}.py -> ~/hmc-base/jetson (the Pi tests, bag.py and
+#           base/pi/ports.py use them; base/jetson/ports.py is the one port table of both hosts)
 #   Jetson  base/jetson -> ~/hmc-follow
 # Each host gets VERSION.json ({"commit", "describe", "branch", "deployed"}) in its folder; the console shows it.
 # Before files are overwritten, the ones that exist are packed into <folder>/backups/deploy-<time>.tar.gz (with
@@ -54,7 +55,37 @@ PI=$(pick $PI_HOSTS) || { echo "Pi not reachable at: $PI_HOSTS" >&2; exit 1; }
 JETSON=$(pick $JETSON_HOSTS) || { echo "Jetson not reachable at: $JETSON_HOSTS" >&2; exit 1; }
 echo "Pi $PI, Jetson $JETSON"
 
+# Ask the console first (design 2026-11-16): a hold is refused while a job runs or starts or the arm moves; while
+# held the console starts nothing. This tree's robotctl.py runs with the Pi's python3, so the hold works before
+# the new one is installed. Released at the end, also when the deploy fails. --rollback asks the same way.
+robotctl() { ssh "$PI" "python3 - $*" < base/pi/tools/robotctl.py; }
+hold_console() { # the hold, or exit 1 when the console refuses it
+  HELD=0
+  OLD_CONSOLE=0
+  set +e; HOLD_OUT=$(robotctl hold 2>&1); HOLD_CODE=$?; set -e
+  if [ $HOLD_CODE = 0 ]; then
+    HELD=1; echo "console held for the deploy"
+  elif [ $HOLD_CODE = 2 ]; then  # nothing answers on 8081: no console, so no job of its can be cut
+    echo "note: the Pi console does not answer: deploying without a hold (--restart will not restart it)" >&2
+  else
+    # a console from before the hold (no "hold" in /api/state) refuses robotctl: the old rule, no job running
+    OLD=$(ssh "$PI" 'curl -s -m 4 http://127.0.0.1:8081/api/state | python3 -c "import sys,json; d=json.load(sys.stdin); print(\"hold\" not in d, d[\"job\"][\"running\"])"' 2>/dev/null || true)
+    if [ "$OLD" = "True False" ]; then
+      OLD_CONSOLE=1; echo "note: the Pi console predates the hold and runs no job: deploying without a hold" >&2
+    else
+      echo "deploy refused: the console did not give a hold: $HOLD_OUT" >&2; exit 1
+    fi
+  fi
+}
+release_hold() {
+  if [ $HELD = 1 ]; then
+    robotctl release >/dev/null 2>&1 && echo "console released" \
+      || echo "could not release the console: ssh $PI hmc-base/robotctl release" >&2
+  fi
+}
+
 if [ $ROLLBACK = 1 ]; then
+  if [ $DRY = 0 ]; then hold_console; trap release_hold EXIT; fi
   for pair in "$PI:hmc-base" "$JETSON:hmc-follow"; do
     host=${pair%%:*} dir=${pair#*:}
     ssh "$host" "cd ~/$dir && f=\$(ls -t backups/deploy-*.tar.gz 2>/dev/null | head -1) && [ -n \"\$f\" ] \
@@ -97,7 +128,7 @@ stale() { # <host> <folder>; tracked list on stdin: .py/.html/.js/.css/.sh files
 }
 
 PI_LIST=$( { listing base/pi ""; listing hmc/src/hmc hmc/; echo params.json; \
-  for f in server.py slam_bridge.py pointing.py; do echo "jetson/$f"; done; } )
+  for f in server.py slam_bridge.py pointing.py ports.py; do echo "jetson/$f"; done; } )
 JET_LIST=$(listing base/jetson "")
 
 # params.json holds values measured on the robot: never overwritten silently.
@@ -118,32 +149,7 @@ if [ $DRY = 1 ]; then
   echo "dry run: nothing changed"; exit 0
 fi
 
-# Ask the console first (design 2026-11-16): a hold is refused while a job runs or starts or the arm moves; while
-# held the console starts nothing. This tree's robotctl.py runs with the Pi's python3, so the hold works before
-# the new one is installed. Released at the end, also when the deploy fails.
-robotctl() { ssh "$PI" "python3 - $*" < base/pi/tools/robotctl.py; }
-HELD=0
-OLD_CONSOLE=0
-set +e; HOLD_OUT=$(robotctl hold 2>&1); HOLD_CODE=$?; set -e
-if [ $HOLD_CODE = 0 ]; then
-  HELD=1; echo "console held for the deploy"
-elif [ $HOLD_CODE = 2 ]; then  # nothing answers on 8081: no console, so no job of its can be cut
-  echo "note: the Pi console does not answer: deploying without a hold (--restart will not restart it)" >&2
-else
-  # a console from before the hold (no "hold" in /api/state) refuses robotctl: the old rule, no job running
-  OLD=$(ssh "$PI" 'curl -s -m 4 http://127.0.0.1:8081/api/state | python3 -c "import sys,json; d=json.load(sys.stdin); print(\"hold\" not in d, d[\"job\"][\"running\"])"' 2>/dev/null || true)
-  if [ "$OLD" = "True False" ]; then
-    OLD_CONSOLE=1; echo "note: the Pi console predates the hold and runs no job: deploying without a hold" >&2
-  else
-    echo "deploy refused: the console did not give a hold: $HOLD_OUT" >&2; exit 1
-  fi
-fi
-release_hold() {
-  if [ $HELD = 1 ]; then
-    robotctl release >/dev/null 2>&1 && echo "console released" \
-      || echo "could not release the console: ssh $PI hmc-base/robotctl release" >&2
-  fi
-}
+hold_console
 trap release_hold EXIT
 
 echo "$PI_LIST" | backup "$PI" hmc-base
@@ -154,7 +160,7 @@ send "$PI" hmc-base hmc/src/hmc hmc
 # ~/hmc-base/robotctl: the console's API for programs and AI sessions (ssh xohm@<pi> hmc-base/robotctl state)
 ssh "$PI" 'printf "#!/bin/sh\nexec python3 \"\$HOME/hmc-base/tools/robotctl.py\" \"\$@\"\n" > ~/hmc-base/robotctl && chmod +x ~/hmc-base/robotctl'
 [ "${SKIP_PARAMS:-0}" = 1 ] || git show "$COMMIT:base/params.json" | ssh "$PI" "cat > ~/hmc-base/params.json"
-for f in server.py slam_bridge.py pointing.py; do
+for f in server.py slam_bridge.py pointing.py ports.py; do
   git show "$COMMIT:base/jetson/$f" | ssh "$PI" "mkdir -p ~/hmc-base/jetson && cat > ~/hmc-base/jetson/$f"
 done
 send "$JETSON" hmc-follow base/jetson .

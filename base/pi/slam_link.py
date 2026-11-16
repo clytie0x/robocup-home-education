@@ -14,6 +14,8 @@ import struct
 import threading
 from collections import deque
 
+import ports
+
 MAX_BODY = 1_000_000  # bytes; a bigger message means a broken or hostile peer
 MAX_JUMP_M = 0.5  # a correction that moves this far in one message is refused
 MAX_JUMP_RAD = math.radians(20)
@@ -48,7 +50,7 @@ def parse_frames(buffer):
 class SlamLink:
     """send() only queues, correction() only reads, so neither ever blocks the drive loop."""
 
-    def __init__(self, host, port=5602, connect_timeout=1.0, send_timeout=1.0, retry=1.0):
+    def __init__(self, host, port=ports.SLAM, connect_timeout=1.0, send_timeout=1.0, retry=1.0):
         self._host, self._port = host, port
         self._connect_timeout, self._send_timeout, self._retry = connect_timeout, send_timeout, retry
         self._lock = threading.Lock()

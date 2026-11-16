@@ -26,7 +26,9 @@ import time
 
 import numpy as np
 
+import console_gate
 import gripper_camera as gc
+import ports
 from so100_ik import (ARM, BODY_HALF, CLOSED, DECK_TOP, JAW_OPEN, LIDAR_Z, Kinematics, Mount, Unreachable,
                       load_limits)
 
@@ -700,7 +702,7 @@ class DryRunArm:
 class RosArm:
     """The arm team's running driver over ROS 2 (domain 42). Needs their so100_interfaces for /arm/state."""
 
-    def __init__(self, snap_url="http://127.0.0.1:8082/snap.jpg"):
+    def __init__(self, snap_url="http://127.0.0.1:%d/snap.jpg" % ports.WEBCAM):
         import threading  # noqa: PLC0415
         import rclpy  # noqa: PLC0415
         from control_msgs.action import FollowJointTrajectory, GripperCommand  # noqa: PLC0415
@@ -920,7 +922,7 @@ def parse(argv):
     ap.add_argument("--yaw", type=float, default=0.0, help="arm yaw on the robot (deg)")
     ap.add_argument("--speed", type=float, default=SPEED_SCALE, help="fraction of the URDF joint speeds")
     ap.add_argument("--camera-file", default=gc.DEFAULT_FILE)
-    ap.add_argument("--snap-url", default="http://127.0.0.1:8082/snap.jpg")
+    ap.add_argument("--snap-url", default="http://127.0.0.1:%d/snap.jpg" % ports.WEBCAM)
     ap.add_argument("--detector", help="module:Class with .detect(bgr) (default: colour + compact blob)")
     return ap.parse_args(argv)
 
@@ -931,6 +933,8 @@ def main(argv=None, transport=None):
     kin = Kinematics(mount, load_limits())
     planner = Planner(kin, min(a.speed, 1.0))
     own = transport is None
+    if own and not a.dry_run:  # the real arm (a dry run sends nothing)
+        console_gate.require("arm: floor_pick.py")
     if transport is None:
         if a.dry_run and a.place:      # as if the bag were held in the carry pose
             transport = DryRunArm(kin, planner.carry_plan()["q"], gripper=GRIP_HELD)

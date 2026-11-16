@@ -276,6 +276,17 @@ class Approach(unittest.TestCase):
         task = World([(2.0, 0.8)], operator=(2.6, 0.2), point=None).run(new_task("again"))
         self.assertEqual(task.result["code"], "NO_BAG")
 
+    def test_bag_near_takes_the_nearest_bag_in_front_without_pointing(self):
+        world = World([(1.6, 0.0), (1.0, -0.3)], operator=(-1.0, 1.0), point=None)
+        task = new_task("near")
+        self.assertFalse(task.wants_pose)
+        world.run(task)
+        self.assert_reached(task, world, 1)
+        self.assertEqual((task.chosen["say"], task.chosen["candidates"]), ("I will go to the bag in front of me.", 2))
+        for bags in ([(1.0, 1.0)], [(2.3, 0.0)], []):  # 45 deg off, 2.3 m away, none
+            task = World(bags, operator=(-1.0, 1.0), point=None).run(new_task("near"))
+            self.assertEqual(task.result["code"], "NO_BAG", bags)
+
     def test_a_bag_only_the_camera_sees_is_reached_by_odometry(self):
         # The clear plastic bag stays under the LiDAR plane: only the detector's box finds it.
         world = World([(1.8, 0.4)], operator=(2.3, -0.3), point=(1.8, 0.4), seen_bags=[])
@@ -591,6 +602,48 @@ class Phase(Logged):
         self.assertEqual(record["bag_task"]["result"]["code"], "OK", record["bag_task"])
         self.assertIn({"time": 1.1, "page_cmd": "bag"}, [r for r in self.records() if "page_cmd" in r])
         self.assertEqual((record["phase"], record["remote"]["held"]), ("follow", "wait"))
+
+    def test_bag_near_runs_from_idle_and_goes_back_to_idle(self):
+        self.bags = [[1.5, 0.3]]
+        self.tick(2)
+        self.state.silent = True  # no Jetson for a while: the latched silence hold
+        self.jetson.cmd("bag_near")
+        record = self.tick()
+        self.assertEqual(record["phase"], "bag")
+        self.assertFalse(self.state.silent)
+        self.jetson.cmd("return")  # IDLE's answer: a taken return would end the next follow at once
+        for _ in range(900):
+            record = self.tick()
+            if record["bag_task"] and record["bag_task"]["result"]:
+                break
+        self.assertEqual(record["bag_task"]["result"]["code"], "OK", record["bag_task"])
+        self.assertEqual(record["bag_task"]["mode"], "near")
+        self.assertEqual(record["phase"], "idle")
+        self.assertEqual(self.tick()["stop"], "idle")  # the next cycle stands as IDLE does
+        self.assertFalse(self.state.go_back.is_set())
+        self.assertEqual([s["error"] for s in self.statuses() if "error" in s], ["not following yet"])
+        self.jetson.cmd("follow")
+        self.tick(2)
+        self.assertEqual(self.state.phase, "follow")
+
+    def test_bag_near_is_refused_while_following_not_held(self):
+        self.jetson.cmd("follow")
+        self.tick(2)
+        self.jetson.cmd("bag_near")
+        record = self.tick()
+        errors = [s for s in self.statuses() if "error" in s]
+        self.assertEqual([e["refused"] for e in errors], ["bag_near"])
+        self.assertIn("or in IDLE", errors[0]["error"])
+        self.assertEqual(record["phase"], "follow")
+
+    def test_a_follow_cancels_a_bag_near_from_idle_and_follows(self):
+        self.bags = [[1.5, 0.3]]
+        self.jetson.cmd("bag_near")
+        self.tick(3)
+        self.jetson.cmd("follow")
+        record = self.tick()
+        self.assertEqual(record["bag_task"]["result"]["code"], "CANCELLED")
+        self.assertEqual(record["phase"], "follow")
 
     def test_wait_cancels_the_bag_and_holds(self):
         self.at_the_car()

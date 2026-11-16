@@ -233,6 +233,13 @@ class AgentTest(unittest.TestCase):
                           sleep=sleep, killpg=killpg)
         return p, group
 
+    def test_every_program_gets_its_console_job_name(self):
+        seen = []
+        p = agent.Program("arm", "x", self.logs, popen=lambda *a, **k: seen.append(k["env"]) or object())
+        self.assertIsNone(p.start())
+        self.assertEqual(seen[0]["HMC_CONSOLE_JOB"], "agent:arm")
+        self.assertEqual(seen[0].get("PATH"), os.environ.get("PATH"))  # the rest of the environment as before
+
     def test_stop_kills_the_group_when_a_child_ignores_ctrl_c_and_sigterm(self):
         p, group = self.fake_group(dies_after=3)
         self.assertIsNone(p.start())
@@ -562,6 +569,21 @@ class ArmRelayTest(unittest.TestCase):
         self.assertIn("did not answer", body["error"])
         self.assertEqual(agent.ARM_CMD_PORT, 5607)
         self.assertGreaterEqual(agent.ARM_TIMEOUT, 85.0)
+
+    def test_a_bag_job_gets_its_own_long_timeout(self):
+        from unittest import mock
+        self.assertGreaterEqual(agent.ARM_JOB_TIMEOUT, 60.0 + 150.0)  # bag_arm's HOME_TIMEOUT + PICK_TIMEOUT
+        with socket.socket() as s, mock.patch.object(agent, "ARM_TIMEOUT", 0.2), \
+                mock.patch.object(agent, "ARM_JOB_TIMEOUT", 0.8):
+            s.bind(("127.0.0.1", 0))
+            s.listen(4)
+            took = {}
+            for cmd in ("center", "pick_bag", "drop_bag"):
+                t0 = time.monotonic()
+                self.assertEqual(agent.arm_command({"cmd": cmd}, s.getsockname()[1])[0], 504)
+                took[cmd] = time.monotonic() - t0
+        self.assertLess(took["center"], 0.7)
+        self.assertGreaterEqual(min(took["pick_bag"], took["drop_bag"]), 0.75)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ const DESK = window.matchMedia("(min-width: 900px)");
 let state = null;      // the newest /api/state
 let run = null;        // the newest /api/run while a task runs
 let bank = null;       // the newest /api/bank
+let arm = null;        // the newest /api/arm while the Jetson tab is open
 let tab = "overview";
 let choice = { mode: "dry", speed: null, minutes: 5, virtual: false };
 
@@ -153,6 +154,7 @@ function showTab(name) {
   for (const a of document.querySelectorAll("#tabbar a")) a.classList.toggle("here", a.dataset.tab === phoneTab);
   for (const a of document.querySelectorAll("#desk-tabs a")) a.classList.toggle("here", a.dataset.tab === name);
   if (name === "logs") loadLogs();
+  if (name === "jetson") fetchArm();
   if (name === "data") loadData();
   window.scrollTo(0, 0);
   render();
@@ -228,7 +230,7 @@ function render() {
   renderRunParts();
   if (tab === "live") renderLive();
   if (tab === "task") renderTask();
-  if (tab === "jetson") renderJetson();
+  if (tab === "jetson") { renderJetson(); renderArm(); }
   if (tab === "checks") renderChecks();
   place();
 }
@@ -921,6 +923,61 @@ $("btn-stop-all").addEventListener("click", async () => {
   if (r && !r.error) toast("ปิด flow bridge และ detector แล้ว");
 });
 
+// ------------------------------------------------------------ the arm (Jetson tab)
+
+const ARM_MOVES = { home: { cmd: "home" }, rest: { cmd: "rest" }, center: { cmd: "center" },
+  "torque-on": { cmd: "torque", on: true }, "torque-off": { cmd: "torque", on: false } };
+let armSending = false; // a move this tab sent is not answered yet (center takes up to 90 s)
+
+async function fetchArm() {
+  try { arm = await getJSON("/api/arm"); } catch (e) { arm = { error: "คอนโซลไม่ตอบ" }; }
+  renderArm();
+}
+
+async function pollArm() {
+  if (tab === "jetson" && document.visibilityState === "visible") await fetchArm();
+  setTimeout(pollArm, 2000);
+}
+
+function renderArm() {
+  if (!state) return;
+  const s = arm && !arm.error ? arm.state : null, hold = state.hold;
+  setText($("arm-word"), s ? s.state : "-");
+  let line = "กำลังอ่านสถานะแขน";
+  if (arm && arm.error) line = `<span class="val bad">${esc(arm.error)}</span>`;
+  else if (arm && !s) line = "ยังไม่มี /arm/state จากแขน";
+  else if (s) {
+    line = [`สถานะ ${esc(s.state)}`, `torque ${s.torque_on ? "on" : "off"}`, arm.busy ? "ทำงานอยู่" : "ว่าง"]
+      .concat(s.task ? [`${esc(s.task)} ${esc(s.step || "")}`] : []).join(" · ") +
+      (s.fault ? ` · <span class="val bad">fault ${esc(s.fault)}</span>` : "");
+  }
+  setHTML($("arm-line"), line);
+  $("arm-held").hidden = !hold;
+  if (hold) setText($("arm-held"), `คอนโซลถูกจองโดย ${hold.who} ปุ่มขยับแขนใช้ไม่ได้จนกว่าจะปล่อย (Stop ใช้ได้)`);
+  for (const b of document.querySelectorAll("[data-arm]")) {
+    b.disabled = !!hold || armSending || (b.dataset.arm === "torque-off" && !(s && s.state === "resting"));
+  }
+}
+
+for (const b of document.querySelectorAll("[data-arm]")) {
+  b.addEventListener("click", async () => {
+    const name = b.dataset.arm;
+    if (name === "center" && !(await confirmBox("ยืดแขนไปกลางระยะไหม",
+      "แขนจะยื่นออกไปราว 0.5 ม. หน้าหุ่น หน้าหุ่นโล่งและไม่มีคนหรือของอยู่ใกล้แล้วใช่ไหม", "ใช่ ยืดแขน", true))) return;
+    armSending = true;
+    renderArm();
+    const r = await post("/api/arm", ARM_MOVES[name]);
+    armSending = false;
+    if (r && !r.error) toast(`แขน ${b.textContent} เสร็จแล้ว`);
+    fetchArm();
+  });
+}
+$("btn-arm-stop").addEventListener("click", async () => {
+  const r = await post("/api/arm/stop", {});
+  if (r && !r.error) toast("หยุดแขนแล้ว");
+  fetchArm();
+});
+
 // ------------------------------------------------------------ Checks
 
 const LEVEL_WORD = { ok: "ปกติ", warn: "ควรดู", bad: "เสีย", idle: "-" };
@@ -973,6 +1030,7 @@ function bytes(n) {
 }
 
 async function loadLogs() {
+  loadCommands();
   let r;
   try { r = await getJSON("/api/logs"); } catch (e) { return; }
   const el = $("runs");
@@ -987,6 +1045,21 @@ async function loadLogs() {
   }).join("");
 }
 setInterval(() => { if (tab === "logs") loadLogs(); }, 10000);
+
+// the console's command log: one line per POST, and console_gate's maintenance lines (what, reason, user)
+async function loadCommands() {
+  let r;
+  try { r = await getJSON("/api/commands?n=30"); } catch (e) { return; }
+  const lines = (r.commands || []).slice().reverse();
+  const t = $("commands-table");
+  if (!lines.length) { t.innerHTML = '<tr><td class="note">ยังไม่มีคำสั่ง</td></tr>'; return; }
+  t.innerHTML = `<tr><th>เวลา</th><th>ใคร</th><th>คำสั่ง</th><th>ผล</th></tr>` + lines.map((c) => {
+    const what = c.path ? `${c.path}${c.code != null && c.code !== 200 ? ` (${c.code})` : ""}` : `ซ่อม ${c.what || ""}`;
+    const why = c.path ? (c.error ? `<span class="val bad">${esc(c.error)}</span>` : "ok") : esc(c.reason || "");
+    return `<tr><td class="num">${c.time ? dayTime(c.time) : "-"}</td><td>${esc(c.client || c.user || "-")}</td>` +
+      `<td class="num">${esc(what)}</td><td class="why" title="${esc(c.error || c.reason || "")}">${why}</td></tr>`;
+  }).join("");
+}
 
 // ------------------------------------------------------------ Data
 
@@ -1208,3 +1281,4 @@ pollState();
 pollRun();
 pollScan();
 pollBank();
+pollArm();

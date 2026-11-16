@@ -27,6 +27,8 @@ import struct
 import threading
 import time
 
+import ports
+
 MAX_HEADER = 4096
 MAX_JPEG = 10_000_000
 
@@ -179,7 +181,7 @@ def _read_exactly(sock, count, stop, idle):
 
 
 class Server:
-    def __init__(self, detect, host="0.0.0.0", port=5601, idle=5.0, pose_every=0):
+    def __init__(self, detect, host="0.0.0.0", port=ports.DETECTOR, idle=5.0, pose_every=0):
         self._detect = detect
         self._idle = idle
         self._pose_every = pose_every  # 0: pose only when a request header asks for it
@@ -250,7 +252,7 @@ class Server:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fake", action="store_true")
-    parser.add_argument("--port", type=int, default=5601)
+    parser.add_argument("--port", type=int, default=ports.DETECTOR)
     parser.add_argument("--detector", default=DETECTOR, help="person detector engine")
     parser.add_argument("--reid", default=REID, help="look vector engine")
     parser.add_argument("--pose", default=POSE, help="pose engine (keypoints only when asked)")

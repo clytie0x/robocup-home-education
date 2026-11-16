@@ -1,4 +1,5 @@
 """bag_arm: the Help Me Carry arm side over a fake arm (no ROS)."""
+import io
 import json
 import math
 import os
@@ -7,6 +8,8 @@ import sys
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
+from unittest import mock
 
 import numpy as np
 
@@ -14,6 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bag_arm  # noqa: E402
+import console_gate  # noqa: E402
+import floor_pick  # noqa: E402
 from floor_pick import JAW_OPEN, READY  # noqa: E402
 from so100_ik import Kinematics, Mount  # noqa: E402
 from test_floor_pick import KIN, PLANNER, FakeArm, ProjectingDetector, true_camera  # noqa: E402
@@ -434,6 +439,49 @@ class ArmCommandsTest(unittest.TestCase):
         self.assertNotIn("grip", [c[0] for c in self.api.calls if isinstance(c, tuple)])
         self.assertEqual(self.api.params["rest_after_s"], 120.0)
 
+    def test_pick_and_drop_from_the_console_answer_when_the_bag_job_is_done(self):
+        self.arm.results["pick_bag"] = (True, "SUCCESS", "picked", {"gripper_pos": 0.5, "gripper_load": 30.0})
+        out = self.send({"cmd": "pick_bag", "x": 0.31, "y": 0.0, "top": 0.27, "yaw": 0.0})
+        self.assertEqual((out["ok"], out["code"], out["reading"]), (True, "SUCCESS", "gripper_pos=0.500 gripper_load=30.0"))
+        self.assertEqual([t[0] for t in self.arm.tasks], ["home", "pick_bag"])
+        self.assertTrue(math.isfinite(self.arm.tasks[1][1]["grasp"][2]))  # the top given is used
+        self.assertTrue(self.send({"cmd": "drop_bag", "x": 0.31, "y": 0.0})["ok"])
+        self.assertEqual(self.arm.sent, ["grab_success|SUCCESS|gripper_pos=0.500 gripper_load=30.0", "drop_done"])
+        self.arm.results["pick_bag"] = (False, "MISSED", "closed on air")
+        out = self.send({"cmd": "pick_bag", "x": 0.31, "y": 0.0, "top": 0.27})
+        self.assertEqual((out["ok"], out["code"]), (False, "MISSED"))
+        self.assertIn("closed on air", out["error"])
+        out = self.send({"cmd": "drop_bag", "x": 0.31})
+        self.assertEqual((out["ok"], out["code"]), (False, "FAILED"))
+        self.assertIn("needs x and y", out["error"])
+        self.assertFalse(self.send({"cmd": "state"})["busy"])
+
+    def test_one_bag_job_at_a_time_from_the_console_or_the_flow(self):
+        gate = threading.Event()
+
+        def slow(name, timeout, **goal):
+            self.arm.tasks.append((name, goal))
+            gate.wait(10)
+            return True, "SUCCESS", ""
+        self.arm.arm_task = slow
+        self.jobs.on_command(json.dumps({"action": "drop_bag", "params": {"x": 0.31, "y": 0.0}}))
+        out = self.send({"cmd": "pick_bag", "x": 0.31, "y": 0.0})
+        self.assertEqual((out["ok"], out["code"]), (False, "BUSY"))
+        gate.set()
+        self.jobs.thread.join(10)
+        gate.clear()
+        got = []
+        th = threading.Thread(target=lambda: got.append(self.send({"cmd": "drop_bag", "x": 0.31, "y": 0.0})))
+        th.start()
+        self.assertTrue(wait_until(lambda: len(self.arm.tasks) == 2))
+        self.assertTrue(self.send({"cmd": "state"})["busy"])
+        self.assertIn("bag job", self.send({"cmd": "home"})["error"])
+        self.jobs.on_command(json.dumps({"action": "pick_bag", "params": {"x": 0.31, "y": 0.0}}))
+        self.assertEqual(self.arm.sent[-1], "grab_failed|BUSY|another arm job is running")
+        gate.set()
+        th.join(10)
+        self.assertTrue(got[0]["ok"], got)
+
     def test_torque_off_only_at_rest(self):
         for st in ("idle", "busy", "holding", "torque_off"):
             self.api.arm_state["state"] = st
@@ -470,6 +518,30 @@ class ArmCommandsTest(unittest.TestCase):
             self.assertTrue(json.loads(f.readline())["ok"])
             self.assertTrue(json.loads(f.readline())["ok"])
         self.assertEqual(bag_arm.ARM_CMD_PORT, 5607)
+
+
+class GateTest(unittest.TestCase):
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ)
+        self.env.start()
+        for name in (console_gate.ENV, console_gate.MAINTENANCE_ENV):
+            os.environ.pop(name, None)
+
+    def tearDown(self):
+        self.env.stop()
+
+    def test_a_pick_or_place_from_the_shell_is_refused(self):
+        with mock.patch.object(floor_pick, "RosArm", side_effect=AssertionError("moved")):
+            for argv in (["--pick", "0.31", "0.0"], ["--place", "0.31", "0.0"]):
+                with self.assertRaisesRegex(RuntimeError, "REFUSED: arm: bag_arm.py"):
+                    bag_arm.main(argv)
+
+    def test_the_agents_node_is_not_gated(self):
+        class Reached(Exception):
+            pass
+        with mock.patch.object(floor_pick, "RosArm", side_effect=Reached), redirect_stdout(io.StringIO()):
+            with self.assertRaises(Reached):  # past the gate, at the ROS transport
+                bag_arm.main([])
 
 
 def wait_until(check, timeout=5.0):

@@ -19,6 +19,11 @@ Pi  bag.py far stage ──"look" at a settle──> bag_depth.measure_top(depth
         bag_reached|OK|x,y,top=T,yaw=Y ─> hmc_flow ─ pick_bag {"x","y","top","yaw"} ─> bag_arm ─> /arm/pick_bag
 ```
 
+A bag task starts with the flow's `find_bag` (Pi `bag`, the pointed bag, only while waiting at the car) or, step
+by step from the console, `robotctl run bag|bag_again|bag_near` (`bag_near`: the nearest bag in front, nobody
+points, also from IDLE). Then `robotctl arm pick` sends the reached result's x, y, top and yaw to bag_arm through
+the console and the agent, as the flow would; `robotctl fetch` does both (robot-console.md, step commands).
+
 - **The look** (`bag.py`). It happens once per bag task, at a settle (the robot standing for 0.8 s) with the bag
   centre `LOOK_RANGE` 0.7 to 1.5 m from the cameras. Ranges are counted from `LOOK_CAM_X` 0.205 m ahead of the
   turning centre, since both cameras are about there. A far drive that starts farther away stops at `LOOK_AT`
