@@ -58,6 +58,7 @@ from so100_interfaces.action import Home, Pick, PickBag, Place, Rest
 from so100_interfaces.action import PickPlace as PickPlaceAction
 from so100_interfaces.msg import ArmState
 
+from .bag_camera import CameraBag
 from .calib import Calibration
 from .ik import ARM, GRASP_Y, TIP_Y, Box, GraspPlanner, Kinematics, PlanError, bag_shifts, deck_box
 from .task_rules import (PICK_PLACE, PROBE_JOINTS, Failed, api_code, descent_loads, gripper_load, held_by_weight,
@@ -120,6 +121,12 @@ class PickPlace(Node):
         self.declare_parameter('bag_miss_below', 0.06)    # rad: bag jaws closing below this = missed, 0 = no check
         self.declare_parameter('bag_tries', 3)            # grasp tries, shifted across the part after a miss
         self.declare_parameter('bag_try_step', 0.05)      # m between tries
+        # /arm/pick_bag method: 'camera' = forearm webcam + Xtion (bag_camera.py, tested 2026-11-15),
+        # 'planner' = the planned grasp at the goal's position (probe / shifts / carry at the side)
+        self.declare_parameter('bag_method', 'camera')
+        self.declare_parameter('bag_cam_url', 'http://localhost:8082/snap.jpg')    # forearm webcam (webcam_view.py)
+        self.declare_parameter('bag_xtion_url', 'http://192.168.31.21:8081/stream')  # Xtion MJPEG on the base Pi
+        self.declare_parameter('bag_cam_tries', 4)        # camera grasp tries (each looks at the bag again)
         # Bag top unknown (PickBag grasp_pose z NaN): found by touch (probe_bag). Every value is a first guess,
         # to be measured on the robot from the 'probe k/n' log lines of one real run.
         self.declare_parameter('bag_probe_top', 0.40)     # m above the floor the closed tips start (or the highest
@@ -184,6 +191,7 @@ class PickPlace(Node):
         deck = [float(v) for v in p('deck')]
         self.deck = deck_box(self.kin, *deck, float(p('deck_z')), self.table_z) if any(deck) else None
         self.planner = GraspPlanner(self.kin, self.table_z, [self.deck] if self.deck else [])
+        self.cam = CameraBag(self)
         # the rest pose inside the real (calibrated) travel
         self.rest_q = {n: min(max(v, self.kin.limits[n][0] + 0.02), self.kin.limits[n][1] - 0.02)
                        for n, v in REST.items()}
@@ -697,6 +705,9 @@ class PickPlace(Node):
         read open above the miss threshold, it is still held: keep `holding` (a new pick then answers
         HOLDING instead of opening the jaws, and /arm/place can put it down). Otherwise forget it."""
         held = self.holding or self.grasped
+        if held is not None and held.get('camera'):
+            self.say('ยังถือถุงอยู่ (หยิบด้วยกล้อง): ไม่ลืม สั่งวางได้')
+            return
         pos = self.joints.get('gripper')
         if held is not None and (held.get('by_weight')       # its jaws read closed on a thin rim from the start
                                  or still_held(pos, held.get('miss_below') or self.MISS_DEFAULT, held.get('jaw_open'))):
@@ -788,6 +799,10 @@ class PickPlace(Node):
     def do_place(self, target, fallback_home_spot=False, released=None):
         if not self.holding:
             raise Failed('ไม่ได้ถือของอยู่', 'NOT_HOLDING')
+        if self.holding.get('camera'):
+            done = self.cam.place(target)
+            self.moveit_to(READY, 'กลับท่า ready')
+            return done
         x, y, yaw, size = self.holding['object']
         obj = Box(x, y, yaw, size)
         if 'carry' in self.holding and not getattr(target, 'yaw_known', True):
@@ -817,6 +832,8 @@ class PickPlace(Node):
         obj height NaN (grasp_pose z NaN): the top is found by touch first (probe_bag)."""
         if self.holding:
             raise Failed('ถือของอยู่แล้ว: สั่งวางก่อน', 'HOLDING')
+        if self.get_parameter('bag_method').value == 'camera':
+            return self.cam.pick(obj)
         probed = False
         if top_unknown(obj.size[2]):
             obj, probed = self.probe_bag(obj), True
@@ -994,6 +1011,8 @@ class PickPlace(Node):
         return 'หยิบ-วางเสร็จ (กล่องฟ้าย้ายไปตำแหน่งใหม่แล้ว)'
 
     def do_home(self):
+        if self.holding and self.holding.get('camera'):
+            raise Failed('ถือถุงอยู่: สั่งวางก่อน (ท่า ready จะเหวี่ยงถุงเข้าตัวหุ่น)', 'HOLDING')
         self.progress(1, 1, 'home', 'กลับท่า ready...')
         self.moveit_to(READY, 'กลับท่า ready')
         return 'อยู่ท่า ready'
