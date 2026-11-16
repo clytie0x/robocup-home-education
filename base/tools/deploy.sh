@@ -217,13 +217,17 @@ if [ $RESTART = 1 ]; then
   else
     echo "Pi console NOT restarted: the deploy has no hold"
   fi
-  # Jetson: stop the programs, start the new agent, start the programs again.
-  ssh "$JETSON" 'cd ~/hmc-follow && curl -s -m 30 -X POST http://127.0.0.1:8090/stop-all >/dev/null || true
+  # Jetson: stop the programs, start the new agent, start the programs again. This ssh did not end by itself on
+  # 2026-11-16 (three deploys, the work on the Jetson done): a time limit, then the agent is asked on its own.
+  timeout 240 ssh -n "$JETSON" 'cd ~/hmc-follow && curl -s -m 30 -X POST http://127.0.0.1:8090/stop-all >/dev/null || true
     if systemctl --user is-enabled hmc-agent.service >/dev/null 2>&1; then systemctl --user restart hmc-agent.service
     else pid=$(pgrep -f "^python3 agent.py"); [ -n "$pid" ] && kill $pid && sleep 2
       mkdir -p logs && setsid nohup python3 agent.py >> logs/agent.out 2>&1 < /dev/null &
     fi
     for i in $(seq 1 20); do curl -s -m 2 http://127.0.0.1:8090/status >/dev/null && break; sleep 0.5; done
-    curl -s -m 120 -X POST http://127.0.0.1:8090/start-all | head -c 300; echo'
+    curl -s -m 120 -X POST http://127.0.0.1:8090/start-all | head -c 300; echo' \
+    || echo "note: the Jetson restart ssh did not end in 240 s (or failed); asking the agent:"
+  ssh "$JETSON" 'curl -s -m 5 http://127.0.0.1:8090/status | python3 -c "import json,sys; d=json.load(sys.stdin); print(\"Jetson agent\", d[\"version\"][\"describe\"], d[\"sequence\"], sum(p[\"running\"] for p in d[\"programs\"].values()), \"of\", len(d[\"programs\"]), \"running\")"' \
+    || echo "Jetson agent does not answer" >&2
 fi
 echo "deploy ok: $COMMIT"
