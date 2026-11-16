@@ -2,7 +2,7 @@
 """Robot Voice control panel: a small web page with buttons to start / stop the voice system.
 
 Run on the Jetson:   python3 ~/robot_voice/scripts/control_panel.py
-Open in a browser:   http://<jetson-ip>:8090      (PC or phone on the same network)
+Open in a browser:   http://<jetson-ip>:8091      (PC or phone on the same network)
 
 Only Python's standard library is used. The page can only run the fixed commands below
 (servers.sh, ros2 launch voice_assistant ..., the arm team's so100_moveit_config arm.launch.py,
@@ -29,7 +29,7 @@ FAKE_LOG = LOG_DIR / 'robot_voice_fake_arm.log'
 ARM_LOG = LOG_DIR / 'robot_voice_arm.log'
 ARM_HW = {'real', 'sim'}                 # so100_moveit_config arm.launch.py hardware:=
 ARM_MATCH = 'so100_moveit_config arm.launch.py'
-PORT = int(os.environ.get('PANEL_PORT', '8090'))
+PORT = int(os.environ.get('PANEL_PORT', '8091'))   # 8090 is used by the arm team's panel
 ROS_SETUP = ('for f in /opt/ros/jazzy/setup.bash "$HOME/so100_ws/install/setup.bash" "$HOME/ros2_ws/install/setup.bash"; do '
              '[ -f "$f" ] && source "$f"; done; export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-42}"; '
              'export PYTHONUNBUFFERED=1; ')

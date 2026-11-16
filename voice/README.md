@@ -134,7 +134,7 @@ tts_node:
 
 ## แผงควบคุม (หน้าเว็บ)
 ```bash
-python3 ~/robot_voice/scripts/control_panel.py     # แล้วเปิด http://<IP Jetson>:8090 จากคอมหรือมือถือ
+python3 ~/robot_voice/scripts/control_panel.py     # แล้วเปิด http://<IP Jetson>:8091 จากคอมหรือมือถือ
 ```
 ปุ่มเปิดระบบแบบไม่ใช้ LLM / ใช้ LLM, หยุด, แขนจำลอง, พิมพ์คำสั่งแทนพูด, ดูสถานะและ log
 
