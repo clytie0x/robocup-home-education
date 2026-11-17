@@ -201,7 +201,7 @@ static long scaled(float value, float scale, long limit)
 
 /* "+000.00": sign, 3 digits, 2 decimals, as the old firmware writes. Rounds -0.004 to
  * "+000.00", not "-000.00". */
-#define CENTI_TEXT 16 /* 8 are used; the compiler cannot see that n stays in +-99999 */
+#define CENTI_TEXT 24 /* 8 are used; glibc gcc warns unless a whole long fits, it cannot see n stays in +-99999 */
 static void centi_text(char text[CENTI_TEXT], float value)
 {
     long n = scaled(value, 100.0f, 99999);
