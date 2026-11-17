@@ -20,8 +20,8 @@ def noise_transcript(text, allow):
     shorter than 2 characters, or ONE word that is not in `allow` (whisper invents "Go." / "You." from
     noise and its own echo). `allow` empty = keep every transcript. Longer sentences always pass: the
     flow decides what they mean."""
-    t = (text or '').strip()
-    if not t or t.startswith(('[', '(')) or len(t) < 2:
+    t = (text or "").strip()
+    if not t or t.startswith(("[", "(")) or len(t) < 2:
         return True
     if allow:
         words = re.findall(r"[a-z']+", t.lower())

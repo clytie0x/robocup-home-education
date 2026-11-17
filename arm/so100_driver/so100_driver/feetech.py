@@ -66,11 +66,11 @@ class Bus:
         buf = bytearray()
         while len(buf) < n:
             if time.monotonic() > deadline:
-                raise FeetechError('timeout waiting for servo reply')
+                raise FeetechError("timeout waiting for servo reply")
             buf += self.ser.read(n - len(buf))
         return bytes(buf)
 
-    def _read_status(self, sent=b''):
+    def _read_status(self, sent=b""):
         """Return (id, error, params) of one status packet; skips an echo of `sent`."""
         deadline = time.monotonic() + 0.05
         while True:
@@ -82,11 +82,11 @@ class Bus:
                 prev = b
             sid, length = self._read_exact(2, deadline)
             if length < 2:
-                raise FeetechError('bad packet length')
+                raise FeetechError("bad packet length")
             rest = self._read_exact(length, deadline)
             if checksum(bytes([sid, length]) + rest[:-1]) != rest[-1]:
-                raise FeetechError('bad checksum')
-            if sent and b'\xff\xff' + bytes([sid, length]) + rest == sent:
+                raise FeetechError("bad checksum")
+            if sent and b"\xff\xff" + bytes([sid, length]) + rest == sent:
                 continue  # half-duplex adapter echoed our own request
             return sid, rest[0], rest[1:-1]
 
@@ -99,7 +99,7 @@ class Bus:
                     self.ser.write(sent)
                     sid, err, data = self._read_status(sent)
                     if sid != servo_id:
-                        raise FeetechError(f'reply from ID{sid}, expected ID{servo_id}')
+                        raise FeetechError(f"reply from ID{sid}, expected ID{servo_id}")
                     return err, data
                 except FeetechError:
                     if attempt == retries:
@@ -117,7 +117,7 @@ class Bus:
     def read(self, servo_id, address, length):
         _, data = self._txrx(servo_id, READ, [address, length])
         if len(data) != length:
-            raise FeetechError(f'ID{servo_id}: short read')
+            raise FeetechError(f"ID{servo_id}: short read")
         return data
 
     def read1(self, servo_id, address):
@@ -150,10 +150,10 @@ class Bus:
                     for _ in ids:
                         sid, _err, data = self._read_status(sent)
                         if len(data) != length:
-                            raise FeetechError(f'ID{sid}: short sync read')
+                            raise FeetechError(f"ID{sid}: short sync read")
                         out[sid] = data
                     if set(out) != set(ids):
-                        raise FeetechError('sync read: missing servo')
+                        raise FeetechError("sync read: missing servo")
                     return out
                 except FeetechError:
                     if attempt == retries:

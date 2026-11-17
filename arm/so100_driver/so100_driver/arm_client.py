@@ -42,7 +42,7 @@ def user_xy(forward, left):
     return PAN_AXIS[0] + left, PAN_AXIS[1] - forward
 
 
-def make_pose(where, yaw=None, frame='base'):
+def make_pose(where, yaw=None, frame="base"):
     if isinstance(where, PoseStamped):
         return where
     x, y = where
@@ -58,16 +58,16 @@ def make_pose(where, yaw=None, frame='base'):
 
 class ArmClient:
     def __init__(self, node):
-        console_gate.require(f'ArmClient in {node.get_name()}')  # arm_cli, api_selftest, camera_test
+        console_gate.require(f"ArmClient in {node.get_name()}")  # arm_cli, api_selftest, camera_test
         self.node = node
         cb = ReentrantCallbackGroup()
-        self._actions = {name: ActionClient(node, kind, f'/arm/{name}', callback_group=cb)
-                         for name, kind in (('pick', Pick), ('place', Place), ('pick_place', PickPlace),
-                                            ('home', Home), ('rest', Rest), ('pick_bag', PickBag))}
-        self._stop = node.create_client(Trigger, '/arm/stop', callback_group=cb)
-        self._torque = node.create_client(SetBool, '/arm/torque', callback_group=cb)
+        self._actions = {name: ActionClient(node, kind, f"/arm/{name}", callback_group=cb)
+                         for name, kind in (("pick", Pick), ("place", Place), ("pick_place", PickPlace),
+                                            ("home", Home), ("rest", Rest), ("pick_bag", PickBag))}
+        self._stop = node.create_client(Trigger, "/arm/stop", callback_group=cb)
+        self._torque = node.create_client(SetBool, "/arm/torque", callback_group=cb)
         self.state = None
-        node.create_subscription(ArmState, '/arm/state', self._on_state, 10, callback_group=cb)
+        node.create_subscription(ArmState, "/arm/state", self._on_state, 10, callback_group=cb)
         self.feedback = None     # last progress message (step, step_index, step_count)
 
     def _on_state(self, msg):
@@ -85,32 +85,32 @@ class ArmClient:
     def _run(self, name, goal, wait=True, timeout=120.0):
         client = self._actions[name]
         if not client.wait_for_server(timeout_sec=5.0):
-            return False, 'FAILED', f'/arm/{name} is not running'
-        fut = client.send_goal_async(goal, feedback_callback=lambda f: setattr(self, 'feedback', f.feedback))
+            return False, "FAILED", f"/arm/{name} is not running"
+        fut = client.send_goal_async(goal, feedback_callback=lambda f: setattr(self, "feedback", f.feedback))
         if not wait:
             return fut
         handle = self._wait(fut, 10.0)
         if handle is None or not handle.accepted:
-            return False, 'FAILED', 'goal rejected'
+            return False, "FAILED", "goal rejected"
         res = self._wait(handle.get_result_async(), timeout)
         if res is None:
             handle.cancel_goal_async()
-            return False, 'FAILED', 'timed out'
+            return False, "FAILED", "timed out"
         r = res.result
         return r.success, r.error_code, r.message
 
     # ----------------------------------------------------------------------------- tasks
-    def pick(self, where, size, yaw=None, grasp_mode='auto', **kw):
+    def pick(self, where, size, yaw=None, grasp_mode="auto", **kw):
         g = Pick.Goal(object_pose=make_pose(where, yaw), object_size=[float(v) for v in size], grasp_mode=grasp_mode)
-        return self._run('pick', g, **kw)
+        return self._run("pick", g, **kw)
 
     def place(self, where, yaw=None, **kw):
-        return self._run('place', Place.Goal(target_pose=make_pose(where, yaw)), **kw)
+        return self._run("place", Place.Goal(target_pose=make_pose(where, yaw)), **kw)
 
-    def pick_place(self, obj, target, size, obj_yaw=None, target_yaw=None, grasp_mode='auto', **kw):
+    def pick_place(self, obj, target, size, obj_yaw=None, target_yaw=None, grasp_mode="auto", **kw):
         g = PickPlace.Goal(object_pose=make_pose(obj, obj_yaw), object_size=[float(v) for v in size],
                            target_pose=make_pose(target, target_yaw), grasp_mode=grasp_mode)
-        return self._run('pick_place', g, **kw)
+        return self._run("pick_place", g, **kw)
 
     def pick_bag(self, where, top_z=None, yaw=None, thickness=0.0, length=0.0, **kw):
         """Hold a bag by its top part (handle or rim) and carry it at the side. where = (x, y) base frame
@@ -120,21 +120,21 @@ class ArmClient:
         if top_z is not None:
             ps.pose.position.z = float(top_z)
         g = PickBag.Goal(grasp_pose=ps, thickness=float(thickness), length=float(length))
-        return self._run('pick_bag', g, **kw)
+        return self._run("pick_bag", g, **kw)
 
     def home(self, **kw):
-        return self._run('home', Home.Goal(), **kw)
+        return self._run("home", Home.Goal(), **kw)
 
     def rest(self, **kw):
         """Close the jaws and fold into the rest pose (refused with HOLDING while holding)."""
-        return self._run('rest', Rest.Goal(), **kw)
+        return self._run("rest", Rest.Goal(), **kw)
 
     # ---------------------------------------------------------------------------- services
     def _call(self, client, req):
         if not client.wait_for_service(timeout_sec=3.0):
-            return False, 'arm API not running'
+            return False, "arm API not running"
         r = self._wait(client.call_async(req), 10.0)
-        return (r.success, r.message) if r else (False, 'no answer')
+        return (r.success, r.message) if r else (False, "no answer")
 
     def stop(self):
         return self._call(self._stop, Trigger.Request())
@@ -164,63 +164,63 @@ def main():
     if not args:
         print(main.__doc__)
         return
-    size, mode = (0.03, 0.03, 0.05), 'auto'
-    if '--size' in args:
-        k = args.index('--size')
+    size, mode = (0.03, 0.03, 0.05), "auto"
+    if "--size" in args:
+        k = args.index("--size")
         size = tuple(float(v) for v in args[k + 1:k + 4])
         del args[k:k + 4]
     floor = FLOOR_Z
-    if '--floor' in args:
-        k = args.index('--floor')
+    if "--floor" in args:
+        k = args.index("--floor")
         floor = float(args[k + 1])
         del args[k:k + 2]
     along, thick = None, 0.0
-    if '--along' in args:
-        k = args.index('--along')
+    if "--along" in args:
+        k = args.index("--along")
         along = math.radians(float(args[k + 1])) - math.pi / 2      # base frame: forward = -y, left = +x
         del args[k:k + 2]
-    if '--thick' in args:
-        k = args.index('--thick')
+    if "--thick" in args:
+        k = args.index("--thick")
         thick = float(args[k + 1])
         del args[k:k + 2]
-    if '--mode' in args:
-        k = args.index('--mode')
+    if "--mode" in args:
+        k = args.index("--mode")
         mode = args[k + 1]
         del args[k:k + 2]
     rclpy.init()
-    node = Node('arm_cli')
+    node = Node("arm_cli")
     arm = ArmClient(node)
     ex = MultiThreadedExecutor()
     ex.add_node(node)
     threading.Thread(target=ex.spin, daemon=True).start()
     cmd, nums = args[0], [float(v) for v in args[1:]]
-    if cmd == 'pick':
+    if cmd == "pick":
         out = arm.pick(user_xy(*nums[:2]), size, grasp_mode=mode)
-    elif cmd == 'place':
+    elif cmd == "place":
         out = arm.place(user_xy(*nums[:2]))
-    elif cmd == 'pick_place':
+    elif cmd == "pick_place":
         out = arm.pick_place(user_xy(*nums[:2]), user_xy(*nums[2:4]), size, grasp_mode=mode)
-    elif cmd == 'pick_bag':
+    elif cmd == "pick_bag":
         out = arm.pick_bag(user_xy(*nums[:2]), top_z=floor + nums[2], yaw=along, thickness=thick)
-    elif cmd == 'home':
+    elif cmd == "home":
         out = arm.home()
-    elif cmd == 'rest':
+    elif cmd == "rest":
         out = arm.rest()
-    elif cmd == 'stop':
+    elif cmd == "stop":
         out = arm.stop()
-    elif cmd in ('lock', 'release'):
-        out = arm.torque(cmd == 'lock')
-    elif cmd == 'state':
+    elif cmd in ("lock", "release"):
+        out = arm.torque(cmd == "lock")
+    elif cmd == "state":
         for _ in range(30):
             if arm.state:
                 break
             time.sleep(0.1)
         out = arm.state
     else:
-        out = f'unknown command {cmd!r}\n{main.__doc__}'
+        out = f"unknown command {cmd!r}\n{main.__doc__}"
     print(out)
     rclpy.try_shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

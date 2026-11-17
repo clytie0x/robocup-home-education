@@ -42,13 +42,13 @@ STOP_ALIKE = R(r"^(?:(?:please|robot|hey|okay|ok)\s+)*(?:stop+s?|stops? it|stopp
 # ("Dopting the bag", "Hollow me", "Keep up the bag"); if no rule matched, a SHORT sentence that sounds
 # close enough to exactly one of these phrases is taken as that command.
 COMMAND_PHRASES = {
-    'carry_bag': ["help me carry this bag", "help me carry the bag", "carry this bag", "carry the bag",
+    "carry_bag": ["help me carry this bag", "help me carry the bag", "carry this bag", "carry the bag",
                   "carry my bag", "pick up the bag", "pick up this bag", "take the bag", "take this bag",
                   "hold the bag", "grab the bag", "keep up the bag", "beat up the bag"],
-    'drop_bag': ["drop the bag", "drop this bag", "drop it", "put the bag down", "put down the bag",
+    "drop_bag": ["drop the bag", "drop this bag", "drop it", "put the bag down", "put down the bag",
                  "release the bag", "let go of the bag"],
-    'follow_me': ["follow me", "follow me please", "come with me", "please follow me"],
-    'stop': ["stop", "robot stop", "please stop", "stop here", "stay here", "stay there", "wait here", "stay",
+    "follow_me": ["follow me", "follow me please", "come with me", "please follow me"],
+    "stop": ["stop", "robot stop", "please stop", "stop here", "stay here", "stay there", "wait here", "stay",
              "finish", "pause", "end", "robot finish", "robot pause"],
 }
 

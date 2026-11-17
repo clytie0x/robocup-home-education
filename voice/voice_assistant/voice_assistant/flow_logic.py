@@ -28,14 +28,14 @@ Fixes vs. the original drawing
 import re
 
 LISTENING, PICKING_BAG, ANNOUNCE_READY, FOLLOWING, DROPPING_BAG, ERROR, ASK_FOLLOW = (
-    'listening', 'picking_bag', 'announce_ready', 'following', 'dropping_bag', 'error', 'ask_follow')
+    "listening", "picking_bag", "announce_ready", "following", "dropping_bag", "error", "ask_follow")
 YES = re.compile(r"^\W*(yes|yeah|yep|yup|ya|sure|ok|okay|alright|all right|please|of course|go ahead|let'?s go|"
                  r"come on|do it|follow)\b", re.I)
 NO = re.compile(r"^\W*(no|nope|nah|not now|not yet|don'?t|wait|later)\b|\b(wait here|stay here)\b", re.I)
-MOTION = {'move_forward', 'move_backward', 'turn', 'go_to', 'look_at'}
+MOTION = {"move_forward", "move_backward", "turn", "go_to", "look_at"}
 # Other names teammates' nodes may send for the same event (unknown events are only logged, never a crash)
-EVENT_ALIASES = {'drop_success': 'drop_done', 'grab_done': 'grab_success', 'pick_success': 'grab_success',
-                 'pick_failed': 'grab_failed', 'person_seen': 'see_person', 'person_lost': 'lost_person'}
+EVENT_ALIASES = {"drop_success": "drop_done", "grab_done": "grab_success", "pick_success": "grab_success",
+                 "pick_failed": "grab_failed", "person_seen": "see_person", "person_lost": "lost_person"}
 
 
 class FlowLogic:
@@ -140,42 +140,42 @@ class FlowLogic:
 
     def on_event(self, ev, now):
         # "name" or "name|ERROR_CODE|English message" (from arm_action_bridge / SO-100 API)
-        parts = ev.strip().split('|', 2)
+        parts = ev.strip().split("|", 2)
         ev = EVENT_ALIASES.get(parts[0].strip().lower(), parts[0].strip().lower())
-        code = parts[1].strip().upper() if len(parts) > 1 else ''
-        arm_msg = parts[2].strip() if len(parts) > 2 else ''
-        if ev == 'grab_failed' and code == 'HOLDING':      # arm already holds something: treat as picked up
-            ev = 'grab_success'
-        if ev == 'drop_failed' and code == 'NOT_HOLDING':  # nothing in the gripper any more
+        code = parts[1].strip().upper() if len(parts) > 1 else ""
+        arm_msg = parts[2].strip() if len(parts) > 2 else ""
+        if ev == "grab_failed" and code == "HOLDING":      # arm already holds something: treat as picked up
+            ev = "grab_success"
+        if ev == "drop_failed" and code == "NOT_HOLDING":  # nothing in the gripper any more
             self.carrying = False
-        if ev == 'see_person':
+        if ev == "see_person":
             self.person_visible = True
             return []
-        if ev == 'lost_person':
+        if ev == "lost_person":
             self.person_visible = False
             if self.state == FOLLOWING:
                 return self._goto(ERROR, now, "I lost you. Please come back in front of me.")
             return []
-        if ev == 'grab_success' and self.state == PICKING_BAG:
+        if ev == "grab_success" and self.state == PICKING_BAG:
             self.carrying = True
             return self._goto(ASK_FOLLOW if self.ask_follow else ANNOUNCE_READY, now)
-        if ev == 'grab_failed' and self.state == PICKING_BAG:
+        if ev == "grab_failed" and self.state == PICKING_BAG:
             return self._goto(ERROR, now, f"Sorry. {arm_msg}" if arm_msg else "Sorry, I could not pick up the bag.")
-        if ev == 'drop_done' and self.state == DROPPING_BAG:
+        if ev == "drop_done" and self.state == DROPPING_BAG:
             self.carrying = False
             return [("say", "Here is your bag.")] + self._goto(LISTENING, now)
-        if ev == 'drop_failed' and self.state == DROPPING_BAG:
+        if ev == "drop_failed" and self.state == DROPPING_BAG:
             return self._goto(ERROR, now, f"Sorry. {arm_msg}" if arm_msg else "Sorry, I could not drop the bag.")
-        if ev == 'arm_holding':                   # the arm reports something in its gripper
+        if ev == "arm_holding":                   # the arm reports something in its gripper
             self.carrying = True
             return []
-        if ev == 'arm_empty':                     # the arm reports an empty gripper
+        if ev == "arm_empty":                     # the arm reports an empty gripper
             was = self.carrying
             self.carrying = False
             if self.state == FOLLOWING and was:   # fell out while walking
                 return self._goto(ERROR, now, "I think I dropped the bag.")
             return []
-        if ev == 'bag_lost':
+        if ev == "bag_lost":
             was = self.carrying
             self.carrying = False
             if self.state == FOLLOWING and was:

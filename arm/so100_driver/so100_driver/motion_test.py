@@ -20,37 +20,37 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 
 from . import console_gate
 
-ARM = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll']
+ARM = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
 READY = [0, 90, -90, 0, 0]
 SEQUENCE = [  # (label, target deg, seconds)
-    ('rest -> ready (shoulder up, arm forward)', READY, 4),
-    ('base left 60', [60, 90, -90, 0, 0], 3),
-    ('base right 60 (120 deg sweep)', [-60, 90, -90, 0, 0], 5),
-    ('base back to centre', READY, 3),
-    ('elbow up (lower arm raised)', [0, 90, -150, 0, 0], 3),
-    ('elbow DOWN (descent)', READY, 3),
-    ('shoulder forward/DOWN (descent)', [0, 150, -150, 0, 0], 3),
-    ('shoulder back up', READY, 3),
-    ('wrist flex down 60', [0, 90, -90, -60, 0], 2),
-    ('wrist flex back', READY, 2),
-    ('wrist roll +90', [0, 90, -90, 0, 90], 2),
-    ('wrist roll -60', [0, 90, -90, 0, -60], 3),
-    ('wrist roll back', READY, 2),
-    ('ready -> rest (shoulder DOWN, fold)', [0, 2, -2, 0, 0], 4),
+    ("rest -> ready (shoulder up, arm forward)", READY, 4),
+    ("base left 60", [60, 90, -90, 0, 0], 3),
+    ("base right 60 (120 deg sweep)", [-60, 90, -90, 0, 0], 5),
+    ("base back to centre", READY, 3),
+    ("elbow up (lower arm raised)", [0, 90, -150, 0, 0], 3),
+    ("elbow DOWN (descent)", READY, 3),
+    ("shoulder forward/DOWN (descent)", [0, 150, -150, 0, 0], 3),
+    ("shoulder back up", READY, 3),
+    ("wrist flex down 60", [0, 90, -90, -60, 0], 2),
+    ("wrist flex back", READY, 2),
+    ("wrist roll +90", [0, 90, -90, 0, 90], 2),
+    ("wrist roll -60", [0, 90, -90, 0, -60], 3),
+    ("wrist roll back", READY, 2),
+    ("ready -> rest (shoulder DOWN, fold)", [0, 2, -2, 0, 0], 4),
 ]
 
 
 NATIVE_STEPS = [  # one joint at a time, constant speed (like a servo's own single-goal move)
-    ('elbow up to -90 (setup)', 'elbow_flex', -90),
-    ('shoulder up to 90 = ready (setup)', 'shoulder_lift', 90),
-    ('BASE left 40', 'shoulder_pan', 40),
-    ('BASE back to 0', 'shoulder_pan', 0),
-    ('SHOULDER forward/DOWN to 120', 'shoulder_lift', 120),
-    ('SHOULDER back up to 90', 'shoulder_lift', 90),
-    ('ELBOW raise to -130', 'elbow_flex', -130),
-    ('ELBOW DOWN to -90', 'elbow_flex', -90),
-    ('shoulder down to 2 (fold)', 'shoulder_lift', 2),
-    ('elbow fold to -2', 'elbow_flex', -2),
+    ("elbow up to -90 (setup)", "elbow_flex", -90),
+    ("shoulder up to 90 = ready (setup)", "shoulder_lift", 90),
+    ("BASE left 40", "shoulder_pan", 40),
+    ("BASE back to 0", "shoulder_pan", 0),
+    ("SHOULDER forward/DOWN to 120", "shoulder_lift", 120),
+    ("SHOULDER back up to 90", "shoulder_lift", 90),
+    ("ELBOW raise to -130", "elbow_flex", -130),
+    ("ELBOW DOWN to -90", "elbow_flex", -90),
+    ("shoulder down to 2 (fold)", "shoulder_lift", 2),
+    ("elbow fold to -2", "elbow_flex", -2),
 ]
 
 
@@ -96,13 +96,13 @@ def min_jerk(a, b, secs, n=25):
 
 class Tester(Node):
     def __init__(self):
-        super().__init__('motion_test')
-        self.js, self.rows, self.status = {}, [], ''
+        super().__init__("motion_test")
+        self.js, self.rows, self.status = {}, [], ""
         self.recording = False
-        self.create_subscription(JointState, 'joint_states', self.on_js, 50)
-        self.create_subscription(String, 'so100/status', lambda m: setattr(self, 'status', m.data), 10)
-        self.arm = ActionClient(self, FollowJointTrajectory, 'arm_controller/follow_joint_trajectory')
-        self.grip = ActionClient(self, GripperCommand, 'gripper_controller/gripper_cmd')
+        self.create_subscription(JointState, "joint_states", self.on_js, 50)
+        self.create_subscription(String, "so100/status", lambda m: setattr(self, "status", m.data), 10)
+        self.arm = ActionClient(self, FollowJointTrajectory, "arm_controller/follow_joint_trajectory")
+        self.grip = ActionClient(self, GripperCommand, "gripper_controller/gripper_cmd")
 
     def on_js(self, m):
         self.js = dict(zip(m.name, m.position))
@@ -147,12 +147,12 @@ def analyse(rows):
         jit = max(abs(a - b) for a, b in zip(x[w:-w], sm[w:-w])) if len(x) > 2 * w + 1 else 0.0
         rms = math.sqrt(sum((a - b) ** 2 for a, b in zip(x[w:-w], sm[w:-w])) / max(1, len(x) - 2 * w))
         if max(x) - min(x) > 2 or rev:
-            out.append(f'{n} {max(x) - min(x):.0f}deg rev={rev} wobble={jit:.1f} rms={rms:.2f}')
-    return ', '.join(out) or 'no motion'
+            out.append(f"{n} {max(x) - min(x):.0f}deg rev={rev} wobble={jit:.1f} rms={rms:.2f}")
+    return ", ".join(out) or "no motion"
 
 
 def run_native(t):
-    print('driver-commanded copy of native_test (10 deg/s, one joint at a time)', flush=True)
+    print("driver-commanded copy of native_test (10 deg/s, one joint at a time)", flush=True)
     for label, joint, deg in NATIVE_STEPS:
         start = [math.degrees(t.js[n]) for n in ARM]
         k = ARM.index(joint)
@@ -171,15 +171,15 @@ def run_native(t):
         res = t.wait(h.get_result_async()).result
         time.sleep(0.5)
         t.recording = False
-        print(f'{label:36s} code={res.error_code} | {analyse(t.rows)}', flush=True)
+        print(f"{label:36s} code={res.error_code} | {analyse(t.rows)}", flush=True)
         if res.error_code != 0:
-            print('STOPPED:', res.error_string)
+            print("STOPPED:", res.error_string)
             return
         time.sleep(1.0)
 
 
 def main():
-    console_gate.require('motion_test')
+    console_gate.require("motion_test")
     rclpy.init()
     t = Tester()
     ex = rclpy.executors.SingleThreadedExecutor()
@@ -190,17 +190,17 @@ def main():
     while not t.js:
         time.sleep(0.05)
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == 'native':
+    if len(sys.argv) > 1 and sys.argv[1] == "native":
         run_native(t)
         ex.shutdown()
         spin.join(timeout=2)
         rclpy.shutdown()
         return
     speed = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0   # 2.0 = twice as fast
-    print(f'speed factor {speed}', flush=True)
-    heavy = len(sys.argv) > 2 and sys.argv[2] == 'heavy'   # only base / shoulder / elbow segments
+    print(f"speed factor {speed}", flush=True)
+    heavy = len(sys.argv) > 2 and sys.argv[2] == "heavy"   # only base / shoulder / elbow segments
     for label, target, secs in SEQUENCE:
-        if heavy and label.startswith('wrist'):
+        if heavy and label.startswith("wrist"):
             continue
         secs = secs / speed
         t.rows = []
@@ -212,16 +212,16 @@ def main():
         print(f'{label:42s} code={res.error_code} final_err={err:4.1f}deg | {analyse(t.rows)} | {t.status.split(" temp")[0]}',
               flush=True)
         if res.error_code != 0:
-            print('STOPPED:', res.error_string)
+            print("STOPPED:", res.error_string)
             break
-        if label.startswith('wrist roll back') and not heavy:
-            for name, pos in (('gripper open', 1.5), ('gripper close', 0.0)):
+        if label.startswith("wrist roll back") and not heavy:
+            for name, pos in (("gripper open", 1.5), ("gripper close", 0.0)):
                 r = t.gripper(pos)
-                print(f'{name:42s} reached={r.reached_goal} stalled={r.stalled} pos={math.degrees(r.position):.0f}deg', flush=True)
+                print(f"{name:42s} reached={r.reached_goal} stalled={r.stalled} pos={math.degrees(r.position):.0f}deg", flush=True)
     ex.shutdown()
     spin.join(timeout=2)
     rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

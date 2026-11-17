@@ -12,8 +12,8 @@ import pytest
 
 from voice_assistant.speech_rules import BargeInDetector, LoudnessGate, noise_transcript
 
-STT_NODE = Path(__file__).resolve().parents[1] / 'voice_assistant' / 'stt_node.py'
-PARAMS = Path(__file__).resolve().parents[1] / 'config' / 'params.yaml'
+STT_NODE = Path(__file__).resolve().parents[1] / "voice_assistant" / "stt_node.py"
+PARAMS = Path(__file__).resolve().parents[1] / "config" / "params.yaml"
 
 # the task flow says these as one word (base/jetson/hmc_flow.py: ready, done/okay, follow, stop/wait,
 # here, back, continue/resume)
@@ -23,40 +23,40 @@ TASK_WORDS = ["ready", "done", "okay", "ok", "back", "follow", "continue", "resu
 
 def stt_param_default(name):
     """Default of stt_node's parameter `name`, read from the source (the node imports rclpy)."""
-    for node in ast.walk(ast.parse(STT_NODE.read_text(encoding='utf-8'))):
+    for node in ast.walk(ast.parse(STT_NODE.read_text(encoding="utf-8"))):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == 'declare_parameter' and node.args
+                and node.func.attr == "declare_parameter" and node.args
                 and isinstance(node.args[0], ast.Constant) and node.args[0].value == name):
             return ast.literal_eval(node.args[1])
-    raise AssertionError(f'declare_parameter({name!r}) not found in {STT_NODE.name}')
+    raise AssertionError(f"declare_parameter({name!r}) not found in {STT_NODE.name}")
 
 
 def params_yaml_line(key):
     """The text of a `key: ...` line in config/params.yaml (there is no yaml module in this venv)."""
-    for line in PARAMS.read_text(encoding='utf-8').splitlines():
+    for line in PARAMS.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-        if stripped.startswith(key + ':'):
+        if stripped.startswith(key + ":"):
             return stripped
-    raise AssertionError(f'{key} not found in {PARAMS.name}')
+    raise AssertionError(f"{key} not found in {PARAMS.name}")
 
 
 def params_single_word_allow():
-    line = params_yaml_line('single_word_allow')
-    body = line.split('[', 1)[1].rsplit(']', 1)[0]
-    return {w.strip(' "\'') for w in body.split(',') if w.strip(' "\'')}
+    line = params_yaml_line("single_word_allow")
+    body = line.split("[", 1)[1].rsplit("]", 1)[0]
+    return {w.strip(' "\'') for w in body.split(",") if w.strip(' "\'')}
 
 
 @pytest.mark.parametrize("word", TASK_WORDS)
 def test_task_word_passes_the_one_word_filter(word):
     allow = params_single_word_allow()
     assert not noise_transcript(word, allow)
-    assert not noise_transcript(word.capitalize() + '.', allow)     # whisper writes "Ready."
+    assert not noise_transcript(word.capitalize() + ".", allow)     # whisper writes "Ready."
 
 
 @pytest.mark.parametrize("word", TASK_WORDS)
 def test_task_word_is_in_the_stt_node_default(word):
     # the code default must match params.yaml, or a robot without params.yaml drops the word again
-    assert word in {w.lower() for w in stt_param_default('single_word_allow')}
+    assert word in {w.lower() for w in stt_param_default("single_word_allow")}
 
 
 @pytest.mark.parametrize("text", ["Go.", "you", "", "[BLANK_AUDIO]", "(", "a"])
@@ -74,12 +74,12 @@ def test_empty_allow_list_keeps_every_transcript():
 
 
 def test_initial_prompt_uses_the_task_words():
-    prompts = [stt_param_default('initial_prompt'), params_yaml_line('initial_prompt')]
+    prompts = [stt_param_default("initial_prompt"), params_yaml_line("initial_prompt")]
     for prompt in prompts:
         low = prompt.lower()
         for phrase in ("follow me", "this is the car", "stop", "wait", "go back", "done", "ready",
                        "bag", "left", "right"):
-            assert phrase in low, f'{phrase!r} missing from {prompt!r}'
+            assert phrase in low, f"{phrase!r} missing from {prompt!r}"
         assert "beatbox" not in low and "turn left" not in low
 
 

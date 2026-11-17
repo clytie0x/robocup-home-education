@@ -64,10 +64,10 @@ from .ik import ARM, GRASP_Y, TIP_Y, Box, GraspPlanner, Kinematics, PlanError, b
 from .task_rules import (PICK_PLACE, PROBE_JOINTS, Failed, api_code, descent_loads, gripper_load, held_by_weight,
                          probe_contact, settled_load, still_held, top_unknown)
 
-READY = {'shoulder_pan': 0.0, 'shoulder_lift': 1.2, 'elbow_flex': -1.2, 'wrist_flex': 0.3, 'wrist_roll': 0.0}
-REST = {'shoulder_pan': 0.0, 'shoulder_lift': 0.04, 'elbow_flex': -0.04, 'wrist_flex': 0.0, 'wrist_roll': 0.0}  # SRDF 'rest'
+READY = {"shoulder_pan": 0.0, "shoulder_lift": 1.2, "elbow_flex": -1.2, "wrist_flex": 0.3, "wrist_roll": 0.0}
+REST = {"shoulder_pan": 0.0, "shoulder_lift": 0.04, "elbow_flex": -0.04, "wrist_flex": 0.0, "wrist_roll": 0.0}  # SRDF 'rest'
 AT_REST = 0.08     # rad: every joint this close to REST counts as resting
-OBJ, TGT = 'object', 'target'
+OBJ, TGT = "object", "target"
 BLUE = (0.15, 0.55, 1.0, 1.0)      # same colour for the RViz box and MoveIt's copy of it
 
 
@@ -85,68 +85,68 @@ def copy_box(b):
 
 # English result messages of the API (the voice system can speak them)
 MESSAGES = {
-    'UNREACHABLE': 'I cannot reach that position.',
-    'TOO_WIDE': 'The object is too wide for my gripper.',
-    'MISSED': 'I missed the object.',
-    'COLLISION': 'My arm was blocked or would hit the table.',
-    'BUSY': 'I am busy with another task.',
-    'HOLDING': 'I am already holding something.',
-    'NOT_HOLDING': 'I am not holding anything.',
-    'HOT': 'My motors are too hot. Please wait a minute.',
-    'STOPPED': 'Stopped.',
-    'REPLACED': 'Another program moved my arm, so I stopped.',
-    'FAILED': 'Something went wrong.',
+    "UNREACHABLE": "I cannot reach that position.",
+    "TOO_WIDE": "The object is too wide for my gripper.",
+    "MISSED": "I missed the object.",
+    "COLLISION": "My arm was blocked or would hit the table.",
+    "BUSY": "I am busy with another task.",
+    "HOLDING": "I am already holding something.",
+    "NOT_HOLDING": "I am not holding anything.",
+    "HOT": "My motors are too hot. Please wait a minute.",
+    "STOPPED": "Stopped.",
+    "REPLACED": "Another program moved my arm, so I stopped.",
+    "FAILED": "Something went wrong.",
 }
-SUCCESS = {'pick': 'I have picked it up.', 'place': 'I have put it down.', 'pick_place': 'Done, I moved it.',
-           'home': 'I am at the ready pose.', 'rest': 'I am resting.', 'touch': 'Done.',
-           'pick_bag': 'I have the bag.'}
+SUCCESS = {"pick": "I have picked it up.", "place": "I have put it down.", "pick_place": "Done, I moved it.",
+           "home": "I am at the ready pose.", "rest": "I am resting.", "touch": "Done.",
+           "pick_bag": "I have the bag."}
 
 
 class PickPlace(Node):
     def __init__(self):
-        super().__init__('so100_pick_place')
-        self.declare_parameter('robot_description', '')
-        self.declare_parameter('calibration', '')
-        self.declare_parameter('table_z', -0.075)
-        self.declare_parameter('sim', False)
-        self.declare_parameter('object_size', [0.03, 0.03, 0.05])
-        self.declare_parameter('line_speed', 0.03)        # m/s on the straight approach/lift lines
-        self.declare_parameter('velocity_scaling', 0.3)   # MoveIt moves
-        self.declare_parameter('rest_after_s', 120.0)     # idle time before folding into the rest pose, 0 = off
-        self.declare_parameter('deck', [0.0, 0.0, 0.0, 0.0])  # arm on the robot: [front, back, left, right] m
-        self.declare_parameter('deck_z', -0.068)          # deck top below the arm base (m)
-        self.declare_parameter('bag_carry_side', 90.0)    # deg: 0 = front, 90 = left, -90 = right
-        self.declare_parameter('bag_bottom_min', 0.36)    # bag bottom above the floor while carried (m)
-        self.declare_parameter('bag_speed', 0.08)         # m/s of the grasp point on the bag carry moves
-        self.declare_parameter('bag_miss_below', 0.06)    # rad: bag jaws closing below this = missed, 0 = no check
-        self.declare_parameter('bag_tries', 3)            # grasp tries, shifted across the part after a miss
-        self.declare_parameter('bag_try_step', 0.05)      # m between tries
+        super().__init__("so100_pick_place")
+        self.declare_parameter("robot_description", "")
+        self.declare_parameter("calibration", "")
+        self.declare_parameter("table_z", -0.075)
+        self.declare_parameter("sim", False)
+        self.declare_parameter("object_size", [0.03, 0.03, 0.05])
+        self.declare_parameter("line_speed", 0.03)        # m/s on the straight approach/lift lines
+        self.declare_parameter("velocity_scaling", 0.3)   # MoveIt moves
+        self.declare_parameter("rest_after_s", 120.0)     # idle time before folding into the rest pose, 0 = off
+        self.declare_parameter("deck", [0.0, 0.0, 0.0, 0.0])  # arm on the robot: [front, back, left, right] m
+        self.declare_parameter("deck_z", -0.068)          # deck top below the arm base (m)
+        self.declare_parameter("bag_carry_side", 90.0)    # deg: 0 = front, 90 = left, -90 = right
+        self.declare_parameter("bag_bottom_min", 0.36)    # bag bottom above the floor while carried (m)
+        self.declare_parameter("bag_speed", 0.08)         # m/s of the grasp point on the bag carry moves
+        self.declare_parameter("bag_miss_below", 0.06)    # rad: bag jaws closing below this = missed, 0 = no check
+        self.declare_parameter("bag_tries", 3)            # grasp tries, shifted across the part after a miss
+        self.declare_parameter("bag_try_step", 0.05)      # m between tries
         # /arm/pick_bag method: 'camera' = forearm webcam + Xtion (bag_camera.py, tested 2026-11-15),
         # 'planner' = the planned grasp at the goal's position (probe / shifts / carry at the side)
-        self.declare_parameter('bag_method', 'camera')
-        self.declare_parameter('bag_cam_url', 'http://localhost:8082/snap.jpg')    # forearm webcam (webcam_view.py)
-        self.declare_parameter('bag_xtion_url', 'http://192.168.31.21:8081/stream')  # Xtion MJPEG on the base Pi
-        self.declare_parameter('bag_cam_tries', 4)        # camera grasp tries (each looks at the bag again)
+        self.declare_parameter("bag_method", "camera")
+        self.declare_parameter("bag_cam_url", "http://localhost:8082/snap.jpg")    # forearm webcam (webcam_view.py)
+        self.declare_parameter("bag_xtion_url", "http://192.168.31.21:8081/stream")  # Xtion MJPEG on the base Pi
+        self.declare_parameter("bag_cam_tries", 4)        # camera grasp tries (each looks at the bag again)
         # Bag top unknown (PickBag grasp_pose z NaN): found by touch (probe_bag). Every value is a first guess,
         # to be measured on the robot from the 'probe k/n' log lines of one real run.
-        self.declare_parameter('bag_probe_top', 0.40)     # m above the floor the closed tips start (or the highest
+        self.declare_parameter("bag_probe_top", 0.40)     # m above the floor the closed tips start (or the highest
         #                                                   the arm reaches there): over the tallest top it grasps (37 cm)
-        self.declare_parameter('bag_probe_bottom', 0.12)  # m above the floor: the tips go no lower
-        self.declare_parameter('bag_probe_step', 0.01)    # m per step = the most it goes into a bag before a reading
-        self.declare_parameter('bag_probe_speed', 0.02)   # m/s on a probe step
+        self.declare_parameter("bag_probe_bottom", 0.12)  # m above the floor: the tips go no lower
+        self.declare_parameter("bag_probe_step", 0.01)    # m per step = the most it goes into a bag before a reading
+        self.declare_parameter("bag_probe_speed", 0.02)   # m/s on a probe step
         # first steps not used: the arm still settles after the MoveIt move (real run 2026-11-15: shoulder +13,
         # +12, then +2..+4 %)
-        self.declare_parameter('bag_probe_settle_steps', 2)
-        self.declare_parameter('bag_probe_base_steps', 3)  # next steps (free air): their readings are the baseline
+        self.declare_parameter("bag_probe_settle_steps", 2)
+        self.declare_parameter("bag_probe_base_steps", 3)  # next steps (free air): their readings are the baseline
         # % change of the shoulder_lift / elbow_flex load = contact (0 = off). 8 % of the 12 V STS3215's 30 kg.cm
         # would be about 1 N up on the tips at the shoulder's 25 cm lever, if load % is that share of the torque.
-        self.declare_parameter('bag_probe_load_jump', 8.0)
+        self.declare_parameter("bag_probe_load_jump", 8.0)
         # rad rise of their tracking error = contact (0 = off): ~5 mm at the tips. The driver itself fails a move
         # at 0.06 rad short at the end or 0.14 rad behind on the way (follow_error).
-        self.declare_parameter('bag_probe_error_jump', 0.02)
-        self.declare_parameter('bag_probe_backoff', 0.02)  # m back up after the contact
+        self.declare_parameter("bag_probe_error_jump", 0.02)
+        self.declare_parameter("bag_probe_backoff", 0.02)  # m back up after the contact
         # finger tips this far below a probed top (the bag grasp uses ik.GRIP_DEPTH = 2.8 cm, fingers ~3 cm long)
-        self.declare_parameter('bag_probe_grip_depth', 0.028)
+        self.declare_parameter("bag_probe_grip_depth", 0.028)
         # Held by weight: a bag grasp whose jaws read closed (a thin paper rim reads like an empty close,
         # 0.043-0.051 rad on 2026-11-15) goes back up the approach with the jaws closed; if the shoulder_lift /
         # elbow_flex load there changed by more than this % from the empty-jaws reading at the same pose before
@@ -160,100 +160,100 @@ class PickPlace(Node):
         # 3 against closed 18,16 -> 17: the shoulder load decays for 5 to 6 s at rest, so a quick reading looks like
         # weight. Two false "holding" out of two; a false hold sends the robot home empty. Turn on only after a
         # measured real hold and a reading that waits out the decay.
-        self.declare_parameter('bag_weight_load', 0.0)
+        self.declare_parameter("bag_weight_load", 0.0)
         # Before the empty-jaws reading the hand dips this far down the approach line and comes back, so it also
         # arrives from below. At most 1.5 cm: the approach starts with the tips 2 cm above the top (approach_dist).
-        self.declare_parameter('bag_weight_dip', 0.015)
-        self.declare_parameter('bag_weight_settle_tol', 2.0)  # % two readings in a row may differ: settled
-        self.declare_parameter('bag_weight_max_reads', 6)     # status lines (1 Hz) at most for one weight reading
+        self.declare_parameter("bag_weight_dip", 0.015)
+        self.declare_parameter("bag_weight_settle_tol", 2.0)  # % two readings in a row may differ: settled
+        self.declare_parameter("bag_weight_max_reads", 6)     # status lines (1 Hz) at most for one weight reading
         p = lambda n: self.get_parameter(n).value
-        self.table_z = float(p('table_z'))
-        self.sim = bool(p('sim'))
+        self.table_z = float(p("table_z"))
+        self.sim = bool(p("sim"))
         limits, self.grip_max = None, 1.2
-        if p('calibration'):
+        if p("calibration"):
             try:
-                cal = Calibration.load(p('calibration'))
+                cal = Calibration.load(p("calibration"))
                 limits = {n: cal.rad_limits(n) for n in ARM}
-                self.grip_max = cal.rad_limits('gripper')[1]
+                self.grip_max = cal.rad_limits("gripper")[1]
             except (OSError, ValueError) as exc:
-                self.get_logger().warn(f'calibration not used ({exc}); URDF limits only')
+                self.get_logger().warn(f"calibration not used ({exc}); URDF limits only")
         try:
             from ament_index_python.packages import get_package_share_directory
-            mesh_dir = get_package_share_directory('so100_moveit_config') + '/meshes'
+            mesh_dir = get_package_share_directory("so100_moveit_config") + "/meshes"
         except Exception:  # noqa: BLE001  (no meshes -> finger-tip check only)
             mesh_dir = None
-        self.kin = Kinematics(p('robot_description'), limits, mesh_dir)
+        self.kin = Kinematics(p("robot_description"), limits, mesh_dir)
         if not self.kin.meshes:
-            self.get_logger().warn('no meshes: only the finger tips are checked against the table')
+            self.get_logger().warn("no meshes: only the finger tips are checked against the table")
         if limits:   # never wider than the URDF (which launch already narrowed to the real range)
             self.kin.limits = {n: (max(lo, self.kin.urdf_limits[n][0]), min(hi, self.kin.urdf_limits[n][1]))
                                for n, (lo, hi) in self.kin.limits.items()}
-        deck = [float(v) for v in p('deck')]
-        self.deck = deck_box(self.kin, *deck, float(p('deck_z')), self.table_z) if any(deck) else None
+        deck = [float(v) for v in p("deck")]
+        self.deck = deck_box(self.kin, *deck, float(p("deck_z")), self.table_z) if any(deck) else None
         self.planner = GraspPlanner(self.kin, self.table_z, [self.deck] if self.deck else [])
         self.cam = CameraBag(self)
         # the rest pose inside the real (calibrated) travel
         self.rest_q = {n: min(max(v, self.kin.limits[n][0] + 0.02), self.kin.limits[n][1] - 0.02)
                        for n, v in REST.items()}
 
-        size = tuple(p('object_size'))
+        size = tuple(p("object_size"))
         x, y = self.kin.from_user(0.20, 0.0)
         tx, ty = self.kin.from_user(0.20, -0.10)
         self.boxes = {OBJ: Box(x, y, self.kin.heading0, size), TGT: Box(tx, ty, self.kin.heading0, size)}
         self.joints = {}
         self.busy = False
-        self.task, self.step, self.goal_handle, self.on_lifted = '', '', None, None
+        self.task, self.step, self.goal_handle, self.on_lifted = "", "", None, None
         self.cancel_requested = False
         self.moved = False
-        self.last = ('SUCCESS', '')
-        self.driver_status, self.driver_seen = '', -1e9
+        self.last = ("SUCCESS", "")
+        self.driver_status, self.driver_seen = "", -1e9
         self.idle_since = time.monotonic()  # end of the last task (auto-rest timer)
-        self.hold_still = ''                # why the arm must not fold by itself (stopped / object maybe in jaws)
+        self.hold_still = ""                # why the arm must not fold by itself (stopped / object maybe in jaws)
         self.preempt = False                # a new task asked the running fold to give way
         self.current = None                 # goal handle of the running motion (to cancel a fold)
         self.was_torque = False
         self.attached = False
-        self.check = ''
+        self.check = ""
         self.lock = threading.Lock()
         self.grasped = None              # plan of this task's grasp once the jaws closed on something
         self.grip_reading = (math.nan, math.nan)   # (gripper rad, load %) right after this task's last grasp
 
         cb = ReentrantCallbackGroup()
-        self.status_pub = self.create_publisher(String, 'so100/pick_place/status', 10)
-        self.map_pub = self.create_publisher(Marker, 'so100/place_map', 1)
-        self.map_gen, self.map_key, self.map_points, self.map_note = 0, None, [], ''
-        self.create_subscription(JointState, 'joint_states', self.on_js, 20, callback_group=cb)
-        self.arm = ActionClient(self, FollowJointTrajectory, 'arm_controller/follow_joint_trajectory', callback_group=cb)
-        self.grip = ActionClient(self, GripperCommand, 'gripper_controller/gripper_cmd', callback_group=cb)
-        self.move = ActionClient(self, MoveGroup, 'move_action', callback_group=cb)
-        self.scene = self.create_client(ApplyPlanningScene, 'apply_planning_scene', callback_group=cb)
-        self.create_service(Trigger, 'so100/pick_place', self.on_pick_place, callback_group=cb)
-        self.create_service(Trigger, 'so100/touch', self.on_touch, callback_group=cb)
+        self.status_pub = self.create_publisher(String, "so100/pick_place/status", 10)
+        self.map_pub = self.create_publisher(Marker, "so100/place_map", 1)
+        self.map_gen, self.map_key, self.map_points, self.map_note = 0, None, [], ""
+        self.create_subscription(JointState, "joint_states", self.on_js, 20, callback_group=cb)
+        self.arm = ActionClient(self, FollowJointTrajectory, "arm_controller/follow_joint_trajectory", callback_group=cb)
+        self.grip = ActionClient(self, GripperCommand, "gripper_controller/gripper_cmd", callback_group=cb)
+        self.move = ActionClient(self, MoveGroup, "move_action", callback_group=cb)
+        self.scene = self.create_client(ApplyPlanningScene, "apply_planning_scene", callback_group=cb)
+        self.create_service(Trigger, "so100/pick_place", self.on_pick_place, callback_group=cb)
+        self.create_service(Trigger, "so100/touch", self.on_touch, callback_group=cb)
         self.holding = None              # plan of the object in the jaws (voice 'carry' -> 'drop')
-        self.event_pub = self.create_publisher(String, '/robot/event', 10)
-        self.create_subscription(Empty, '/robot/carry_bag', self.on_carry, 10, callback_group=cb)
-        self.create_subscription(Empty, '/robot/drop_bag', self.on_drop, 10, callback_group=cb)
+        self.event_pub = self.create_publisher(String, "/robot/event", 10)
+        self.create_subscription(Empty, "/robot/carry_bag", self.on_carry, 10, callback_group=cb)
+        self.create_subscription(Empty, "/robot/drop_bag", self.on_drop, 10, callback_group=cb)
         # ---- /arm/* API
         self.tf = Buffer()
         self.tf_listener = TransformListener(self.tf, self)
-        self.feedback_type = {'pick': Pick.Feedback, 'place': Place.Feedback, 'pick_place': PickPlaceAction.Feedback,
-                              'home': Home.Feedback, 'rest': Rest.Feedback, 'pick_bag': PickBag.Feedback}
-        for action, name, cbk in ((Pick, 'pick', self.exec_pick), (Place, 'place', self.exec_place),
-                                  (PickBag, 'pick_bag', self.exec_pick_bag),
-                                  (PickPlaceAction, 'pick_place', self.exec_pick_place), (Home, 'home', self.exec_home),
-                                  (Rest, 'rest', self.exec_rest)):
-            ActionServer(self, action, f'/arm/{name}', execute_callback=cbk, cancel_callback=self.on_cancel,
+        self.feedback_type = {"pick": Pick.Feedback, "place": Place.Feedback, "pick_place": PickPlaceAction.Feedback,
+                              "home": Home.Feedback, "rest": Rest.Feedback, "pick_bag": PickBag.Feedback}
+        for action, name, cbk in ((Pick, "pick", self.exec_pick), (Place, "place", self.exec_place),
+                                  (PickBag, "pick_bag", self.exec_pick_bag),
+                                  (PickPlaceAction, "pick_place", self.exec_pick_place), (Home, "home", self.exec_home),
+                                  (Rest, "rest", self.exec_rest)):
+            ActionServer(self, action, f"/arm/{name}", execute_callback=cbk, cancel_callback=self.on_cancel,
                          callback_group=cb)
-        self.driver_stop = self.create_client(Trigger, 'so100/stop', callback_group=cb)
-        self.driver_enable = self.create_client(SetBool, 'so100/enable', callback_group=cb)
-        self.create_service(Trigger, '/arm/stop', self.on_api_stop, callback_group=cb)
-        self.create_service(SetBool, '/arm/torque', self.on_api_torque, callback_group=cb)
-        self.state_pub = self.create_publisher(ArmState, '/arm/state', 10)
-        self.create_subscription(String, 'so100/status', self.on_driver_status, 10, callback_group=cb)
+        self.driver_stop = self.create_client(Trigger, "so100/stop", callback_group=cb)
+        self.driver_enable = self.create_client(SetBool, "so100/enable", callback_group=cb)
+        self.create_service(Trigger, "/arm/stop", self.on_api_stop, callback_group=cb)
+        self.create_service(SetBool, "/arm/torque", self.on_api_torque, callback_group=cb)
+        self.state_pub = self.create_publisher(ArmState, "/arm/state", 10)
+        self.create_subscription(String, "so100/status", self.on_driver_status, 10, callback_group=cb)
         self.create_timer(0.5, self.publish_state, callback_group=cb)
         self.create_timer(1.0, self.auto_rest, callback_group=cb)
         self.add_on_set_parameters_callback(self.on_params)
-        self.server = InteractiveMarkerServer(self, 'so100_objects')
+        self.server = InteractiveMarkerServer(self, "so100_objects")
         self.make_markers()
         self.create_timer(1.0, self.publish_status, callback_group=cb)
         self.scene_ready = False
@@ -273,25 +273,25 @@ class PickPlace(Node):
 
     def publish_status(self):
         lines = []
-        for key, label in ((OBJ, 'ของ'), (TGT, 'จุดวาง')):
+        for key, label in ((OBJ, "ของ"), (TGT, "จุดวาง")):
             f, l_ = self.kin.to_user((self.boxes[key].x, self.boxes[key].y))
             yaw = math.degrees(self.boxes[key].yaw - self.kin.heading0)
-            lines.append(f'{label}: หน้า {f * 100 + 0.0:.1f} ซม. ซ้าย {round(l_ * 100, 1) + 0.0:.1f} ซม. หมุน {round(yaw) + 0:.0f}°')
+            lines.append(f"{label}: หน้า {f * 100 + 0.0:.1f} ซม. ซ้าย {round(l_ * 100, 1) + 0.0:.1f} ซม. หมุน {round(yaw) + 0:.0f}°")
         s = self.boxes[OBJ].size
-        lines.append(f'ขนาด ลึก×กว้าง×สูง {s[0] * 100:.1f}×{s[1] * 100:.1f}×{s[2] * 100:.1f} ซม.')
+        lines.append(f"ขนาด ลึก×กว้าง×สูง {s[0] * 100:.1f}×{s[1] * 100:.1f}×{s[2] * 100:.1f} ซม.")
         lines.append(self.check)
         if self.map_note:
             lines.append(self.map_note)
-        self.status_pub.publish(String(data='\n'.join(lines)))
+        self.status_pub.publish(String(data="\n".join(lines)))
 
     def on_params(self, params):
         for prm in params:
-            if prm.name == 'object_size':
+            if prm.name == "object_size":
                 v = [float(x) for x in prm.value]
                 if len(v) != 3 or min(v) < 0.005 or max(v) > 0.3:
-                    return SetParametersResult(successful=False, reason='object_size = [ลึก, กว้าง, สูง] เมตร (0.005..0.3)')
+                    return SetParametersResult(successful=False, reason="object_size = [ลึก, กว้าง, สูง] เมตร (0.005..0.3)")
                 if self.busy:
-                    return SetParametersResult(successful=False, reason='กำลังหยิบ-วางอยู่')
+                    return SetParametersResult(successful=False, reason="กำลังหยิบ-วางอยู่")
                 for b in self.boxes.values():
                     b.size = tuple(v)
                 threading.Thread(target=self.after_change, daemon=True).start()
@@ -307,10 +307,10 @@ class PickPlace(Node):
     # -------------------------------------------------------------------------------- markers
     def make_markers(self):
         # blue / purple: the robot model is orange and MoveIt draws scene objects green
-        for key, colour, label in ((OBJ, BLUE, 'ของ'), (TGT, (0.75, 0.3, 0.95, 0.45), 'จุดวาง')):
+        for key, colour, label in ((OBJ, BLUE, "ของ"), (TGT, (0.75, 0.3, 0.95, 0.45), "จุดวาง")):
             b = self.boxes[key]
             im = InteractiveMarker()
-            im.header.frame_id = 'base'
+            im.header.frame_id = "base"
             im.name = key
             im.scale = 0.12
             im.pose.position.x, im.pose.position.y = b.x, b.y
@@ -324,10 +324,10 @@ class PickPlace(Node):
             text.scale.z = 0.025
             text.color.r = text.color.g = text.color.b = text.color.a = 1.0
             vertical = Quaternion(w=math.sqrt(0.5), y=math.sqrt(0.5))
-            drag = InteractiveMarkerControl(name='drag', orientation=vertical, always_visible=True,
+            drag = InteractiveMarkerControl(name="drag", orientation=vertical, always_visible=True,
                                             interaction_mode=InteractiveMarkerControl.MOVE_PLANE)
             drag.markers = [box, text]
-            turn = InteractiveMarkerControl(name='turn', orientation=vertical,
+            turn = InteractiveMarkerControl(name="turn", orientation=vertical,
                                             interaction_mode=InteractiveMarkerControl.ROTATE_AXIS)
             im.controls = [drag, turn]
             self.server.insert(im, feedback_callback=self.on_marker)
@@ -376,7 +376,7 @@ class PickPlace(Node):
                 v = np.array([i, j]) * self.MAP_STEP
                 if lo <= np.hypot(*v) <= hi:
                     cells.append(self.kin.pan_point + v)
-        self.map_note = 'กำลังคำนวณพื้นที่วางได้ (สีเขียวใน RViz)...'
+        self.map_note = "กำลังคำนวณพื้นที่วางได้ (สีเขียวใน RViz)..."
         self.map_points = []
         self.publish_map()
         opts = self.planner.pick_options(obj, self.joints or None)
@@ -390,13 +390,13 @@ class PickPlace(Node):
                 self.map_points = list(found)
                 self.publish_map()
         self.map_points = found
-        self.map_note = '' if found else '✘ ไม่มีจุดไหนวางของชิ้นนี้ได้ (หยิบไม่ได้ หรือของใหญ่เกิน)'
+        self.map_note = "" if found else "✘ ไม่มีจุดไหนวางของชิ้นนี้ได้ (หยิบไม่ได้ หรือของใหญ่เกิน)"
         self.publish_map()
         self.publish_status()
 
     def publish_map(self):
-        m = Marker(ns='place_map', id=0, type=Marker.CUBE_LIST)
-        m.header.frame_id = 'base'
+        m = Marker(ns="place_map", id=0, type=Marker.CUBE_LIST)
+        m.header.frame_id = "base"
         if not self.map_points:
             m.action = Marker.DELETE
         else:
@@ -413,7 +413,7 @@ class PickPlace(Node):
             plan = self.planner.plan(self.boxes[OBJ], self.boxes[TGT], self.joints or None)
             self.say(f'✔ หยิบได้: {plan["mode"]}, ของกว้าง {plan["extent"] * 100:.1f} ซม. ระหว่างก้าม')
         except PlanError as exc:
-            self.say(f'✘ {exc}')
+            self.say(f"✘ {exc}")
 
     # ---------------------------------------------------------------------------- planning scene
     def init_scene(self):
@@ -422,8 +422,8 @@ class PickPlace(Node):
         self.scene_ready = True
         if self.deck is not None:          # the robot body under the arm
             lo, hi = self.deck
-            co = CollisionObject(id='robot_body', operation=CollisionObject.ADD)
-            co.header.frame_id = 'base'
+            co = CollisionObject(id="robot_body", operation=CollisionObject.ADD)
+            co.header.frame_id = "base"
             co.primitives.append(SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[float(v) for v in hi - lo]))
             pose = Pose()
             pose.position.x, pose.position.y, pose.position.z = (float(v) for v in (lo + hi) / 2)
@@ -431,7 +431,7 @@ class PickPlace(Node):
             co.primitive_poses.append(pose)
             scene = PlanningScene(is_diff=True)
             scene.world.collision_objects.append(co)
-            scene.object_colors.append(ObjectColor(id='robot_body', color=ColorRGBA(r=0.4, g=0.4, b=0.45, a=0.6)))
+            scene.object_colors.append(ObjectColor(id="robot_body", color=ColorRGBA(r=0.4, g=0.4, b=0.45, a=0.6)))
             self.apply(scene, wait=True)
         self.update_scene_object()
 
@@ -439,7 +439,7 @@ class PickPlace(Node):
         """MoveIt copy of the object. top_part = only the top this many m of it (a bag held by its top:
         the rest hangs and swings, the bag paths check it themselves)."""
         co = CollisionObject(id=OBJ, operation=op)
-        co.header.frame_id = 'base'
+        co.header.frame_id = "base"
         if op == CollisionObject.ADD:
             h = min(top_part, box.size[2]) if top_part else box.size[2]
             co.primitives.append(SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[*box.size[:2], h]))
@@ -469,7 +469,7 @@ class PickPlace(Node):
     def attach(self, box, top_part=None):
         scene = PlanningScene(is_diff=True)
         scene.robot_state.is_diff = True
-        aco = AttachedCollisionObject(link_name='gripper', touch_links=['gripper', 'jaw', 'wrist'])
+        aco = AttachedCollisionObject(link_name="gripper", touch_links=["gripper", "jaw", "wrist"])
         aco.object = self.collision_box(box, top_part=top_part)
         scene.robot_state.attached_collision_objects.append(aco)
         scene.world.collision_objects.append(self.collision_box(box, CollisionObject.REMOVE))
@@ -478,7 +478,7 @@ class PickPlace(Node):
     def detach_to(self, box):
         scene = PlanningScene(is_diff=True)
         scene.robot_state.is_diff = True
-        aco = AttachedCollisionObject(link_name='gripper')
+        aco = AttachedCollisionObject(link_name="gripper")
         aco.object = CollisionObject(id=OBJ, operation=CollisionObject.REMOVE)
         scene.robot_state.attached_collision_objects.append(aco)
         scene.world.collision_objects.append(self.collision_box(box))
@@ -497,12 +497,12 @@ class PickPlace(Node):
     def run_action(self, client, goal, timeout, what):
         self.moved = True
         if not client.wait_for_server(timeout_sec=3.0):
-            raise Failed(f'{what}: ไม่พบ action server', 'FAILED')
+            raise Failed(f"{what}: ไม่พบ action server", "FAILED")
         if self.preempt:
-            raise Failed(f'{what}: ให้ทางงานใหม่', 'STOPPED')
+            raise Failed(f"{what}: ให้ทางงานใหม่", "STOPPED")
         handle = self.wait(client.send_goal_async(goal), 5.0)
         if handle is None or not handle.accepted:
-            raise Failed(f'{what}: คำสั่งถูกปฏิเสธ', 'FAILED')
+            raise Failed(f"{what}: คำสั่งถูกปฏิเสธ", "FAILED")
         self.current = handle
         if self.preempt:                 # asked to give way while the goal was being sent
             handle.cancel_goal_async()
@@ -511,20 +511,20 @@ class PickPlace(Node):
         finally:
             self.current = None
         if self.preempt:
-            raise Failed(f'{what}: ให้ทางงานใหม่', 'STOPPED')
+            raise Failed(f"{what}: ให้ทางงานใหม่", "STOPPED")
         if res is None:
             handle.cancel_goal_async()
-            raise Failed(f'{what}: หมดเวลา', 'FAILED')
+            raise Failed(f"{what}: หมดเวลา", "FAILED")
         return res.result
 
     def moveit_to(self, q, what):
         goal = MoveGroup.Goal()
         r = goal.request
-        r.group_name = 'arm'
-        r.pipeline_id = 'ompl'
+        r.group_name = "arm"
+        r.pipeline_id = "ompl"
         r.num_planning_attempts = 3
         r.allowed_planning_time = 5.0
-        r.max_velocity_scaling_factor = float(self.get_parameter('velocity_scaling').value)
+        r.max_velocity_scaling_factor = float(self.get_parameter("velocity_scaling").value)
         r.max_acceleration_scaling_factor = 0.6
         r.start_state.is_diff = True
         c = Constraints()
@@ -536,17 +536,17 @@ class PickPlace(Node):
         res = self.run_action(self.move, goal, 60.0, what)
         code = res.error_code.val
         if code != 1:
-            reason, api = {99999: ('หาเส้นทางไม่ได้ (ท่าปลายทางชนของ/โต๊ะในโมเดล หรือทางถูกบัง)', 'COLLISION'),
-                           -10: ('ท่าเริ่มต้นชนอยู่แล้วในโมเดล', 'COLLISION'),
-                           -12: ('ท่าปลายทางชนในโมเดล', 'COLLISION'),
-                           -4: ('แขนไปไม่ถึง (ติด/ชน หรือมอเตอร์ไม่ตาม)', 'COLLISION'),
-                           -6: ('หมดเวลา', 'FAILED'),
-                           -7: ('ถูกหยุดกลางทาง', 'FAILED')}.get(code, (f'MoveIt code {code}', 'FAILED'))
-            raise Failed(f'{what}: {reason}', api)
+            reason, api = {99999: ("หาเส้นทางไม่ได้ (ท่าปลายทางชนของ/โต๊ะในโมเดล หรือทางถูกบัง)", "COLLISION"),
+                           -10: ("ท่าเริ่มต้นชนอยู่แล้วในโมเดล", "COLLISION"),
+                           -12: ("ท่าปลายทางชนในโมเดล", "COLLISION"),
+                           -4: ("แขนไปไม่ถึง (ติด/ชน หรือมอเตอร์ไม่ตาม)", "COLLISION"),
+                           -6: ("หมดเวลา", "FAILED"),
+                           -7: ("ถูกหยุดกลางทาง", "FAILED")}.get(code, (f"MoveIt code {code}", "FAILED"))
+            raise Failed(f"{what}: {reason}", api)
 
     def line(self, qs, what, speed=None, step=None):
         """Send a joint path of equal steps (default: the 5 mm straight lines) with a smooth start/stop."""
-        speed = speed or float(self.get_parameter('line_speed').value)
+        speed = speed or float(self.get_parameter("line_speed").value)
         n = len(qs)
         total = 1.875 * n * (step or self.planner.STEP) / speed     # min-jerk peak speed = 1.875 x average
         goal = FollowJointTrajectory.Goal()
@@ -560,7 +560,7 @@ class PickPlace(Node):
             goal.trajectory.points.append(pt)
         res = self.run_action(self.arm, goal, total + 10.0, what)
         if res.error_code != 0:
-            raise Failed(f'{what}: {res.error_string or res.error_code}', api_code(res.error_code))
+            raise Failed(f"{what}: {res.error_string or res.error_code}", api_code(res.error_code))
 
     @staticmethod
     def minjerk_time(s):
@@ -590,54 +590,54 @@ class PickPlace(Node):
         while True:
             with self.lock:
                 if not self.busy:
-                    self.busy, self.task, self.step, self.goal_handle = True, name, '', handle
+                    self.busy, self.task, self.step, self.goal_handle = True, name, "", handle
                     self.cancel_requested, self.preempt = False, False
                     self.moved = False       # set by the first motion command; refusals keep the scene as is
                     self.grasped, self.grip_reading = None, (math.nan, math.nan)
                     break
-                if self.task != 'rest' or name == 'rest' or time.monotonic() > end:
-                    return 'BUSY', MESSAGES['BUSY'], 'กำลังทำงานอื่นอยู่'
+                if self.task != "rest" or name == "rest" or time.monotonic() > end:
+                    return "BUSY", MESSAGES["BUSY"], "กำลังทำงานอื่นอยู่"
                 if not self.preempt:
                     self.preempt = True
                     if self.current is not None:
                         self.current.cancel_goal_async()
-                    self.get_logger().info(f'{name}: หยุดการไปท่าพัก แล้วทำงานใหม่')
+                    self.get_logger().info(f"{name}: หยุดการไปท่าพัก แล้วทำงานใหม่")
             time.sleep(0.05)
         if not auto:
-            self.hold_still = ''         # a new command from someone: the arm may fold again later
+            self.hold_still = ""         # a new command from someone: the arm may fold again later
         given_way = False
         try:
-            if name not in ('rest', 'home') and self.at_rest():
+            if name not in ("rest", "home") and self.at_rest():
                 self.leave_rest()
             done = fn()
-            code, detail = 'SUCCESS', done or 'เสร็จ'
-            self.say(f'✔ {detail}')
+            code, detail = "SUCCESS", done or "เสร็จ"
+            self.say(f"✔ {detail}")
         except (Failed, PlanError) as exc:
-            code, detail = getattr(exc, 'code', 'FAILED'), str(exc)
+            code, detail = getattr(exc, "code", "FAILED"), str(exc)
             if self.cancel_requested:
-                code = 'STOPPED'
-            self.say(f'✘ หยุด: {detail}')
+                code = "STOPPED"
+            self.say(f"✘ หยุด: {detail}")
             if self.attached:
-                self.hold_still = 'อาจมีของค้างในก้าม'
-            if self.moved and name != 'rest':
+                self.hold_still = "อาจมีของค้างในก้าม"
+            if self.moved and name != "rest":
                 self.after_failure()
         except Exception as exc:  # keep the node alive and tell the user  # noqa: BLE001
-            code, detail = 'FAILED', repr(exc)
-            self.say(f'✘ ผิดพลาด: {detail}')
+            code, detail = "FAILED", repr(exc)
+            self.say(f"✘ ผิดพลาด: {detail}")
             self.get_logger().error(detail)
             if self.attached:
-                self.hold_still = 'อาจมีของค้างในก้าม'
-            if self.moved and name != 'rest':
+                self.hold_still = "อาจมีของค้างในก้าม"
+            if self.moved and name != "rest":
                 self.after_failure()
         finally:
             with self.lock:
                 given_way = self.preempt
-                self.busy, self.task, self.step, self.goal_handle = False, '', '', None
+                self.busy, self.task, self.step, self.goal_handle = False, "", "", None
                 self.preempt = False
                 self.idle_since = time.monotonic()
-        if code == 'STOPPED' and not given_way:
-            self.hold_still = 'ถูกสั่งหยุด'      # someone stopped it on purpose: stay put until the next command
-        msg = MESSAGES.get(code, MESSAGES['FAILED']) if code != 'SUCCESS' else SUCCESS[name]
+        if code == "STOPPED" and not given_way:
+            self.hold_still = "ถูกสั่งหยุด"      # someone stopped it on purpose: stay put until the next command
+        msg = MESSAGES.get(code, MESSAGES["FAILED"]) if code != "SUCCESS" else SUCCESS[name]
         if not (auto or given_way):
             self.last = (code, msg)
         return code, msg, detail
@@ -645,7 +645,7 @@ class PickPlace(Node):
     def start(self, name, fn, after=None, auto=False):
         """Run a task in the background (panel buttons, voice topics). False if the arm is busy
         (a fold into the rest pose does not count: the new task replaces it)."""
-        if self.busy and (self.task != 'rest' or name == 'rest'):
+        if self.busy and (self.task != "rest" or name == "rest"):
             return False
 
         def job():
@@ -660,20 +660,20 @@ class PickPlace(Node):
         return bool(self.joints) and all(abs(self.joints.get(n, 9.0) - v) < AT_REST for n, v in self.rest_q.items())
 
     def leave_rest(self):
-        self.step = 'leave_rest'
-        self.say('ออกจากท่าพัก (ไปท่า ready)...')
-        self.moveit_to(READY, 'ออกจากท่าพัก')
+        self.step = "leave_rest"
+        self.say("ออกจากท่าพัก (ไปท่า ready)...")
+        self.moveit_to(READY, "ออกจากท่าพัก")
 
     def do_rest(self):
         if self.holding:
-            raise Failed('ถือของอยู่: วางก่อนค่อยไปท่าพัก', 'HOLDING')
+            raise Failed("ถือของอยู่: วางก่อนค่อยไปท่าพัก", "HOLDING")
         if self.at_rest():
-            return 'อยู่ท่าพักแล้ว'
-        self.progress(1, 2, 'close', 'หุบก้าม...')
-        self.gripper(0.0, 'หุบก้าม')
-        self.progress(2, 2, 'rest', 'ไปท่าพัก...')
-        self.moveit_to(self.rest_q, 'ไปท่าพัก')
-        return 'อยู่ท่าพัก'
+            return "อยู่ท่าพักแล้ว"
+        self.progress(1, 2, "close", "หุบก้าม...")
+        self.gripper(0.0, "หุบก้าม")
+        self.progress(2, 2, "rest", "ไปท่าพัก...")
+        self.moveit_to(self.rest_q, "ไปท่าพัก")
+        return "อยู่ท่าพัก"
 
     def auto_rest(self):
         """Fold into the rest pose after rest_after_s seconds without a task (not while holding)."""
@@ -681,17 +681,17 @@ class PickPlace(Node):
         if torque and not self.was_torque:
             self.idle_since = time.monotonic()      # torque just came back on: count from now
         self.was_torque = torque
-        after = float(self.get_parameter('rest_after_s').value)
+        after = float(self.get_parameter("rest_after_s").value)
         if (after <= 0 or self.busy or self.holding or self.hold_still or not torque or fault
                 or time.monotonic() - self.driver_seen > 3.0 or self.at_rest()):
             return
         if time.monotonic() - self.idle_since >= after:
-            self.get_logger().info(f'ว่างมา {after:.0f} วิ: ไปท่าพัก')
-            self.start('rest', self.do_rest, auto=True)
+            self.get_logger().info(f"ว่างมา {after:.0f} วิ: ไปท่าพัก")
+            self.start("rest", self.do_rest, auto=True)
 
     def progress(self, i, n, key, text):
         self.step = key
-        self.say(f'{i}/{n} {text}')
+        self.say(f"{i}/{n} {text}")
         h = self.goal_handle
         if h is not None:
             fb = self.feedback_type[self.task]()
@@ -705,17 +705,17 @@ class PickPlace(Node):
         read open above the miss threshold, it is still held: keep `holding` (a new pick then answers
         HOLDING instead of opening the jaws, and /arm/place can put it down). Otherwise forget it."""
         held = self.holding or self.grasped
-        if held is not None and held.get('camera'):
-            self.say('ยังถือถุงอยู่ (หยิบด้วยกล้อง): ไม่ลืม สั่งวางได้')
+        if held is not None and held.get("camera"):
+            self.say("ยังถือถุงอยู่ (หยิบด้วยกล้อง): ไม่ลืม สั่งวางได้")
             return
-        pos = self.joints.get('gripper')
-        if held is not None and (held.get('by_weight')       # its jaws read closed on a thin rim from the start
-                                 or still_held(pos, held.get('miss_below') or self.MISS_DEFAULT, held.get('jaw_open'))):
-            if 'carry' in held and all(n in self.joints for n in ARM):
+        pos = self.joints.get("gripper")
+        if held is not None and (held.get("by_weight")       # its jaws read closed on a thin rim from the start
+                                 or still_held(pos, held.get("miss_below") or self.MISS_DEFAULT, held.get("jaw_open"))):
+            if "carry" in held and all(n in self.joints for n in ARM):
                 # a bag: the put-down path starts where the arm stopped, not at the carry pose
-                held['carry'] = dict(held['carry'], q={n: float(self.joints[n]) for n in ARM})
+                held["carry"] = dict(held["carry"], q={n: float(self.joints[n]) for n in ARM})
             self.holding = held
-            self.say(f'ยังถือของอยู่ (ก้าม {pos if pos is None else round(pos, 3)} rad): ไม่ลืม สั่งวางได้')
+            self.say(f"ยังถือของอยู่ (ก้าม {pos if pos is None else round(pos, 3)} rad): ไม่ลืม สั่งวางได้")
             return
         self.release_scene()
 
@@ -726,7 +726,7 @@ class PickPlace(Node):
         scene = PlanningScene(is_diff=True)
         scene.robot_state.is_diff = True
         if self.attached:
-            aco = AttachedCollisionObject(link_name='gripper')
+            aco = AttachedCollisionObject(link_name="gripper")
             aco.object = CollisionObject(id=OBJ, operation=CollisionObject.REMOVE)
             scene.robot_state.attached_collision_objects.append(aco)
             self.attached = False
@@ -736,19 +736,19 @@ class PickPlace(Node):
     # ------------------------------------------------------------------------- panel buttons
     def on_pick_place(self, _req, res):
         o, t = self.boxes[OBJ], self.boxes[TGT]
-        res.success = self.start('pick_place', lambda: self.do_pick_place(copy_box(o), copy_box(t)))
-        res.message = 'เริ่มหยิบ-วาง' if res.success else 'กำลังทำงานอยู่'
+        res.success = self.start("pick_place", lambda: self.do_pick_place(copy_box(o), copy_box(t)))
+        res.message = "เริ่มหยิบ-วาง" if res.success else "กำลังทำงานอยู่"
         return res
 
     def on_touch(self, _req, res):
-        res.success = self.start('touch', self.touch)
-        res.message = 'เริ่มแตะจุด' if res.success else 'กำลังทำงานอยู่'
+        res.success = self.start("touch", self.touch)
+        res.message = "เริ่มแตะจุด" if res.success else "กำลังทำงานอยู่"
         return res
 
     def touch(self):
         b = self.boxes[OBJ]
         centre = np.array([b.x, b.y, self.table_z + 0.01 + (GRASP_Y - TIP_Y)])   # closed tips 1 cm above table
-        q, err = None, 'เอื้อมไม่ถึง'
+        q, err = None, "เอื้อมไม่ถึง"
         v = centre[:2] - self.kin.pan_point
         h = math.atan2(v[1], v[0])
         side = np.array([-math.sin(h), math.cos(h), 0.0])      # jaws close sideways
@@ -756,24 +756,24 @@ class PickPlace(Node):
             if pitch > self.planner.NEAR_DOWN:
                 break
             try:
-                q = self.planner._pose(centre, pitch, side, 0.016, None, self.joints.get('wrist_roll', 0.0), x_off=0.0)
-                self.planner.check_table([q], 0.016, 'แตะจุด', 0)
+                q = self.planner._pose(centre, pitch, side, 0.016, None, self.joints.get("wrist_roll", 0.0), x_off=0.0)
+                self.planner.check_table([q], 0.016, "แตะจุด", 0)
                 break
             except PlanError as exc:
                 err, q = str(exc), None
         if q is None:
-            raise Failed(f'แตะจุดไม่ได้: {err}', 'UNREACHABLE')
+            raise Failed(f"แตะจุดไม่ได้: {err}", "UNREACHABLE")
         self.update_scene_object(present=False, wait=True)   # the box marks the spot, it is not an obstacle
-        self.say('กำลังหุบก้าม...')
-        self.gripper(0.0, 'หุบก้าม')
-        above = self.planner._pose(centre + [0, 0, 0.04], pitch, side, 0.016, None, q['wrist_roll'], x_off=0.0)
-        self.say('ไปเหนือจุด...')
-        self.moveit_to(above, 'ไปเหนือจุด')
-        self.say('ลงไปแตะ...')
-        self.line(self.planner._line(centre + [0, 0, 0.04], centre, pitch, side, 0.016, q['_branch'], q['wrist_roll'],
-                                     0.0), 'ลงไปแตะ')
+        self.say("กำลังหุบก้าม...")
+        self.gripper(0.0, "หุบก้าม")
+        above = self.planner._pose(centre + [0, 0, 0.04], pitch, side, 0.016, None, q["wrist_roll"], x_off=0.0)
+        self.say("ไปเหนือจุด...")
+        self.moveit_to(above, "ไปเหนือจุด")
+        self.say("ลงไปแตะ...")
+        self.line(self.planner._line(centre + [0, 0, 0.04], centre, pitch, side, 0.016, q["_branch"], q["wrist_roll"],
+                                     0.0), "ลงไปแตะ")
         f, l_ = self.kin.to_user(centre)
-        return f'ปลายก้ามอยู่เหนือโต๊ะ 1 ซม. ที่ หน้า {f * 100:.1f} ซม. ซ้าย {l_ * 100:.1f} ซม. — วัดดูว่าตรงไหม'
+        return f"ปลายก้ามอยู่เหนือโต๊ะ 1 ซม. ที่ หน้า {f * 100:.1f} ซม. ซ้าย {l_ * 100:.1f} ซม. — วัดดูว่าตรงไหม"
 
     # ------------------------------------------------------------------------------ the tasks
     def show_object(self, obj):
@@ -785,99 +785,99 @@ class PickPlace(Node):
         self.update_scene_object(present=True, wait=True)
         self.request_map()
 
-    def do_pick(self, obj, mode='auto'):
+    def do_pick(self, obj, mode="auto"):
         if self.holding:
-            raise Failed('ถือของอยู่แล้ว: สั่งวางก่อน', 'HOLDING')
+            raise Failed("ถือของอยู่แล้ว: สั่งวางก่อน", "HOLDING")
         plan = self.planner.plan_pick(obj, self.joints or None, mode)
         self.show_object(obj)
         self.pick(plan, n=6)
         self.holding = plan
-        self.progress(6, 6, 'carry', 'ยกมาถือไว้ (ท่า ready)...')
-        self.moveit_to(READY, 'ยกมาถือไว้')
+        self.progress(6, 6, "carry", "ยกมาถือไว้ (ท่า ready)...")
+        self.moveit_to(READY, "ยกมาถือไว้")
         return f'ถือของอยู่ ({plan["mode"]})'
 
     def do_place(self, target, fallback_home_spot=False, released=None):
         if not self.holding:
-            raise Failed('ไม่ได้ถือของอยู่', 'NOT_HOLDING')
-        if self.holding.get('camera'):
+            raise Failed("ไม่ได้ถือของอยู่", "NOT_HOLDING")
+        if self.holding.get("camera"):
             done = self.cam.place(target)
-            self.moveit_to(READY, 'กลับท่า ready')
+            self.moveit_to(READY, "กลับท่า ready")
             return done
-        x, y, yaw, size = self.holding['object']
+        x, y, yaw, size = self.holding["object"]
         obj = Box(x, y, yaw, size)
-        if 'carry' in self.holding and not getattr(target, 'yaw_known', True):
+        if "carry" in self.holding and not getattr(target, "yaw_known", True):
             # a bag, no turn asked for: it keeps its turn relative to the arm (no wrist twist)
             px, py = self.kin.pan_point
             target.yaw = yaw + math.atan2(target.y - py, target.x - px) - math.atan2(y - py, x - px)
-        put = self.planner.plan_bag_put if 'carry' in self.holding else self.planner.plan_place
+        put = self.planner.plan_bag_put if "carry" in self.holding else self.planner.plan_place
         try:
             plan = put(obj, self.holding, target)
-            where = 'ที่จุดวาง'
+            where = "ที่จุดวาง"
         except PlanError:
             if not fallback_home_spot:
                 raise
             plan = put(obj, self.holding, obj)      # voice drop: back where it came from
-            where = 'คืนที่เดิม (จุดวางไกลเกิน)'
+            where = "คืนที่เดิม (จุดวางไกลเกิน)"
         path = None
-        if 'carry' in self.holding:           # a bag at the side: bring it round and down, then let go
-            path = self.planner.plan_bag_place(self.holding, plan, self.holding['hang'])
-            where += ' (วางถุงลงพื้น)'
+        if "carry" in self.holding:           # a bag at the side: bring it round and down, then let go
+            path = self.planner.plan_bag_place(self.holding, plan, self.holding["hang"])
+            where += " (วางถุงลงพื้น)"
         self.boxes[TGT] = copy_box(target)
         self.make_markers()
         self.place(plan, first=1, n=3, released=released, path=path)
-        return f'วางของแล้ว{where}'
+        return f"วางของแล้ว{where}"
 
     def do_pick_bag(self, obj):
         """Bag on the floor (table_z): hold its top part `obj`, lift, carry it at the side.
         obj height NaN (grasp_pose z NaN): the top is found by touch first (probe_bag)."""
         if self.holding:
-            raise Failed('ถือของอยู่แล้ว: สั่งวางก่อน', 'HOLDING')
-        if self.get_parameter('bag_method').value == 'camera':
+            raise Failed("ถือของอยู่แล้ว: สั่งวางก่อน", "HOLDING")
+        if self.get_parameter("bag_method").value == "camera":
             return self.cam.pick(obj)
         probed = False
         if top_unknown(obj.size[2]):
             obj, probed = self.probe_bag(obj), True
         p = lambda n: float(self.get_parameter(n).value)
-        depth = p('bag_probe_grip_depth') if probed else None
+        depth = p("bag_probe_grip_depth") if probed else None
         # The jaws open fully (JAW_G_MAX, 7.5 cm) over the part; a miss (jaws close on nothing) is tried again
         # shifted across the part (yaw + 90 deg): 0, +step, -step, +2 step, ... (bag_tries in all), the step
         # at most what the open jaws cover minus 1 cm so the tries overlap (ik.bag_shifts). The position of a
         # soft bag is only known roughly, the part (the gathered mouth / handle roots) is soft and safe to touch.
         across = np.array([-math.sin(obj.yaw), math.cos(obj.yaw)])
-        shifts = bag_shifts(obj.size[1], p('bag_try_step'), max(1, int(p('bag_tries'))))
-        miss_below = p('bag_miss_below')
+        shifts = bag_shifts(obj.size[1], p("bag_try_step"), max(1, int(p("bag_tries"))))
+        miss_below = p("bag_miss_below")
         err = None
         for i, d in enumerate(shifts):
             part = Box(obj.x + d * across[0], obj.y + d * across[1], obj.yaw, obj.size)
             try:
-                plan = self.planner.plan_pick(part, self.joints or None, 'top', wide=True, grip_depth=depth)
-                hang = float(plan['grasp_centre'][2] - self.table_z)
-                carry = self.planner.plan_carry(plan, hang, math.radians(p('bag_carry_side')),
-                                                p('bag_bottom_min'))
+                plan = self.planner.plan_pick(part, self.joints or None, "top", wide=True, grip_depth=depth)
+                hang = float(plan["grasp_centre"][2] - self.table_z)
+                carry = self.planner.plan_carry(plan, hang, math.radians(p("bag_carry_side")),
+                                                p("bag_bottom_min"))
             except PlanError as exc:
                 err = err or exc
-                self.say(f'ลองที่ {i + 1}/{len(shifts)} (เลื่อน {d * 100:+.0f} ซม.): วางแผนไม่ได้ ({exc}) — ข้าม')
+                self.say(f"ลองที่ {i + 1}/{len(shifts)} (เลื่อน {d * 100:+.0f} ซม.): วางแผนไม่ได้ ({exc}) — ข้าม")
                 continue
-            plan['carry'], plan['hang'] = carry, hang
-            plan['miss_below'] = miss_below if miss_below > 0 else None
-            self.say(f'ลองที่ {i + 1}/{len(shifts)}: เลื่อนขวางส่วนที่จับ {d * 100:+.0f} ซม.')
+            plan["carry"], plan["hang"] = carry, hang
+            plan["miss_below"] = miss_below if miss_below > 0 else None
+            self.say(f"ลองที่ {i + 1}/{len(shifts)}: เลื่อนขวางส่วนที่จับ {d * 100:+.0f} ซม.")
             self.show_object(part)
             try:
                 self.pick(plan, n=6)
                 break
             except Failed as exc:
-                if exc.code != 'MISSED':
+                if exc.code != "MISSED":
                     raise
                 err = exc
         else:
             if isinstance(err, PlanError):
                 raise err
-            raise Failed(f'จับถุงไม่ได้ใน {len(shifts)} ครั้ง (ก้ามหุบโดนแต่อากาศ)', 'MISSED')
+            raise Failed(f"จับถุงไม่ได้ใน {len(shifts)} ครั้ง (ก้ามหุบโดนแต่อากาศ)", "MISSED")
         self.holding = plan
-        self.progress(6, 6, 'carry', 'ยกถุงไปถือไว้ข้างตัว...')
-        self.line(carry['path'], 'ยกถุงไปถือ', p('bag_speed'), self.planner.CARRY_STEP)
-        bottom = self.planner.held_point(carry['q'], plan)[2] - hang - self.table_z
-        how = ' ถือด้วยน้ำหนัก ก้ามอ่านว่าหุบ (held by weight, jaws read closed)' if plan.get('by_weight') else ''
+        self.progress(6, 6, "carry", "ยกถุงไปถือไว้ข้างตัว...")
+        self.line(carry["path"], "ยกถุงไปถือ", p("bag_speed"), self.planner.CARRY_STEP)
+        bottom = self.planner.held_point(carry["q"], plan)[2] - hang - self.table_z
+        how = " ถือด้วยน้ำหนัก ก้ามอ่านว่าหุบ (held by weight, jaws read closed)" if plan.get("by_weight") else ""
         return f'ถือถุงอยู่ ({plan["mode"]}) ก้นถุงสูงจากพื้นประมาณ {bottom * 100:.0f} ซม.{how}'
 
     PROBE_SETTLE = 0.15   # s the arm stands still after a probe step before a load reading counts
@@ -890,30 +890,30 @@ class PickPlace(Node):
         the arm cannot follow (COLLISION) is contact too. At contact the arm backs up bag_probe_backoff and the
         part's top = the measured tip height there. No contact: back up, MISSED. Every step is logged."""
         p = lambda n: float(self.get_parameter(n).value)
-        base, step, speed = max(1, int(p('bag_probe_base_steps'))), p('bag_probe_step'), p('bag_probe_speed')
-        skip = max(0, int(p('bag_probe_settle_steps')))
-        load_jump, error_jump = p('bag_probe_load_jump'), p('bag_probe_error_jump')
-        pr = self.planner.plan_probe(obj.x, obj.y, p('bag_probe_top'), p('bag_probe_bottom'), step,
+        base, step, speed = max(1, int(p("bag_probe_base_steps"))), p("bag_probe_step"), p("bag_probe_speed")
+        skip = max(0, int(p("bag_probe_settle_steps")))
+        load_jump, error_jump = p("bag_probe_load_jump"), p("bag_probe_error_jump")
+        pr = self.planner.plan_probe(obj.x, obj.y, p("bag_probe_top"), p("bag_probe_bottom"), step,
                                      self.joints or None, min_steps=skip + base + 1)
-        tips, n = pr['tip_h'], len(pr['tip_h'])
+        tips, n = pr["tip_h"], len(pr["tip_h"])
         start_h = tips[0] + step
         self.get_logger().info(f'probe plan: tips {start_h * 100:.0f} -> {tips[-1] * 100:.0f} cm above the floor in '
                                f'{n} steps, pitch {math.degrees(pr["pitch"]):.0f} deg; skip {skip}, base {base} steps, load_jump '
                                f'{load_jump} %, error_jump {error_jump} rad, joints {PROBE_JOINTS}')
         # MoveIt does not know the bag: its column below the start stands in for it on the way there
         self.show_object(Box(obj.x, obj.y, obj.yaw, (obj.size[0], obj.size[1], start_h - 0.02)))
-        self.progress(1, 3, 'close', 'หุบก้าม (ใช้ปลายก้ามแตะหาความสูงถุง)...')
-        self.gripper(0.0, 'หุบก้าม')
-        self.progress(2, 3, 'probe_above', f'ไปเหนือถุง ปลายก้ามสูงจากพื้น {start_h * 100:.0f} ซม. (MoveIt)...')
-        self.moveit_to(pr['start'], 'ไปเหนือถุง')
-        samples, done, contact = [], [pr['start']], None
-        for k, (qs, tip) in enumerate(zip(pr['steps'], tips)):
-            self.progress(3, 3, 'probe', f'แตะหาความสูงถุง ขั้น {k + 1}/{n}: ปลายก้ามลงไป {tip * 100:.0f} ซม. จากพื้น')
-            blocked = ''
+        self.progress(1, 3, "close", "หุบก้าม (ใช้ปลายก้ามแตะหาความสูงถุง)...")
+        self.gripper(0.0, "หุบก้าม")
+        self.progress(2, 3, "probe_above", f"ไปเหนือถุง ปลายก้ามสูงจากพื้น {start_h * 100:.0f} ซม. (MoveIt)...")
+        self.moveit_to(pr["start"], "ไปเหนือถุง")
+        samples, done, contact = [], [pr["start"]], None
+        for k, (qs, tip) in enumerate(zip(pr["steps"], tips)):
+            self.progress(3, 3, "probe", f"แตะหาความสูงถุง ขั้น {k + 1}/{n}: ปลายก้ามลงไป {tip * 100:.0f} ซม. จากพื้น")
+            blocked = ""
             try:
-                self.line(qs, 'แตะหาความสูงถุง', speed)
+                self.line(qs, "แตะหาความสูงถุง", speed)
             except Failed as exc:
-                if exc.code != 'COLLISION':
+                if exc.code != "COLLISION":
                     raise
                 blocked = str(exc)            # the arm could not follow: something is in the way
             done += qs
@@ -929,22 +929,22 @@ class PickPlace(Node):
                 contact = measured if math.isfinite(measured) else tip
                 break
         if contact is None:
-            self.progress(3, 3, 'probe_back', 'แตะไม่โดนอะไร: ถอยกลับขึ้น...')
-            self.line(list(reversed(done[:-1])), 'ถอยขึ้นจากการแตะ')
+            self.progress(3, 3, "probe_back", "แตะไม่โดนอะไร: ถอยกลับขึ้น...")
+            self.line(list(reversed(done[:-1])), "ถอยขึ้นจากการแตะ")
             raise Failed(f'แตะหาความสูงถุงไม่โดนอะไร ลงไปถึง {tips[-1] * 100:.0f} ซม. จากพื้น: ไม่มีถุงตรงนี้ หรือถุงนุ่ม'
-                         f'จนภาระไม่เปลี่ยน (ดู log "probe")', 'MISSED')
-        self.progress(3, 3, 'probe_back', 'แตะโดนยอดถุง: ถอยขึ้น...')
-        back = int(round(p('bag_probe_backoff') / self.planner.STEP))
-        self.line(list(reversed(done[:-1]))[:max(1, back)], 'ถอยขึ้นจากยอดถุง', speed)
-        self.say(f'ยอดถุงจากการแตะ: สูงจากพื้น {contact * 100:.1f} ซม.')
-        self.get_logger().info(f'probe: top {contact * 100:.1f} cm above the floor (z {self.table_z + contact:.3f})')
+                         f'จนภาระไม่เปลี่ยน (ดู log "probe")', "MISSED")
+        self.progress(3, 3, "probe_back", "แตะโดนยอดถุง: ถอยขึ้น...")
+        back = int(round(p("bag_probe_backoff") / self.planner.STEP))
+        self.line(list(reversed(done[:-1]))[:max(1, back)], "ถอยขึ้นจากยอดถุง", speed)
+        self.say(f"ยอดถุงจากการแตะ: สูงจากพื้น {contact * 100:.1f} ซม.")
+        self.get_logger().info(f"probe: top {contact * 100:.1f} cm above the floor (z {self.table_z + contact:.3f})")
         return Box(obj.x, obj.y, obj.yaw, (obj.size[0], obj.size[1], contact))
 
-    def probe_reading(self, q_cmd, blocked=''):
+    def probe_reading(self, q_cmd, blocked=""):
         """(PROBE_JOINTS loads %, their tracking errors rad, measured tip height above the floor) with the arm
         standing still PROBE_SETTLE s: waits for the next so100/status line (1 Hz, its loads are read just
         before it is sent). A fault stops the probe, unless the step was blocked (the driver faults then)."""
-        self.fresh_status('แตะหาความสูงถุง', self.PROBE_SETTLE, allow_fault=bool(blocked))
+        self.fresh_status("แตะหาความสูงถุง", self.PROBE_SETTLE, allow_fault=bool(blocked))
         now = dict(self.joints)
         errors = tuple(abs(q_cmd[j] - now[j]) if j in now else math.nan for j in PROBE_JOINTS)
         tip = math.nan
@@ -959,19 +959,19 @@ class PickPlace(Node):
         end = settled + 2.5
         while self.driver_seen < settled:
             if self.cancel_requested:
-                raise Failed(f'{what}: ถูกสั่งหยุด', 'STOPPED')
+                raise Failed(f"{what}: ถูกสั่งหยุด", "STOPPED")
             if time.monotonic() > end:
-                raise Failed(f'{what}: ไม่ได้ค่าภาระมอเตอร์จาก so100/status', 'FAILED')
+                raise Failed(f"{what}: ไม่ได้ค่าภาระมอเตอร์จาก so100/status", "FAILED")
             time.sleep(0.02)
         fault = self.driver_flags()[1]
         if fault and not allow_fault:
-            raise Failed(f'{what}: มอเตอร์ขัดข้อง ({fault})', 'FAILED')
+            raise Failed(f"{what}: มอเตอร์ขัดข้อง ({fault})", "FAILED")
 
     def weight_loads(self, what):
         """Settled PROBE_JOINTS loads % with the arm standing still: status lines (1 Hz) until two in a row differ
         by at most bag_weight_settle_tol (their mean, settled_load), at most bag_weight_max_reads; None if not."""
-        tol = float(self.get_parameter('bag_weight_settle_tol').value)
-        cap = max(2, int(self.get_parameter('bag_weight_max_reads').value))
+        tol = float(self.get_parameter("bag_weight_settle_tol").value)
+        cap = max(2, int(self.get_parameter("bag_weight_max_reads").value))
         reads, value = [], None
         while value is None and len(reads) < cap:
             self.fresh_status(what, self.PROBE_SETTLE)
@@ -985,111 +985,111 @@ class PickPlace(Node):
     def weigh_bag(self, plan, free, i, n):
         """The bag jaws closed to a miss reading: go back up the approach to the pre-grasp pose with the jaws
         closed and compare the loads with `free` (empty jaws, same pose). True = the bag hangs in the jaws."""
-        s = plan['steps']
-        self.progress(i, n, 'weigh', 'ก้ามหุบเกือบสุด: ยกขึ้นดูน้ำหนักถุงก่อน...')
-        self.line(list(reversed(s['approach'][:-1])) + [s['pre']], 'ยกขึ้นดูน้ำหนัก')
-        loaded = self.weight_loads('closed jaws back up (from below)')
+        s = plan["steps"]
+        self.progress(i, n, "weigh", "ก้ามหุบเกือบสุด: ยกขึ้นดูน้ำหนักถุงก่อน...")
+        self.line(list(reversed(s["approach"][:-1])) + [s["pre"]], "ยกขึ้นดูน้ำหนัก")
+        loaded = self.weight_loads("closed jaws back up (from below)")
         if loaded is None:
-            self.get_logger().info('weight check: closed reading did not settle: nothing held')
+            self.get_logger().info("weight check: closed reading did not settle: nothing held")
             return False
-        limit = float(self.get_parameter('bag_weight_load').value)
+        limit = float(self.get_parameter("bag_weight_load").value)
         held, change = held_by_weight(free, loaded, limit)
-        self.get_logger().info(f'weight check: free {free} -> closed {loaded}, change {change} % (limit {limit} %, '
-                               f'unmeasured first guess): ' + ('held by weight, jaws read closed' if held else
-                                                               'nothing held'))
+        self.get_logger().info(f"weight check: free {free} -> closed {loaded}, change {change} % (limit {limit} %, "
+                               f"unmeasured first guess): " + ("held by weight, jaws read closed" if held else
+                                                               "nothing held"))
         return held
 
-    def do_pick_place(self, obj, target, mode='auto'):
+    def do_pick_place(self, obj, target, mode="auto"):
         if self.holding:
-            raise Failed('ถือของอยู่แล้ว: สั่งวางก่อน', 'HOLDING')
+            raise Failed("ถือของอยู่แล้ว: สั่งวางก่อน", "HOLDING")
         plan = self.planner.plan(obj, target, self.joints or None, mode)
         self.show_object(obj)
         self.boxes[TGT] = copy_box(target)
         self.make_markers()
         self.pick(plan)
         self.place(plan)
-        return 'หยิบ-วางเสร็จ (กล่องฟ้าย้ายไปตำแหน่งใหม่แล้ว)'
+        return "หยิบ-วางเสร็จ (กล่องฟ้าย้ายไปตำแหน่งใหม่แล้ว)"
 
     def do_home(self):
-        if self.holding and self.holding.get('camera'):
-            raise Failed('ถือถุงอยู่: สั่งวางก่อน (ท่า ready จะเหวี่ยงถุงเข้าตัวหุ่น)', 'HOLDING')
-        self.progress(1, 1, 'home', 'กลับท่า ready...')
-        self.moveit_to(READY, 'กลับท่า ready')
-        return 'อยู่ท่า ready'
+        if self.holding and self.holding.get("camera"):
+            raise Failed("ถือถุงอยู่: สั่งวางก่อน (ท่า ready จะเหวี่ยงถุงเข้าตัวหุ่น)", "HOLDING")
+        self.progress(1, 1, "home", "กลับท่า ready...")
+        self.moveit_to(READY, "กลับท่า ready")
+        return "อยู่ท่า ready"
 
     def pick(self, plan, n=8):
-        s = plan['steps']
+        s = plan["steps"]
         obj = self.boxes[OBJ]
         self.say(f'แผน: {plan["mode"]} อ้าก้าม {plan["gap"] * 100:.1f} ซม.')
         self.update_scene_object(present=True, wait=True)
-        self.progress(1, n, 'move_above', 'ไปเหนือของ (MoveIt)...')
-        self.moveit_to(s['pre'], 'ไปเหนือของ')
-        self.progress(2, n, 'open', 'อ้าก้าม...')
-        self.gripper(plan['jaw_open'], 'อ้าก้าม')
+        self.progress(1, n, "move_above", "ไปเหนือของ (MoveIt)...")
+        self.moveit_to(s["pre"], "ไปเหนือของ")
+        self.progress(2, n, "open", "อ้าก้าม...")
+        self.gripper(plan["jaw_open"], "อ้าก้าม")
         free = None          # bag: empty-jaws loads here, to weigh a grasp whose jaws read closed (weigh_bag)
-        if 'hang' in plan and not self.sim and float(self.get_parameter('bag_weight_load').value) > 0:
+        if "hang" in plan and not self.sim and float(self.get_parameter("bag_weight_load").value) > 0:
             # arrive at the pose from below, as the closed reading will (servo friction hysteresis)
-            dip = min(float(self.get_parameter('bag_weight_dip').value), 0.015)
-            k = min(int(round(dip / self.planner.STEP)), len(s['approach']) - 1)
+            dip = min(float(self.get_parameter("bag_weight_dip").value), 0.015)
+            k = min(int(round(dip / self.planner.STEP)), len(s["approach"]) - 1)
             if k > 0:
-                self.line(s['approach'][:k], 'ลงนิดก่อนชั่งก้ามว่าง')
-                self.line(list(reversed(s['approach'][:k - 1])) + [s['pre']], 'ขึ้นกลับท่าเหนือถุง')
-            free = self.weight_loads('empty jaws above the bag (from below)')
-        self.progress(3, n, 'approach', 'ลงไปที่ของ...')
-        self.line(s['approach'], 'ลงไปที่ของ')
-        self.progress(4, n, 'grasp', 'หนีบ...')
-        r = self.gripper(0.0, 'หนีบ')
-        miss = plan.get('miss_below', 0.05)
+                self.line(s["approach"][:k], "ลงนิดก่อนชั่งก้ามว่าง")
+                self.line(list(reversed(s["approach"][:k - 1])) + [s["pre"]], "ขึ้นกลับท่าเหนือถุง")
+            free = self.weight_loads("empty jaws above the bag (from below)")
+        self.progress(3, n, "approach", "ลงไปที่ของ...")
+        self.line(s["approach"], "ลงไปที่ของ")
+        self.progress(4, n, "grasp", "หนีบ...")
+        r = self.gripper(0.0, "หนีบ")
+        miss = plan.get("miss_below", 0.05)
         self.grip_reading = (float(r.position), float(r.effort))
-        self.get_logger().info(f'grip: position {r.position:.3f} rad, load {r.effort:.1f} %, '
-                               f'reached {r.reached_goal}, stalled {r.stalled}')
+        self.get_logger().info(f"grip: position {r.position:.3f} rad, load {r.effort:.1f} %, "
+                               f"reached {r.reached_goal}, stalled {r.stalled}")
         if miss is None:
-            self.say('ของบาง (ผนังถุง/หูหิ้ว): ก้ามหุบเกือบสุดเสมอ บอกไม่ได้ว่าหนีบโดน — ยกขึ้นต่อ')
+            self.say("ของบาง (ผนังถุง/หูหิ้ว): ก้ามหุบเกือบสุดเสมอ บอกไม่ได้ว่าหนีบโดน — ยกขึ้นต่อ")
         elif not self.sim and (r.reached_goal or r.position < miss):
             if free is None or not self.weigh_bag(plan, free, 4, n):
-                self.say('✘ จับพลาด (ก้ามหุบสุด) — กำลังถอยขึ้น')
-                self.gripper(plan['jaw_open'], 'อ้าก้าม')
+                self.say("✘ จับพลาด (ก้ามหุบสุด) — กำลังถอยขึ้น")
+                self.gripper(plan["jaw_open"], "อ้าก้าม")
                 if free is None:          # (weigh_bag already went back up)
-                    self.line(list(reversed(s['approach'][:-1])) + [s['pre']], 'ถอยขึ้น')
-                raise Failed('จับพลาด: ลองเลื่อนกล่องสีฟ้าให้ตรงของจริง หรือเช็กขนาด', 'MISSED')
-            plan['by_weight'] = True
-            self.say('ก้ามอ่านว่าหุบ แต่ยกถุงขึ้นมาด้วย (น้ำหนักถึง): ถือต่อ')
+                    self.line(list(reversed(s["approach"][:-1])) + [s["pre"]], "ถอยขึ้น")
+                raise Failed("จับพลาด: ลองเลื่อนกล่องสีฟ้าให้ตรงของจริง หรือเช็กขนาด", "MISSED")
+            plan["by_weight"] = True
+            self.say("ก้ามอ่านว่าหุบ แต่ยกถุงขึ้นมาด้วย (น้ำหนักถึง): ถือต่อ")
         self.grasped = plan
-        self.attach(obj, top_part=0.04 if 'hang' in plan else None)
+        self.attach(obj, top_part=0.04 if "hang" in plan else None)
         self.attached = True
-        self.progress(5, n, 'lift', 'ยกขึ้น...')
-        if plan.get('by_weight'):        # at the pre-grasp pose already: on to the lift's end, where the carry starts
-            self.line(self.planner.joint_path(s['pre'], s['lift'][-1], plan), 'ยกขึ้น', None, self.planner.CARRY_STEP)
+        self.progress(5, n, "lift", "ยกขึ้น...")
+        if plan.get("by_weight"):        # at the pre-grasp pose already: on to the lift's end, where the carry starts
+            self.line(self.planner.joint_path(s["pre"], s["lift"][-1], plan), "ยกขึ้น", None, self.planner.CARRY_STEP)
         else:
-            self.line(s['lift'], 'ยกขึ้น')
+            self.line(s["lift"], "ยกขึ้น")
         if self.on_lifted:
             self.on_lifted()
 
     def place(self, plan, first=6, n=8, released=None, path=None):
-        s = plan['steps']
+        s = plan["steps"]
         obj = self.boxes[OBJ]
         if path:
-            self.progress(first, n, 'move_above_target', 'พาถุงไปเหนือจุดวาง...')
-            self.line(path, 'พาถุงไปเหนือจุดวาง', float(self.get_parameter('bag_speed').value),
+            self.progress(first, n, "move_above_target", "พาถุงไปเหนือจุดวาง...")
+            self.line(path, "พาถุงไปเหนือจุดวาง", float(self.get_parameter("bag_speed").value),
                       self.planner.CARRY_STEP)
         else:
-            self.progress(first, n, 'move_above_target', 'ไปเหนือจุดวาง (MoveIt)...')
-            self.moveit_to(s['above_place'], 'ไปเหนือจุดวาง')
-        self.progress(first + 1, n, 'lower', 'วางลง...')
-        self.line(s['lower'], 'วางลง')
-        self.gripper(plan['jaw_open'], 'ปล่อย')
+            self.progress(first, n, "move_above_target", "ไปเหนือจุดวาง (MoveIt)...")
+            self.moveit_to(s["above_place"], "ไปเหนือจุดวาง")
+        self.progress(first + 1, n, "lower", "วางลง...")
+        self.line(s["lower"], "วางลง")
+        self.gripper(plan["jaw_open"], "ปล่อย")
         if released:
             released()               # voice system waits only ~10 s: report before backing away
         # the object now stands at the target: move the blue box there
-        obj.x, obj.y, obj.yaw = float(plan['place_centre'][0]), float(plan['place_centre'][1]), plan['final_yaw']
+        obj.x, obj.y, obj.yaw = float(plan["place_centre"][0]), float(plan["place_centre"][1]), plan["final_yaw"]
         self.detach_to(obj)
         self.attached = False
         self.holding = self.grasped = None
         self.make_markers()
         self.request_map()
-        self.progress(first + 2, n, 'retreat', 'ถอยออกแล้วกลับท่า ready...')
-        self.line(s['retreat'], 'ถอยออก')
-        self.moveit_to(READY, 'กลับท่า ready')
+        self.progress(first + 2, n, "retreat", "ถอยออกแล้วกลับท่า ready...")
+        self.line(s["retreat"], "ถอยออก")
+        self.moveit_to(READY, "กลับท่า ready")
 
     # ------------------------------------------------------------------ voice system (topics)
     #   /robot/carry_bag (Empty)  -> pick the blue-box object and hold it at the ready pose
@@ -1098,13 +1098,13 @@ class PickPlace(Node):
     # (older than the /arm/* API; kept until the voice system moves to the API)
     def event(self, text):
         self.event_pub.publish(String(data=text))
-        self.get_logger().info(f'/robot/event: {text}')
+        self.get_logger().info(f"/robot/event: {text}")
 
     def on_carry(self, _msg):
         sent = []
 
         def lifted():                # report as soon as the object is off the table (voice waits 20 s)
-            self.event('grab_success')
+            self.event("grab_success")
             sent.append(1)
 
         def fn():
@@ -1116,50 +1116,50 @@ class PickPlace(Node):
 
         def after(_res):
             if not sent:
-                self.event('grab_failed')
-        if not self.start('pick', fn, after):
-            self.say('✘ สั่งหยิบจากเสียง: กำลังทำงานอื่นอยู่')
-            self.event('grab_failed')
+                self.event("grab_failed")
+        if not self.start("pick", fn, after):
+            self.say("✘ สั่งหยิบจากเสียง: กำลังทำงานอื่นอยู่")
+            self.event("grab_failed")
 
     def on_drop(self, _msg):
         sent = []
 
         def released():
-            self.event('drop_done')
+            self.event("drop_done")
             sent.append(1)
 
         def after(_res):
             if not sent:
-                self.event('drop_failed')
-        if not self.start('place', lambda: self.do_place(copy_box(self.boxes[TGT]), True, released), after):
-            self.say('✘ สั่งวางจากเสียง: กำลังทำงานอื่นอยู่')
-            self.event('drop_failed')
+                self.event("drop_failed")
+        if not self.start("place", lambda: self.do_place(copy_box(self.boxes[TGT]), True, released), after):
+            self.say("✘ สั่งวางจากเสียง: กำลังทำงานอื่นอยู่")
+            self.event("drop_failed")
 
     # ---------------------------------------------------------------------------- /arm/* API
     def in_base(self, pose):
         """PoseStamped (any TF frame) -> PoseStamped in the arm base frame."""
-        if pose.header.frame_id in ('', 'base'):
+        if pose.header.frame_id in ("", "base"):
             return pose
         try:
-            return self.tf.transform(pose, 'base', timeout=RclDuration(seconds=0.5))
+            return self.tf.transform(pose, "base", timeout=RclDuration(seconds=0.5))
         except Exception as exc:  # noqa: BLE001
-            raise Failed(f'แปลงพิกัดจาก frame "{pose.header.frame_id}" ไม่ได้: {exc}', 'FAILED')
+            raise Failed(f'แปลงพิกัดจาก frame "{pose.header.frame_id}" ไม่ได้: {exc}', "FAILED")
 
     def to_bag(self, g):
         """PickBag goal -> Box of the part to hold, standing on the floor up to its top (grasp_pose z).
         z NaN = top unknown: the Box height is NaN and do_pick_bag finds it by touch."""
         unknown = top_unknown(g.grasp_pose.pose.position.z)
-        if unknown and g.grasp_pose.header.frame_id not in ('', 'base'):
-            raise Failed('grasp_pose z = NaN (หาความสูงด้วยการแตะ) ใช้ได้เฉพาะ frame "base"', 'FAILED')
+        if unknown and g.grasp_pose.header.frame_id not in ("", "base"):
+            raise Failed('grasp_pose z = NaN (หาความสูงด้วยการแตะ) ใช้ได้เฉพาะ frame "base"', "FAILED")
         ps = self.in_base(g.grasp_pose)
         x, y, top = ps.pose.position.x, ps.pose.position.y, ps.pose.position.z
         h = top - self.table_z
         if not unknown and not 0.03 < h < 0.6:
-            raise Failed(f'ส่วนบนของถุงสูงจากพื้น {h * 100:.0f} ซม.: ต้องอยู่ระหว่าง 3-60 ซม. '
-                         '(grasp_pose z = ความสูงส่วนบนในพิกัดแขน)', 'UNREACHABLE')
+            raise Failed(f"ส่วนบนของถุงสูงจากพื้น {h * 100:.0f} ซม.: ต้องอยู่ระหว่าง 3-60 ซม. "
+                         "(grasp_pose z = ความสูงส่วนบนในพิกัดแขน)", "UNREACHABLE")
         thick, length = float(g.thickness) or 0.02, float(g.length) or 0.05
         if not (0.0 < thick <= 0.065 and 0.0 < length <= 0.4):
-            raise Failed('thickness ต้อง 0-0.065 ม. และ length 0-0.4 ม.', 'TOO_WIDE' if thick > 0.065 else 'FAILED')
+            raise Failed("thickness ต้อง 0-0.065 ม. และ length 0-0.4 ม.", "TOO_WIDE" if thick > 0.065 else "FAILED")
         q = ps.pose.orientation
         if abs(q.x) + abs(q.y) + abs(q.z) + abs(q.w) < 1e-9:      # unknown: runs across the arm's view
             yaw = math.atan2(y - self.kin.pan_point[1], x - self.kin.pan_point[0]) + math.pi / 2
@@ -1183,17 +1183,17 @@ class PickPlace(Node):
             return box
         size = tuple(float(v) for v in size)
         if len(size) != 3 or min(size) <= 0.0 or max(size) > 0.3:
-            raise Failed('object_size ต้องเป็น [ลึก, กว้าง, สูง] เมตร (0..0.3)', 'FAILED')
+            raise Failed("object_size ต้องเป็น [ลึก, กว้าง, สูง] เมตร (0..0.3)", "FAILED")
         return Box(x, y, yaw, size)
 
     def finish(self, handle, result, res, grip=(math.nan, math.nan)):
         code, msg, detail = res
-        result.success = code == 'SUCCESS'
+        result.success = code == "SUCCESS"
         result.error_code, result.message = code, msg
-        if hasattr(result, 'gripper_pos'):     # PickBag: (gripper rad, load %) of the last grasp
+        if hasattr(result, "gripper_pos"):     # PickBag: (gripper rad, load %) of the last grasp
             result.gripper_pos, result.gripper_load = grip
-        self.get_logger().info(f'API {self.feedback_name(handle)} -> {code}: {detail}')
-        if code == 'STOPPED' and handle.is_cancel_requested:
+        self.get_logger().info(f"API {self.feedback_name(handle)} -> {code}: {detail}")
+        if code == "STOPPED" and handle.is_cancel_requested:
             handle.canceled()
         elif result.success:
             handle.succeed()
@@ -1203,42 +1203,42 @@ class PickPlace(Node):
 
     @staticmethod
     def feedback_name(handle):
-        return type(handle.request).__name__.replace('_Goal', '')
+        return type(handle.request).__name__.replace("_Goal", "")
 
     def api_task(self, name, handle, result, build):
         """Shared execute callback: build() turns the goal into a task function (may raise Failed)."""
         try:
             fn = build(handle.request)
         except (Failed, PlanError) as exc:
-            code = getattr(exc, 'code', 'FAILED')
-            return self.finish(handle, result, (code, MESSAGES.get(code, MESSAGES['FAILED']), str(exc)))
+            code = getattr(exc, "code", "FAILED")
+            return self.finish(handle, result, (code, MESSAGES.get(code, MESSAGES["FAILED"]), str(exc)))
         res = self.run_task(name, fn, handle)
         return self.finish(handle, result, res, self.grip_reading)
 
     def exec_pick(self, handle):
-        return self.api_task('pick', handle, Pick.Result(), lambda g: (
-            lambda obj=self.to_box(g.object_pose, g.object_size): self.do_pick(obj, g.grasp_mode or 'auto')))
+        return self.api_task("pick", handle, Pick.Result(), lambda g: (
+            lambda obj=self.to_box(g.object_pose, g.object_size): self.do_pick(obj, g.grasp_mode or "auto")))
 
     def exec_place(self, handle):
-        return self.api_task('place', handle, Place.Result(), lambda g: (
+        return self.api_task("place", handle, Place.Result(), lambda g: (
             lambda tgt=self.to_box(g.target_pose): self.do_place(tgt)))
 
     def exec_pick_place(self, handle):
         def build(g):
             obj = self.to_box(g.object_pose, g.object_size)
             tgt = self.to_box(g.target_pose, g.object_size)
-            return lambda: self.do_pick_place(obj, tgt, g.grasp_mode or 'auto')
-        return self.api_task('pick_place', handle, PickPlaceAction.Result(), build)
+            return lambda: self.do_pick_place(obj, tgt, g.grasp_mode or "auto")
+        return self.api_task("pick_place", handle, PickPlaceAction.Result(), build)
 
     def exec_pick_bag(self, handle):
-        return self.api_task('pick_bag', handle, PickBag.Result(), lambda g: (
+        return self.api_task("pick_bag", handle, PickBag.Result(), lambda g: (
             lambda obj=self.to_bag(g): self.do_pick_bag(obj)))
 
     def exec_home(self, handle):
-        return self.api_task('home', handle, Home.Result(), lambda g: self.do_home)
+        return self.api_task("home", handle, Home.Result(), lambda g: self.do_home)
 
     def exec_rest(self, handle):
-        return self.api_task('rest', handle, Rest.Result(), lambda g: self.do_rest)
+        return self.api_task("rest", handle, Rest.Result(), lambda g: self.do_rest)
 
     def on_cancel(self, _handle):
         self.stop_motion()
@@ -1253,23 +1253,23 @@ class PickPlace(Node):
     def on_api_stop(self, _req, res):
         busy = self.busy
         self.stop_motion()
-        res.success, res.message = True, 'stopping the running task' if busy else 'nothing was running; arm holds'
+        res.success, res.message = True, "stopping the running task" if busy else "nothing was running; arm holds"
         return res
 
     def on_api_torque(self, req, res):
         if not req.data and self.busy:
             self.stop_motion()
         if not self.driver_enable.wait_for_service(timeout_sec=2.0):
-            res.success, res.message = False, 'arm driver not running'
+            res.success, res.message = False, "arm driver not running"
             return res
         r = self.wait(self.driver_enable.call_async(SetBool.Request(data=req.data)), 5.0)
         if r is not None and r.success and not req.data and self.holding:
             self.release_scene()      # released by hand: the object is no longer known to be held
         if r is not None and r.success and not req.data:
-            self.hold_still = ''      # someone handles the arm by hand now
+            self.hold_still = ""      # someone handles the arm by hand now
         res.success = bool(r and r.success)
-        res.message = (r.message if r else 'no answer from the driver') + (
-            '' if req.data else ' (support the arm: it falls when the torque is off)')
+        res.message = (r.message if r else "no answer from the driver") + (
+            "" if req.data else " (support the arm: it falls when the torque is off)")
         return res
 
     def on_driver_status(self, msg):
@@ -1277,42 +1277,42 @@ class PickPlace(Node):
 
     def driver_field(self, key):
         text = self.driver_status
-        return text.split(key + '=', 1)[1].split(' ', 1)[0] if key + '=' in text else ''
+        return text.split(key + "=", 1)[1].split(" ", 1)[0] if key + "=" in text else ""
 
     def driver_flags(self):
         """(torque_on, fault text) from the driver's so100/status line."""
         text = self.driver_status
-        fault = '' if self.driver_field('fault') in ('', 'none') else text.split('fault=', 1)[1].split(' load%')[0]
-        return self.driver_field('torque') == 'ON', fault
+        fault = "" if self.driver_field("fault") in ("", "none") else text.split("fault=", 1)[1].split(" load%")[0]
+        return self.driver_field("torque") == "ON", fault
 
     def publish_state(self):
         st = ArmState()
         st.header.stamp = self.get_clock().now().to_msg()
         st.torque_on, st.fault = self.driver_flags()
         try:
-            st.voltage_min = float(self.driver_field('voltage').split('-')[0].rstrip('V'))
-            st.temp_max = float(self.driver_field('temp_max').rstrip('C'))
+            st.voltage_min = float(self.driver_field("voltage").split("-")[0].rstrip("V"))
+            st.temp_max = float(self.driver_field("temp_max").rstrip("C"))
         except ValueError:
             pass
         st.holding = self.holding is not None
         st.task, st.step = self.task, self.step
         st.last_error_code, st.last_message = self.last
-        st.gripper_pos = float(self.joints.get('gripper', math.nan))
+        st.gripper_pos = float(self.joints.get("gripper", math.nan))
         st.gripper_load = gripper_load(self.driver_status)
         if time.monotonic() - self.driver_seen > 3.0:
-            st.state = 'no_arm'
+            st.state = "no_arm"
         elif st.fault:
-            st.state = 'fault'
+            st.state = "fault"
         elif self.busy:
-            st.state = 'busy'
+            st.state = "busy"
         elif st.holding:
-            st.state = 'holding'
+            st.state = "holding"
         elif not st.torque_on:
-            st.state = 'torque_off'
+            st.state = "torque_off"
         elif self.at_rest():
-            st.state = 'resting'
+            st.state = "resting"
         else:
-            st.state = 'idle'
+            st.state = "idle"
         self.state_pub.publish(st)
 
 
@@ -1331,5 +1331,5 @@ def main():
         os._exit(0)   # worker threads may still wait on an action; never linger after launch stops
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

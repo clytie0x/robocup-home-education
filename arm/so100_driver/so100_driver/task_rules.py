@@ -26,20 +26,20 @@ ARM_REPLACED = -102            # another command took the arm (a newer trajector
 ARM_STOPPED = -103             # /so100/stop or torque off
 ARM_BUSY = -104                # refused: another program's trajectory runs (see may_take_arm)
 
-API_CODES = {PATH_TOLERANCE_VIOLATED: 'COLLISION', GOAL_TOLERANCE_VIOLATED: 'COLLISION', ARM_FAULT: 'FAILED',
-             ARM_HOT: 'HOT', ARM_REPLACED: 'REPLACED', ARM_STOPPED: 'STOPPED', ARM_BUSY: 'BUSY'}
+API_CODES = {PATH_TOLERANCE_VIOLATED: "COLLISION", GOAL_TOLERANCE_VIOLATED: "COLLISION", ARM_FAULT: "FAILED",
+             ARM_HOT: "HOT", ARM_REPLACED: "REPLACED", ARM_STOPPED: "STOPPED", ARM_BUSY: "BUSY"}
 
 
 def api_code(error_code):
     """Driver FollowJointTrajectory error_code -> API error code (anything else: FAILED)."""
-    return API_CODES.get(int(error_code), 'FAILED')
+    return API_CODES.get(int(error_code), "FAILED")
 
 
 # One commander at a time. rclpy does not tell an action server which client sent a goal, so the goal
 # names its commander in trajectory.header.frame_id: pick_place_node's straight lines send PICK_PLACE,
 # MoveIt sends its planning frame ('base', also for RViz's MoveIt moves), most scripts send ''.
-PICK_PLACE = 'so100_pick_place'
-BUSY_TEXT = 'arm busy: another program has it'
+PICK_PLACE = "so100_pick_place"
+BUSY_TEXT = "arm busy: another program has it"
 
 
 def may_take_arm(running, new):
@@ -67,10 +67,10 @@ def allowed_while_hot(target_rad, present_rad):
 def gripper_load(status):
     """Gripper servo (ID 6, the last of the six) load in % from the driver's so100/status line
     ('... load%=[l1, l2, l3, l4, l5, l6]'), NaN when it is not there."""
-    if 'load%=' not in status:
+    if "load%=" not in status:
         return math.nan
     try:
-        loads = ast.literal_eval(status.split('load%=', 1)[1].split(']', 1)[0] + ']')
+        loads = ast.literal_eval(status.split("load%=", 1)[1].split("]", 1)[0] + "]")
     except (ValueError, SyntaxError):
         return math.nan
     return float(loads[5]) if len(loads) == 6 else math.nan
@@ -80,7 +80,7 @@ def gripper_load(status):
 # The closed jaws go straight down over the bag in small steps. A push up on the finger tips turns the joints
 # by (force x horizontal distance from their axis to the tips): over a bag 22-34 cm in front, shoulder_lift
 # (lever 19-30 cm) and elbow_flex (8-20 cm) carry it; wrist_flex has the shortest lever (0-7 cm; test_bag).
-PROBE_JOINTS = ('shoulder_lift', 'elbow_flex')
+PROBE_JOINTS = ("shoulder_lift", "elbow_flex")
 PROBE_SERVOS = (2, 3)        # their servo IDs = places 2 and 3 in the driver's load% list (calib.IDS)
 
 
@@ -94,10 +94,10 @@ def descent_loads(status):
     """Load % of the PROBE_JOINTS from the driver's so100/status line ('... load%=[l1, ..., l6]'),
     NaN where it is not there."""
     nan = (math.nan,) * len(PROBE_SERVOS)
-    if 'load%=' not in status:
+    if "load%=" not in status:
         return nan
     try:
-        loads = ast.literal_eval(status.split('load%=', 1)[1].split(']', 1)[0] + ']')
+        loads = ast.literal_eval(status.split("load%=", 1)[1].split("]", 1)[0] + "]")
     except (ValueError, SyntaxError):
         return nan
     return tuple(float(loads[i - 1]) for i in PROBE_SERVOS) if len(loads) == 6 else nan

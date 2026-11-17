@@ -51,26 +51,26 @@ CAMERA_UP = (0.0, -1.0, 0.0)   # optical frame: y points down in the image
 
 class CameraTest(Node):
     def __init__(self):
-        super().__init__('camera_test')
-        self.declare_parameter('cloud_topic', '/camera/depth_registered/points')
-        self.declare_parameter('table_z', -0.075)
-        self.declare_parameter('calib_file', '~/so100_ws/camera_calib.json')
-        self.declare_parameter('spot_a', [0.20, 0.10])       # forward, left (m from the pan axis)
-        self.declare_parameter('spot_b', [0.20, -0.10])
-        self.declare_parameter('place_spot', [0.22, -0.12])
-        self.declare_parameter('ignore_radius', 0.11)        # arm + its platform around the pan axis
-        self.declare_parameter('max_radius', 0.45)
+        super().__init__("camera_test")
+        self.declare_parameter("cloud_topic", "/camera/depth_registered/points")
+        self.declare_parameter("table_z", -0.075)
+        self.declare_parameter("calib_file", "~/so100_ws/camera_calib.json")
+        self.declare_parameter("spot_a", [0.20, 0.10])       # forward, left (m from the pan axis)
+        self.declare_parameter("spot_b", [0.20, -0.10])
+        self.declare_parameter("place_spot", [0.22, -0.12])
+        self.declare_parameter("ignore_radius", 0.11)        # arm + its platform around the pan axis
+        self.declare_parameter("max_radius", 0.45)
         # real size [a, b, height] m of the object when known (e.g. a box): the camera then only finds where
         # it is and how it is turned. All zero = measure the size from the camera (round objects).
-        self.declare_parameter('object_size', [0.0, 0.0, 0.0])
-        self.declare_parameter('stride', 3)                  # use every n-th pixel row/column
-        self.declare_parameter('target', 'object')           # 'object' (on a table) or 'bag' (on the floor)
-        self.declare_parameter('deck', [0.0, 0.0, 0.0, 0.0])  # robot body footprint: front, back, left, right
-        self.declare_parameter('bag_max_height', 0.55)       # tallest bag incl. handles (m)
+        self.declare_parameter("object_size", [0.0, 0.0, 0.0])
+        self.declare_parameter("stride", 3)                  # use every n-th pixel row/column
+        self.declare_parameter("target", "object")           # 'object' (on a table) or 'bag' (on the floor)
+        self.declare_parameter("deck", [0.0, 0.0, 0.0, 0.0])  # robot body footprint: front, back, left, right
+        self.declare_parameter("bag_max_height", 0.55)       # tallest bag incl. handles (m)
         p = lambda n: self.get_parameter(n).value
-        self.table_z = float(p('table_z'))
-        self.calib_file = os.path.expanduser(p('calib_file'))
-        self.frame = ''
+        self.table_z = float(p("table_z"))
+        self.calib_file = os.path.expanduser(p("calib_file"))
+        self.frame = ""
         self.pts = None                 # latest cloud, N x 3 in the cloud frame
         self.plane = None               # (n, d) of the table in the cloud frame
         self.pose = None                # CameraPose once calibrated
@@ -78,46 +78,46 @@ class CameraTest(Node):
         self.history = []               # last frames of objects (base frame)
         self.lock = threading.Lock()
         self.load()
-        self.size_file = os.path.join(os.path.dirname(self.calib_file), 'camera_object_size.json')
+        self.size_file = os.path.join(os.path.dirname(self.calib_file), "camera_object_size.json")
         try:                             # object_size survives restarts
             with open(self.size_file) as f:
                 saved = [float(v) for v in json.load(f)]
-            if p('object_size') == [0.0, 0.0, 0.0] and len(saved) == 3:
-                self.set_parameters([rclpy.parameter.Parameter('object_size', value=saved)])
-                self.get_logger().info(f'ขนาดของ (จากไฟล์): {saved}')
+            if p("object_size") == [0.0, 0.0, 0.0] and len(saved) == 3:
+                self.set_parameters([rclpy.parameter.Parameter("object_size", value=saved)])
+                self.get_logger().info(f"ขนาดของ (จากไฟล์): {saved}")
         except (OSError, ValueError):
             pass
         self.add_on_set_parameters_callback(self.on_params)
 
         self.tf = StaticTransformBroadcaster(self)
-        self.marker_pub = self.create_publisher(MarkerArray, '/camera_test/markers', 1)
+        self.marker_pub = self.create_publisher(MarkerArray, "/camera_test/markers", 1)
         cloud_cb = MutuallyExclusiveCallbackGroup()
         cb = ReentrantCallbackGroup()
-        self.create_subscription(PointCloud2, p('cloud_topic'), self.on_cloud, 1, callback_group=cloud_cb)
+        self.create_subscription(PointCloud2, p("cloud_topic"), self.on_cloud, 1, callback_group=cloud_cb)
         self.bag_spot = None             # where the held bag was picked (place_bag puts it back there)
-        for name, fn in (('calib_a', lambda q, r: self.on_calib('a', r)), ('calib_b', lambda q, r: self.on_calib('b', r)),
-                         ('objects', self.on_objects), ('pick', lambda q, r: self.on_pick(r, False)),
-                         ('pick_place', lambda q, r: self.on_pick(r, True)),
-                         ('pick_bag', self.on_pick_bag), ('place_bag', self.on_place_bag)):
-            self.create_service(Trigger, f'/camera_test/{name}', fn, callback_group=cb)
+        for name, fn in (("calib_a", lambda q, r: self.on_calib("a", r)), ("calib_b", lambda q, r: self.on_calib("b", r)),
+                         ("objects", self.on_objects), ("pick", lambda q, r: self.on_pick(r, False)),
+                         ("pick_place", lambda q, r: self.on_pick(r, True)),
+                         ("pick_bag", self.on_pick_bag), ("place_bag", self.on_place_bag)):
+            self.create_service(Trigger, f"/camera_test/{name}", fn, callback_group=cb)
         self.arm = ArmClient(self)
         self.last_info = 0.0
-        self.get_logger().info('รอภาพจากกล้อง ' + p('cloud_topic') +
-                               ('' if self.pose else '  (ยังไม่ได้ calibrate: ดูวิธีใน README หัวข้อกล้อง)'))
+        self.get_logger().info("รอภาพจากกล้อง " + p("cloud_topic") +
+                               ("" if self.pose else "  (ยังไม่ได้ calibrate: ดูวิธีใน README หัวข้อกล้อง)"))
 
     # ------------------------------------------------------------------------------ calibration file
     def load(self):
         try:
             with open(self.calib_file) as f:
                 v = json.load(f)
-            self.pose = CameraPose(v['n'], v['d'], v['yaw'], v['txy'], self.table_z)
-            self.get_logger().info(f'ใช้ค่า calibrate กล้องจาก {self.calib_file}')
+            self.pose = CameraPose(v["n"], v["d"], v["yaw"], v["txy"], self.table_z)
+            self.get_logger().info(f"ใช้ค่า calibrate กล้องจาก {self.calib_file}")
         except (OSError, ValueError, KeyError):
             self.pose = None
 
     def save(self):
         os.makedirs(os.path.dirname(self.calib_file), exist_ok=True)
-        with open(self.calib_file, 'w') as f:
+        with open(self.calib_file, "w") as f:
             json.dump(self.pose.to_dict(), f, indent=2)
 
     def publish_tf(self):
@@ -125,7 +125,7 @@ class CameraTest(Node):
             return
         t = TransformStamped()
         t.header.stamp = self.get_clock().now().to_msg()
-        t.header.frame_id, t.child_frame_id = 'base', self.frame
+        t.header.frame_id, t.child_frame_id = "base", self.frame
         t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = map(float, self.pose.t)
         q = self.pose.quaternion()
         t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w = q
@@ -133,11 +133,11 @@ class CameraTest(Node):
 
     # ------------------------------------------------------------------------------------- cloud
     def on_cloud(self, msg):
-        s = max(1, int(self.get_parameter('stride').value))
-        a = point_cloud2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=False)
+        s = max(1, int(self.get_parameter("stride").value))
+        a = point_cloud2.read_points(msg, field_names=("x", "y", "z"), skip_nans=False)
         if msg.height > 1:
             a = a.reshape(msg.height, msg.width)[::s, ::s]
-        pts = np.stack([a['x'], a['y'], a['z']], axis=-1).reshape(-1, 3).astype(float)
+        pts = np.stack([a["x"], a["y"], a["z"]], axis=-1).reshape(-1, 3).astype(float)
         pts = pts[np.isfinite(pts).all(axis=1) & (pts[:, 2] > 0.1) & (pts[:, 2] < 2.0)]
         new_frame = msg.header.frame_id != self.frame
         with self.lock:
@@ -150,10 +150,10 @@ class CameraTest(Node):
                 try:
                     n, d, inl = fit_plane(pts, up=CAMERA_UP)
                     tilt = math.degrees(math.acos(min(1.0, abs(n[2]))))
-                    self.get_logger().info(f'เห็นโต๊ะ: กล้องสูงจากโต๊ะ {d * 100:.1f} ซม. ก้มลง {90 - tilt:.0f}° '
-                                           f'({inl.mean() * 100:.0f}% ของภาพเป็นโต๊ะ) - ยังไม่ได้ calibrate')
+                    self.get_logger().info(f"เห็นโต๊ะ: กล้องสูงจากโต๊ะ {d * 100:.1f} ซม. ก้มลง {90 - tilt:.0f}° "
+                                           f"({inl.mean() * 100:.0f}% ของภาพเป็นโต๊ะ) - ยังไม่ได้ calibrate")
                 except ValueError as exc:
-                    self.get_logger().warn(f'ยังหาพื้นโต๊ะไม่ได้: {exc}')
+                    self.get_logger().warn(f"ยังหาพื้นโต๊ะไม่ได้: {exc}")
             return
         objs = self.detect(pts)
         with self.lock:
@@ -179,37 +179,37 @@ class CameraTest(Node):
     def detect(self, pts):
         base = self.pose.to_base(pts)
         r = np.hypot(base[:, 0] - PAN_AXIS[0], base[:, 1] - PAN_AXIS[1])
-        keep = (r > float(self.get_parameter('ignore_radius').value)) & (r < float(self.get_parameter('max_radius').value) + 0.1)
+        keep = (r > float(self.get_parameter("ignore_radius").value)) & (r < float(self.get_parameter("max_radius").value) + 0.1)
         base = self.level_table(base, keep)
-        if self.get_parameter('target').value == 'bag':
+        if self.get_parameter("target").value == "bag":
             return self.detect_bags(base, keep)
         known = self.known_size()
         z_max = known[2] + 0.04 if known else 0.30   # known object: ignore what hangs above it (the arm itself)
         objs = find_objects(base, self.table_z, keep, z_max=z_max, camera=self.pose.t, known_size=known)
-        rmax = float(self.get_parameter('max_radius').value)
+        rmax = float(self.get_parameter("max_radius").value)
         known = self.known_size()
         if known:          # only things that look like the known object (as tall, about as long)
             long_ = max(known[:2])
-            objs = [o for o in objs if abs(o['seen'][1] - known[2]) < 0.02 and o['seen'][0] < long_ + 0.03
-                    and o['seen'][0] > 0.5 * min(known[:2])]
-        return [o for o in objs if math.hypot(o['x'] - PAN_AXIS[0], o['y'] - PAN_AXIS[1]) < rmax]
+            objs = [o for o in objs if abs(o["seen"][1] - known[2]) < 0.02 and o["seen"][0] < long_ + 0.03
+                    and o["seen"][0] > 0.5 * min(known[:2])]
+        return [o for o in objs if math.hypot(o["x"] - PAN_AXIS[0], o["y"] - PAN_AXIS[1]) < rmax]
 
     def detect_bags(self, base, keep):
         """Bags on the floor (any shape): one cluster each, with the top part to hold."""
-        f, b, l_, r = (float(v) for v in self.get_parameter('deck').value)
+        f, b, l_, r = (float(v) for v in self.get_parameter("deck").value)
         if f or b or l_ or r:          # not the robot's own body
             fwd, left = PAN_AXIS[1] - base[:, 1], base[:, 0] - PAN_AXIS[0]
             keep = keep & ~((fwd < f + 0.02) & (fwd > -b - 0.02) & (left < l_ + 0.02) & (left > -r - 0.02))
-        objs = find_objects(base, self.table_z, keep, z_min=0.02, z_max=float(self.get_parameter('bag_max_height').value),
+        objs = find_objects(base, self.table_z, keep, z_min=0.02, z_max=float(self.get_parameter("bag_max_height").value),
                             min_points=60, with_points=True)
-        rmax = float(self.get_parameter('max_radius').value)
+        rmax = float(self.get_parameter("max_radius").value)
         out = []
         for o in objs:
-            g = grasp_top(o.pop('pts'), self.table_z, PAN_AXIS)
-            if g is None or o['size'][2] < 0.08:
+            g = grasp_top(o.pop("pts"), self.table_z, PAN_AXIS)
+            if g is None or o["size"][2] < 0.08:
                 continue
-            o['grasp'] = g
-            if math.hypot(o['x'] - PAN_AXIS[0], o['y'] - PAN_AXIS[1]) < rmax:
+            o["grasp"] = g
+            if math.hypot(o["x"] - PAN_AXIS[0], o["y"] - PAN_AXIS[1]) < rmax:
                 out.append(o)
         return out
 
@@ -217,42 +217,42 @@ class CameraTest(Node):
         arr = MarkerArray()
         arr.markers.append(Marker(action=Marker.DELETEALL))
         for i, o in enumerate(objs):
-            m = Marker(ns='objects', id=i, type=Marker.CUBE)
-            m.header.frame_id = 'base'
-            m.pose.position.x, m.pose.position.y = o['x'], o['y']
-            m.pose.position.z = self.table_z + o['size'][2] / 2
-            m.pose.orientation.z, m.pose.orientation.w = math.sin(o['yaw'] / 2), math.cos(o['yaw'] / 2)
-            m.scale.x, m.scale.y, m.scale.z = o['size']
+            m = Marker(ns="objects", id=i, type=Marker.CUBE)
+            m.header.frame_id = "base"
+            m.pose.position.x, m.pose.position.y = o["x"], o["y"]
+            m.pose.position.z = self.table_z + o["size"][2] / 2
+            m.pose.orientation.z, m.pose.orientation.w = math.sin(o["yaw"] / 2), math.cos(o["yaw"] / 2)
+            m.scale.x, m.scale.y, m.scale.z = o["size"]
             m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.55, 0.1, 0.5
-            t = Marker(ns='labels', id=i, type=Marker.TEXT_VIEW_FACING)
-            t.header.frame_id = 'base'
-            t.pose.position.x, t.pose.position.y = o['x'], o['y']
-            t.pose.position.z = self.table_z + o['size'][2] + 0.025
+            t = Marker(ns="labels", id=i, type=Marker.TEXT_VIEW_FACING)
+            t.header.frame_id = "base"
+            t.pose.position.x, t.pose.position.y = o["x"], o["y"]
+            t.pose.position.z = self.table_z + o["size"][2] + 0.025
             t.scale.z = 0.02
             t.color.r = t.color.g = t.color.b = t.color.a = 1.0
             t.text = self.describe(o)
             arr.markers += [m, t]
-            g = o.get('grasp')
+            g = o.get("grasp")
             if g:                       # the part the jaws hold (green)
-                gm = Marker(ns='grasp', id=i, type=Marker.CUBE)
-                gm.header.frame_id = 'base'
-                gm.pose.position.x, gm.pose.position.y, gm.pose.position.z = g['x'], g['y'], g['z'] - 0.015
-                gm.pose.orientation.z, gm.pose.orientation.w = math.sin(g['yaw'] / 2), math.cos(g['yaw'] / 2)
-                gm.scale.x, gm.scale.y, gm.scale.z = max(g['length'], 0.01), g['thickness'], 0.03
+                gm = Marker(ns="grasp", id=i, type=Marker.CUBE)
+                gm.header.frame_id = "base"
+                gm.pose.position.x, gm.pose.position.y, gm.pose.position.z = g["x"], g["y"], g["z"] - 0.015
+                gm.pose.orientation.z, gm.pose.orientation.w = math.sin(g["yaw"] / 2), math.cos(g["yaw"] / 2)
+                gm.scale.x, gm.scale.y, gm.scale.z = max(g["length"], 0.01), g["thickness"], 0.03
                 gm.color.g, gm.color.r, gm.color.a = 0.9, 0.1, 0.9
                 arr.markers.append(gm)
         self.marker_pub.publish(arr)
 
     @staticmethod
     def describe(o):
-        f = PAN_AXIS[1] - o['y']
-        l_ = o['x'] - PAN_AXIS[0]
-        d, w, h = (v * 100 for v in o['size'])
-        turn = math.degrees(math.remainder(o['yaw'] + math.pi / 2, math.pi))   # 0 = long side points at the arm
-        text = f'หน้า {f * 100:.0f} ซ้าย {l_ * 100:.0f} หมุน {turn:.0f}° | {d:.1f}x{w:.1f}x{h:.1f} ซม.'
-        g = o.get('grasp')
+        f = PAN_AXIS[1] - o["y"]
+        l_ = o["x"] - PAN_AXIS[0]
+        d, w, h = (v * 100 for v in o["size"])
+        turn = math.degrees(math.remainder(o["yaw"] + math.pi / 2, math.pi))   # 0 = long side points at the arm
+        text = f"หน้า {f * 100:.0f} ซ้าย {l_ * 100:.0f} หมุน {turn:.0f}° | {d:.1f}x{w:.1f}x{h:.1f} ซม."
+        g = o.get("grasp")
         if g:
-            gf, gl = PAN_AXIS[1] - g['y'], g['x'] - PAN_AXIS[0]
+            gf, gl = PAN_AXIS[1] - g["y"], g["x"] - PAN_AXIS[0]
             text += (f' | จับ{"ด้านใกล้แขน" if g["part"] == "side" else "ส่วนบน"} หน้า {gf * 100:.0f} ซ้าย {gl * 100:.0f} '
                      f'สูง {g["height"] * 100:.0f} หนา {g["thickness"] * 100:.1f} ซม.')
         return text
@@ -262,14 +262,14 @@ class CameraTest(Node):
         with self.lock:
             pts = self.pts
         if pts is None:
-            res.success, res.message = False, 'ยังไม่ได้ภาพจากกล้อง (เสียบกล้อง/เปิดไดรเวอร์หรือยัง?)'
+            res.success, res.message = False, "ยังไม่ได้ภาพจากกล้อง (เสียบกล้อง/เปิดไดรเวอร์หรือยัง?)"
             return res
         try:
             n, d, _ = fit_plane(pts, up=CAMERA_UP)
         except ValueError as exc:
-            res.success, res.message = False, f'หาพื้นโต๊ะไม่ได้: {exc}'
+            res.success, res.message = False, f"หาพื้นโต๊ะไม่ได้: {exc}"
             return res
-        if which == 'a' or self.plane is None:
+        if which == "a" or self.plane is None:
             self.plane = (n, d)               # spot B is measured in the same table frame as spot A
         n, d = self.plane
         known = self.known_size()
@@ -277,9 +277,9 @@ class CameraTest(Node):
         def is_target(o):
             if known:      # the known object, long side to the camera: as tall, about as long, not far away
                 long_ = max(known[:2])
-                return (abs(o['seen'][1] - known[2]) < 0.02 and 0.5 * long_ < o['seen'][0] < long_ + 0.03
-                        and math.hypot(o['x'], o['y']) < 1.8)
-            return o['size'][2] < CALIB_MAX_HEIGHT and max(o['size'][:2]) < CALIB_MAX_SIZE
+                return (abs(o["seen"][1] - known[2]) < 0.02 and 0.5 * long_ < o["seen"][0] < long_ + 0.03
+                        and math.hypot(o["x"], o["y"]) < 1.8)
+            return o["size"][2] < CALIB_MAX_HEIGHT and max(o["size"][:2]) < CALIB_MAX_SIZE
 
         def one_frame(pts):
             tab = CameraPose(n, d).to_base(pts)   # table frame, table at z = 0
@@ -287,8 +287,8 @@ class CameraTest(Node):
                                             known_size=known) if is_target(o)]
             if known and len(objs) > 1:      # several look alike: take the one whose seen side matches clearly best
                 long_ = max(known[:2])
-                objs.sort(key=lambda o: abs(o['seen'][0] - long_))
-                if abs(objs[1]['seen'][0] - long_) - abs(objs[0]['seen'][0] - long_) > 0.02:
+                objs.sort(key=lambda o: abs(o["seen"][0] - long_))
+                if abs(objs[1]["seen"][0] - long_) - abs(objs[0]["seen"][0] - long_) > 0.02:
                     objs = objs[:1]
             return objs
 
@@ -306,38 +306,38 @@ class CameraTest(Node):
             if len(last) == 1:
                 seen.append(last[0])
         if len(seen) >= CALIB_FRAMES // 2:
-            spread = max(math.hypot(o['x'] - seen[0]['x'], o['y'] - seen[0]['y']) for o in seen)
-            objs = [dict(seen[0], x=float(np.median([o['x'] for o in seen])),
-                         y=float(np.median([o['y'] for o in seen])))]
-            self.get_logger().info(f'calib {which}: {len(seen)} ภาพ กระจาย {spread * 1000:.0f} มม.')
+            spread = max(math.hypot(o["x"] - seen[0]["x"], o["y"] - seen[0]["y"]) for o in seen)
+            objs = [dict(seen[0], x=float(np.median([o["x"] for o in seen])),
+                         y=float(np.median([o["y"] for o in seen])))]
+            self.get_logger().info(f"calib {which}: {len(seen)} ภาพ กระจาย {spread * 1000:.0f} มม.")
         else:
             objs = last
         if len(objs) != 1:
             res.success = False
-            res.message = (f'ต้องเห็นของที่ใช้ calibrate ชิ้นเดียว (ขนาดตาม object_size หรือของแคบกว้าง < {CALIB_MAX_SIZE * 100:.0f} ซม.) แต่เห็น {len(objs)} ชิ้น'
-                           + ''.join(f'\n  {o["size"][0] * 100:.1f}x{o["size"][1] * 100:.1f}x{o["size"][2] * 100:.1f} ซม.'
+            res.message = (f"ต้องเห็นของที่ใช้ calibrate ชิ้นเดียว (ขนาดตาม object_size หรือของแคบกว้าง < {CALIB_MAX_SIZE * 100:.0f} ซม.) แต่เห็น {len(objs)} ชิ้น"
+                           + "".join(f'\n  {o["size"][0] * 100:.1f}x{o["size"][1] * 100:.1f}x{o["size"][2] * 100:.1f} ซม.'
                                      for o in objs))
             return res
-        dist = math.hypot(objs[0]['x'], objs[0]['y'])
+        dist = math.hypot(objs[0]["x"], objs[0]["y"])
         if dist < MIN_RANGE:
             res.success = False
-            res.message = (f'ของอยู่ห่างกล้องแค่ ~{dist * 100:.0f} ซม. กล้องวัดระยะแม่นตั้งแต่ ~{MIN_RANGE * 100:.0f} ซม.: '
-                           'ถอยกล้องออกไปอีก แล้วเริ่มใหม่ที่จุด A')
+            res.message = (f"ของอยู่ห่างกล้องแค่ ~{dist * 100:.0f} ซม. กล้องวัดระยะแม่นตั้งแต่ ~{MIN_RANGE * 100:.0f} ซม.: "
+                           "ถอยกล้องออกไปอีก แล้วเริ่มใหม่ที่จุด A")
             return res
-        self.spot_seen[which] = (objs[0]['x'], objs[0]['y'])
-        if which == 'a':
-            b = self.get_parameter('spot_b').value
+        self.spot_seen[which] = (objs[0]["x"], objs[0]["y"])
+        if which == "a":
+            b = self.get_parameter("spot_b").value
             res.success = True
-            res.message = (f'จำจุด A แล้ว (ของห่างกล้อง {dist * 100:.0f} ซม. กล้องสูงจากโต๊ะ {d * 100:.1f} ซม.) ต่อไปย้ายของไปจุด B: '
-                           f'หน้า {b[0] * 100:.0f} ซม. ซ้าย {b[1] * 100:.0f} ซม. แล้วเรียก /camera_test/calib_b')
+            res.message = (f"จำจุด A แล้ว (ของห่างกล้อง {dist * 100:.0f} ซม. กล้องสูงจากโต๊ะ {d * 100:.1f} ซม.) ต่อไปย้ายของไปจุด B: "
+                           f"หน้า {b[0] * 100:.0f} ซม. ซ้าย {b[1] * 100:.0f} ซม. แล้วเรียก /camera_test/calib_b")
             return res
-        if 'a' not in self.spot_seen:
-            res.success, res.message = False, 'ทำจุด A ก่อน (/camera_test/calib_a)'
+        if "a" not in self.spot_seen:
+            res.success, res.message = False, "ทำจุด A ก่อน (/camera_test/calib_a)"
             return res
-        a_base = user_xy(*self.get_parameter('spot_a').value)
-        b_base = user_xy(*self.get_parameter('spot_b').value)
+        a_base = user_xy(*self.get_parameter("spot_a").value)
+        b_base = user_xy(*self.get_parameter("spot_b").value)
         try:
-            yaw, txy, err = calibrate_2pt(self.spot_seen['a'], self.spot_seen['b'], a_base, b_base)
+            yaw, txy, err = calibrate_2pt(self.spot_seen["a"], self.spot_seen["b"], a_base, b_base)
         except ValueError as exc:
             res.success, res.message = False, str(exc)
             return res
@@ -349,16 +349,16 @@ class CameraTest(Node):
             self.save()
             self.history = []
             self.publish_tf()
-        res.message = (f'calibrate เสร็จ: กล้องอยู่ หน้า {cam_f * 100:.0f} ซ้าย {cam_l * 100:.0f} สูงจากโต๊ะ {d * 100:.1f} ซม. '
-                       f'ระยะ A-B ที่กล้องเห็นต่างจากที่วัด {err * 1000:.0f} มม.'
-                       + ('' if res.success else ' (เกิน 2 ซม.: วัดจุดใหม่ หรือของเลื่อน ลองใหม่)'))
+        res.message = (f"calibrate เสร็จ: กล้องอยู่ หน้า {cam_f * 100:.0f} ซ้าย {cam_l * 100:.0f} สูงจากโต๊ะ {d * 100:.1f} ซม. "
+                       f"ระยะ A-B ที่กล้องเห็นต่างจากที่วัด {err * 1000:.0f} มม."
+                       + ("" if res.success else " (เกิน 2 ซม.: วัดจุดใหม่ หรือของเลื่อน ลองใหม่)"))
         return res
 
     def on_params(self, params):
         for prm in params:
-            if prm.name == 'object_size':
+            if prm.name == "object_size":
                 try:
-                    with open(self.size_file, 'w') as f:
+                    with open(self.size_file, "w") as f:
                         json.dump([float(v) for v in prm.value], f)
                 except OSError:
                     pass
@@ -366,7 +366,7 @@ class CameraTest(Node):
         return SetParametersResult(successful=True)
 
     def known_size(self):
-        v = [float(x) for x in self.get_parameter('object_size').value]
+        v = [float(x) for x in self.get_parameter("object_size").value]
         return tuple(v) if len(v) == 3 and min(v) > 0 else None
 
     def current(self):
@@ -375,66 +375,66 @@ class CameraTest(Node):
         objs = fuse(hist)
         for o in objs:                  # fuse() keeps the box only: the grasp part from the newest frame
             seen = [g for frame in reversed(hist) for g in frame
-                    if 'grasp' in g and math.hypot(g['x'] - o['x'], g['y'] - o['y']) < 0.03]
+                    if "grasp" in g and math.hypot(g["x"] - o["x"], g["y"] - o["y"]) < 0.03]
             if seen:
-                o['grasp'] = seen[0]['grasp']
-        return sorted(objs, key=lambda o: math.hypot(o['x'] - PAN_AXIS[0], o['y'] - PAN_AXIS[1]))
+                o["grasp"] = seen[0]["grasp"]
+        return sorted(objs, key=lambda o: math.hypot(o["x"] - PAN_AXIS[0], o["y"] - PAN_AXIS[1]))
 
     def on_objects(self, _req, res):
         if not self.pose:
-            res.success, res.message = False, 'ยังไม่ได้ calibrate กล้อง'
+            res.success, res.message = False, "ยังไม่ได้ calibrate กล้อง"
             return res
         objs = self.current()
         res.success = True
-        res.message = f'เห็น {len(objs)} ชิ้น (เรียงจากใกล้แขน)' + ''.join(f'\n  {self.describe(o)}' for o in objs)
+        res.message = f"เห็น {len(objs)} ชิ้น (เรียงจากใกล้แขน)" + "".join(f"\n  {self.describe(o)}" for o in objs)
         return res
 
     def on_pick_bag(self, _req, res):
         if not self.pose:
-            res.success, res.message = False, 'ยังไม่ได้ calibrate กล้อง'
+            res.success, res.message = False, "ยังไม่ได้ calibrate กล้อง"
             return res
-        bags = [o for o in self.current() if 'grasp' in o]
+        bags = [o for o in self.current() if "grasp" in o]
         if not bags:
-            res.success, res.message = False, 'ไม่เห็นถุงในระยะแขน (ตั้ง target:=bag แล้วหรือยัง)'
+            res.success, res.message = False, "ไม่เห็นถุงในระยะแขน (ตั้ง target:=bag แล้วหรือยัง)"
             return res
         o = bags[0]
-        g = o['grasp']
-        self.get_logger().info(f'หยิบถุง: {self.describe(o)}')
-        out = self.arm.pick_bag((g['x'], g['y']), top_z=g['z'], yaw=g['yaw'], thickness=g['thickness'],
-                                length=min(max(g['length'], 0.02), 0.2))
+        g = o["grasp"]
+        self.get_logger().info(f"หยิบถุง: {self.describe(o)}")
+        out = self.arm.pick_bag((g["x"], g["y"]), top_z=g["z"], yaw=g["yaw"], thickness=g["thickness"],
+                                length=min(max(g["length"], 0.02), 0.2))
         if out[0]:
-            self.bag_spot = (o['x'], o['y'])
+            self.bag_spot = (o["x"], o["y"])
         res.success = bool(out[0])
-        res.message = f'{self.describe(o)} -> {out[1]}: {out[2]}'
+        res.message = f"{self.describe(o)} -> {out[1]}: {out[2]}"
         return res
 
     def on_place_bag(self, _req, res):
         if self.bag_spot is None:
-            res.success, res.message = False, 'ยังไม่ได้หยิบถุงด้วย /camera_test/pick_bag'
+            res.success, res.message = False, "ยังไม่ได้หยิบถุงด้วย /camera_test/pick_bag"
             return res
         out = self.arm.place(self.bag_spot)
         if out[0]:
             self.bag_spot = None
-        res.success, res.message = bool(out[0]), f'{out[1]}: {out[2]}'
+        res.success, res.message = bool(out[0]), f"{out[1]}: {out[2]}"
         return res
 
     def on_pick(self, res, place):
         if not self.pose:
-            res.success, res.message = False, 'ยังไม่ได้ calibrate กล้อง'
+            res.success, res.message = False, "ยังไม่ได้ calibrate กล้อง"
             return res
         objs = self.current()
         if not objs:
-            res.success, res.message = False, 'ไม่เห็นของบนโต๊ะในระยะแขน'
+            res.success, res.message = False, "ไม่เห็นของบนโต๊ะในระยะแขน"
             return res
         o = objs[0]
-        where, size = (o['x'], o['y']), o['size']
-        self.get_logger().info(f'หยิบ: {self.describe(o)}')
+        where, size = (o["x"], o["y"]), o["size"]
+        self.get_logger().info(f"หยิบ: {self.describe(o)}")
         if place:
-            out = self.arm.pick_place(where, user_xy(*self.get_parameter('place_spot').value), size, obj_yaw=o['yaw'])
+            out = self.arm.pick_place(where, user_xy(*self.get_parameter("place_spot").value), size, obj_yaw=o["yaw"])
         else:
-            out = self.arm.pick(where, size, yaw=o['yaw'])
+            out = self.arm.pick(where, size, yaw=o["yaw"])
         res.success = bool(out[0])
-        res.message = f'{self.describe(o)} -> {out[1]}: {out[2]}'
+        res.message = f"{self.describe(o)} -> {out[1]}: {out[2]}"
         return res
 
 
@@ -453,5 +453,5 @@ def main():
         os._exit(0)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

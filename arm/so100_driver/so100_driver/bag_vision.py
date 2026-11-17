@@ -38,16 +38,16 @@ def find_bag(im):
     # drop columns where the top is hidden by the gripper (orange right above it)
     keep = [not orange[max(0, int(y) - 12):int(y) + 1, int(x)].any() for x, y in tops]
     tops = tops[np.array(keep, bool)] if any(keep) else tops
-    return {'cx': float(np.mean(cols)), 'x0': float(cols.min()), 'x1': float(cols.max()), 'tops': tops,
-            'area': int(st[i, 4]), 'grip_x': gripper_x(orange)}
+    return {"cx": float(np.mean(cols)), "x0": float(cols.min()), "x1": float(cols.max()), "tops": tops,
+            "area": int(st[i, 4]), "grip_x": gripper_x(orange)}
 
 
 def ridge(b):
     """Classify the top edge: ('across', 0) broad side facing, ('away', 90) narrow side facing (peak),
     ('diag', +-45). Also returns the fitted image slope (deg, + = edge rising to the right)."""
-    t = b['tops']
+    t = b["tops"]
     if len(t) < 20:
-        return 'across', 0, 0.0
+        return "across", 0, 0.0
     x, y = t[:, 0], t[:, 1]
     k = int(np.argmin(y))
     w = x.max() - x.min()
@@ -57,12 +57,12 @@ def ridge(b):
         sl = np.polyfit(left[:, 0], left[:, 1], 1)[0]
         sr = np.polyfit(right[:, 0], right[:, 1], 1)[0]
         if sl < -0.35 and sr > 0.35:
-            return 'away', 90, 0.0
+            return "away", 90, 0.0
     s = np.polyfit(x, y, 1)[0]
     ang = -math.degrees(math.atan(s))           # image y grows down: + = rising to the right
     if abs(ang) < 22:
-        return 'across', 0, ang
-    return ('diag', 45, ang) if ang > 0 else ('diag', -45, ang)
+        return "across", 0, ang
+    return ("diag", 45, ang) if ang > 0 else ("diag", -45, ang)
 
 
 def floor_mask(xim):
@@ -90,10 +90,10 @@ def lifted(before, after):
 
 def edge_y(b, half=40):
     """Image row of the bag's top edge around the gripper column (lower row = nearer bag)."""
-    t = b['tops']
-    near = t[np.abs(t[:, 0] - b['grip_x']) < half]
+    t = b["tops"]
+    near = t[np.abs(t[:, 0] - b["grip_x"]) < half]
     if len(near) < 3:
-        near = t[np.argsort(np.abs(t[:, 0] - b['grip_x']))[:10]]
+        near = t[np.argsort(np.abs(t[:, 0] - b["grip_x"]))[:10]]
     return float(np.median(near[:, 1]))
 
 
@@ -119,22 +119,22 @@ def floor_under_bag(xim):
 def draw(im, b, label):
     o = im.copy()
     if b:
-        for x, y in b['tops'][::4]:
+        for x, y in b["tops"][::4]:
             cv2.circle(o, (int(x), int(y)), 2, (0, 255, 0), -1)
-        cv2.line(o, (int(b['cx']), 0), (int(b['cx']), o.shape[0]), (255, 0, 0), 1)
-        cv2.line(o, (int(b['grip_x']), 0), (int(b['grip_x']), o.shape[0]), (0, 0, 255), 1)
+        cv2.line(o, (int(b["cx"]), 0), (int(b["cx"]), o.shape[0]), (255, 0, 0), 1)
+        cv2.line(o, (int(b["grip_x"]), 0), (int(b["grip_x"]), o.shape[0]), (0, 0, 255), 1)
     cv2.putText(o, label, (8, 24), 0, 0.6, (0, 0, 255), 2)
     return o
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import sys
     for f in sys.argv[1:]:
         im = cv2.imread(f)
-        if 'xtion' in f:
-            print(f, 'floor under bag', round(floor_under_bag(im), 2))
+        if "xtion" in f:
+            print(f, "floor under bag", round(floor_under_bag(im), 2))
             continue
         b = find_bag(im)
         r = ridge(b) if b else None
-        print(f, None if not b else {k: round(v, 1) for k, v in b.items() if k in ('cx', 'grip_x', 'area')}, r)
-        cv2.imwrite(f.replace('.jpg', '_bv.jpg'), draw(im, b, str(r)))
+        print(f, None if not b else {k: round(v, 1) for k, v in b.items() if k in ("cx", "grip_x", "area")}, r)
+        cv2.imwrite(f.replace(".jpg", "_bv.jpg"), draw(im, b, str(r)))

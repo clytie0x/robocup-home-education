@@ -22,30 +22,30 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SERVERS = HERE / 'servers.sh'
-LOG_DIR = Path(os.environ.get('ROBOT_VOICE_LOG_DIR', '/tmp'))
-VOICE_LOG = LOG_DIR / 'robot_voice_launch.log'
-FAKE_LOG = LOG_DIR / 'robot_voice_fake_arm.log'
-ARM_LOG = LOG_DIR / 'robot_voice_arm.log'
-ARM_HW = {'real', 'sim'}                 # so100_moveit_config arm.launch.py hardware:=
-ARM_MATCH = 'so100_moveit_config arm.launch.py'
-PORT = int(os.environ.get('PANEL_PORT', '8091'))  # base/jetson/ports.py VOICE_PANEL (8090 is agent.py's)
+SERVERS = HERE / "servers.sh"
+LOG_DIR = Path(os.environ.get("ROBOT_VOICE_LOG_DIR", "/tmp"))
+VOICE_LOG = LOG_DIR / "robot_voice_launch.log"
+FAKE_LOG = LOG_DIR / "robot_voice_fake_arm.log"
+ARM_LOG = LOG_DIR / "robot_voice_arm.log"
+ARM_HW = {"real", "sim"}                 # so100_moveit_config arm.launch.py hardware:=
+ARM_MATCH = "so100_moveit_config arm.launch.py"
+PORT = int(os.environ.get("PANEL_PORT", "8091"))  # base/jetson/ports.py VOICE_PANEL (8090 is agent.py's)
 ROS_SETUP = ('for f in /opt/ros/jazzy/setup.bash "$HOME/so100_ws/install/setup.bash" "$HOME/ros2_ws/install/setup.bash"; do '
              '[ -f "$f" ] && source "$f"; done; export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-42}"; '
              'export PYTHONUNBUFFERED=1; ')
-ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
-BRAINS = {'rules', 'llm'}
+BRAINS = {"rules", "llm"}
 TARGETS = {                      # where the commands go
-    'arm_actions': 'use_bridge:=true arm:=actions',    # real robot, SO-100 API /arm/pick, /arm/place
-    'arm_topics': 'use_bridge:=true arm:=topics',      # real robot, old /robot/carry_bag topics
-    'sim': 'use_bridge:=false',                        # simulator on the VM runs the bridge
+    "arm_actions": "use_bridge:=true arm:=actions",    # real robot, SO-100 API /arm/pick, /arm/place
+    "arm_topics": "use_bridge:=true arm:=topics",      # real robot, old /robot/carry_bag topics
+    "sim": "use_bridge:=false",                        # simulator on the VM runs the bridge
 }
 
 
 def port_open(port):
     try:
-        with socket.create_connection(('127.0.0.1', port), timeout=0.3):
+        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
             return True
     except OSError:
         return False
@@ -53,34 +53,34 @@ def port_open(port):
 
 def llama_state():
     try:
-        with urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=0.5) as r:
-            return 'ready' if r.status == 200 else 'loading'
+        with urllib.request.urlopen("http://127.0.0.1:8081/health", timeout=0.5) as r:
+            return "ready" if r.status == 200 else "loading"
     except urllib.error.HTTPError:
-        return 'loading'
+        return "loading"
     except Exception:  # noqa: BLE001
-        return 'off'
+        return "off"
 
 
 def ram():
     try:
-        info = dict(l.split(':', 1) for l in open('/proc/meminfo'))
-        total = int(info['MemTotal'].split()[0]) / 1048576
-        avail = int(info['MemAvailable'].split()[0]) / 1048576
-        return {'used': round(total - avail, 1), 'total': round(total, 1)}
+        info = dict(l.split(":", 1) for l in open("/proc/meminfo"))
+        total = int(info["MemTotal"].split()[0]) / 1048576
+        avail = int(info["MemAvailable"].split()[0]) / 1048576
+        return {"used": round(total - avail, 1), "total": round(total, 1)}
     except Exception:  # noqa: BLE001
-        return {'used': 0, 'total': 0}
+        return {"used": 0, "total": 0}
 
 
 def tail(path, lines=200, max_bytes=80000):
     try:
-        with open(path, 'rb') as f:
+        with open(path, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
             f.seek(max(0, size - max_bytes))
-            text = f.read().decode('utf-8', 'replace')
+            text = f.read().decode("utf-8", "replace")
     except OSError:
         return []
-    return [ANSI.sub('', l) for l in text.splitlines()[-lines:]]
+    return [ANSI.sub("", l) for l in text.splitlines()[-lines:]]
 
 
 class Panel:
@@ -91,14 +91,14 @@ class Panel:
         self.fake = None
         self.arm = None
         self.arm_hw = None
-        self.job = ''            # what the panel is doing right now ('' = idle)
-        self.message = ''        # result of the last action
+        self.job = ""            # what the panel is doing right now ('' = idle)
+        self.message = ""        # result of the last action
 
     # ---------------- processes ----------------
     def _spawn(self, cmd, log):
-        f = open(log, 'wb', buffering=0)
+        f = open(log, "wb", buffering=0)
         f.write(f'===== {time.strftime("%F %T")}  $ {cmd}\n'.encode())
-        return subprocess.Popen(['bash', '-c', ROS_SETUP + 'exec ' + cmd], stdout=f, stderr=subprocess.STDOUT,
+        return subprocess.Popen(["bash", "-c", ROS_SETUP + "exec " + cmd], stdout=f, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL, start_new_session=True)
 
     @staticmethod
@@ -121,9 +121,9 @@ class Panel:
             r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, start_new_session=True)
             return (r.stdout + r.stderr).strip()
         except subprocess.TimeoutExpired:
-            return 'timeout'
+            return "timeout"
         except OSError as e:
-            return f'error: {e}'
+            return f"error: {e}"
 
     def voice_running(self):
         return self.voice is not None and self.voice.poll() is None
@@ -132,7 +132,7 @@ class Panel:
         self._stop_proc(self.voice)
         self.voice = None
         # a launch started by hand in a terminal (not by this panel)
-        subprocess.run(['pkill', '-INT', '-f', 'voice_assistant.launch.py'], capture_output=True)
+        subprocess.run(["pkill", "-INT", "-f", "voice_assistant.launch.py"], capture_output=True)
 
     def _run_job(self, title, fn):
         with self.lock:
@@ -142,11 +142,11 @@ class Panel:
 
         def work():
             try:
-                self.message = fn() or ''
+                self.message = fn() or ""
             except Exception as e:  # noqa: BLE001
-                self.message = f'ผิดพลาด: {e}'
+                self.message = f"ผิดพลาด: {e}"
             finally:
-                self.job = ''
+                self.job = ""
         threading.Thread(target=work, daemon=True).start()
         return True
 
@@ -157,28 +157,28 @@ class Panel:
 
         def fn():
             self._stop_voice()
-            if brain == 'llm':
-                out = self._sh([str(SERVERS), 'start'])
+            if brain == "llm":
+                out = self._sh([str(SERVERS), "start"])
             else:
-                subprocess.run(['pkill', '-f', 'llama-server'], capture_output=True)   # free ~1.4 GB RAM
-                out = self._sh([str(SERVERS), 'start-stt'])
-            if 'FAILED' in out or out.startswith(('error', 'timeout')):
-                return f'เปิด server ไม่สำเร็จ: {out[-300:]}'
+                subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)   # free ~1.4 GB RAM
+                out = self._sh([str(SERVERS), "start-stt"])
+            if "FAILED" in out or out.startswith(("error", "timeout")):
+                return f"เปิด server ไม่สำเร็จ: {out[-300:]}"
             cmd = (f'ros2 launch voice_assistant voice_assistant.launch.py brain:={brain} '
                    f'{TARGETS[target]} use_mic:={"true" if mic else "false"}')
             self.voice = self._spawn(cmd, VOICE_LOG)
-            self.voice_cfg = {'brain': brain, 'target': target, 'mic': bool(mic)}
+            self.voice_cfg = {"brain": brain, "target": target, "mic": bool(mic)}
             time.sleep(2.5)
             if not self.voice_running():
-                return 'ระบบเสียงเปิดแล้วปิดทันที ดู log ด้านล่าง'
-            return 'เปิดระบบเสียงแล้ว'
-        return self._run_job('กำลังเปิดระบบ' + (' (โหลด LLM อาจใช้เวลาถึง 1 นาที)' if brain == 'llm' else ''), fn)
+                return "ระบบเสียงเปิดแล้วปิดทันที ดู log ด้านล่าง"
+            return "เปิดระบบเสียงแล้ว"
+        return self._run_job("กำลังเปิดระบบ" + (" (โหลด LLM อาจใช้เวลาถึง 1 นาที)" if brain == "llm" else ""), fn)
 
     def stop_voice(self):
         def fn():
             self._stop_voice()
-            return 'หยุดระบบเสียงแล้ว (server ยังเปิดอยู่)'
-        return self._run_job('กำลังหยุดระบบเสียง', fn)
+            return "หยุดระบบเสียงแล้ว (server ยังเปิดอยู่)"
+        return self._run_job("กำลังหยุดระบบเสียง", fn)
 
     def stop_all(self):
         def fn():
@@ -186,9 +186,9 @@ class Panel:
             self._stop_proc(self.fake)
             self.fake = None
             self._stop_arm()
-            self._sh([str(SERVERS), 'stop'], timeout=20)
-            return 'ปิดทุกอย่างแล้ว (รวมแขน)'
-        return self._run_job('กำลังปิดทุกอย่าง', fn)
+            self._sh([str(SERVERS), "stop"], timeout=20)
+            return "ปิดทุกอย่างแล้ว (รวมแขน)"
+        return self._run_job("กำลังปิดทุกอย่าง", fn)
 
     def fake_arm(self, on):
         def fn():
@@ -196,24 +196,24 @@ class Panel:
             self.fake = None
             if on:
                 if self.arm_running() or self.arm_external():
-                    return 'ปิดแขนก่อน ห้ามเปิด fake_arm_server พร้อมแขน'
-                self.fake = self._spawn('ros2 run voice_assistant fake_arm_server', FAKE_LOG)
-                return 'เปิดแขนจำลองแล้ว (ห้ามเปิดพร้อมแขนจริง)'
-            return 'ปิดแขนจำลองแล้ว'
-        return self._run_job('แขนจำลอง', fn)
+                    return "ปิดแขนก่อน ห้ามเปิด fake_arm_server พร้อมแขน"
+                self.fake = self._spawn("ros2 run voice_assistant fake_arm_server", FAKE_LOG)
+                return "เปิดแขนจำลองแล้ว (ห้ามเปิดพร้อมแขนจริง)"
+            return "ปิดแขนจำลองแล้ว"
+        return self._run_job("แขนจำลอง", fn)
 
     def arm_running(self):
         return self.arm is not None and self.arm.poll() is None
 
     @staticmethod
     def arm_external():
-        return subprocess.run(['pgrep', '-f', ARM_MATCH], capture_output=True).returncode == 0
+        return subprocess.run(["pgrep", "-f", ARM_MATCH], capture_output=True).returncode == 0
 
     def _start_arm(self, hw):
         self._stop_arm()
         self._stop_proc(self.fake)              # never two arms answering /arm/pick
         self.fake = None
-        self.arm = self._spawn(f'ros2 launch so100_moveit_config arm.launch.py hardware:={hw} rviz:=false', ARM_LOG)
+        self.arm = self._spawn(f"ros2 launch so100_moveit_config arm.launch.py hardware:={hw} rviz:=false", ARM_LOG)
         self.arm_hw = hw
         deadline = time.time() + 45             # wait until /arm/pick exists (MoveIt takes a while)
         while time.time() < deadline:
@@ -225,13 +225,13 @@ class Panel:
         return self.arm_running()
 
     def _arm_ready(self):
-        out = self._sh(['bash', '-c', ROS_SETUP + 'timeout 4 ros2 action list'], timeout=8)
-        return '/arm/pick' in out
+        out = self._sh(["bash", "-c", ROS_SETUP + "timeout 4 ros2 action list"], timeout=8)
+        return "/arm/pick" in out
 
     def _stop_arm(self):
         self._stop_proc(self.arm)
         self.arm = None
-        subprocess.run(['pkill', '-INT', '-f', ARM_MATCH], capture_output=True)   # started by hand / Start-SO100
+        subprocess.run(["pkill", "-INT", "-f", ARM_MATCH], capture_output=True)   # started by hand / Start-SO100
 
     def arm_on(self, hw):
         if hw not in ARM_HW:
@@ -239,47 +239,47 @@ class Panel:
 
         def fn():
             if not self._start_arm(hw):
-                return 'เปิดแขนไม่สำเร็จ ดู log แขน'
-            return 'เปิดแขน' + ('จริงแล้ว' if hw == 'real' else 'จำลอง (hardware:=sim) แล้ว')
-        return self._run_job('กำลังเปิดแขน (MoveIt ใช้เวลาสักครู่)', fn)
+                return "เปิดแขนไม่สำเร็จ ดู log แขน"
+            return "เปิดแขน" + ("จริงแล้ว" if hw == "real" else "จำลอง (hardware:=sim) แล้ว")
+        return self._run_job("กำลังเปิดแขน (MoveIt ใช้เวลาสักครู่)", fn)
 
     def arm_off(self):
         def fn():
             self._stop_arm()
-            return 'ปิดแขนแล้ว'
-        return self._run_job('กำลังปิดแขน', fn)
+            return "ปิดแขนแล้ว"
+        return self._run_job("กำลังปิดแขน", fn)
 
     def start_all(self, mic):
         """Competition button: real arm + voice (no LLM) + bridge with the arm API."""
         def fn():
-            sim_now = self.arm_running() and self.arm_hw == 'sim'
+            sim_now = self.arm_running() and self.arm_hw == "sim"
             if sim_now or not (self.arm_running() or self.arm_external()):
-                if not self._start_arm('real'):         # competition = real arm, never the simulated one
-                    return 'เปิดแขนไม่สำเร็จ ดู log แขน (ระบบเสียงยังไม่ได้เปิด)'
+                if not self._start_arm("real"):         # competition = real arm, never the simulated one
+                    return "เปิดแขนไม่สำเร็จ ดู log แขน (ระบบเสียงยังไม่ได้เปิด)"
             self._stop_voice()
-            subprocess.run(['pkill', '-f', 'llama-server'], capture_output=True)
-            out = self._sh([str(SERVERS), 'start-stt'])
-            if 'FAILED' in out:
-                return f'เปิด whisper ไม่สำเร็จ: {out[-300:]}'
+            subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)
+            out = self._sh([str(SERVERS), "start-stt"])
+            if "FAILED" in out:
+                return f"เปิด whisper ไม่สำเร็จ: {out[-300:]}"
             cmd = ('ros2 launch voice_assistant voice_assistant.launch.py brain:=rules '
                    f'{TARGETS["arm_actions"]} use_mic:={"true" if mic else "false"}')
             self.voice = self._spawn(cmd, VOICE_LOG)
-            self.voice_cfg = {'brain': 'rules', 'target': 'arm_actions', 'mic': bool(mic)}
+            self.voice_cfg = {"brain": "rules", "target": "arm_actions", "mic": bool(mic)}
             time.sleep(2.5)
-            return 'เปิดทั้งหมดแล้ว (แขนจริง + เสียงไม่ใช้ LLM)' if self.voice_running() else \
-                'แขนเปิดแล้ว แต่ระบบเสียงปิดทันที ดู log'
-        return self._run_job('กำลังเปิดทั้งหมด', fn)
+            return "เปิดทั้งหมดแล้ว (แขนจริง + เสียงไม่ใช้ LLM)" if self.voice_running() else \
+                "แขนเปิดแล้ว แต่ระบบเสียงปิดทันที ดู log"
+        return self._run_job("กำลังเปิดทั้งหมด", fn)
 
     def say(self, text):
         """Same as speaking into the mic: publish one sentence on /speech/heard."""
-        text = ' '.join(str(text).split())[:200]
+        text = " ".join(str(text).split())[:200]
         if not text:
             return False
-        payload = '{data: ' + json.dumps(text) + '}'
+        payload = "{data: " + json.dumps(text) + "}"
         script = ROS_SETUP + 'exec ros2 topic pub --once /speech/heard std_msgs/msg/String "$1"'
 
         def work():
-            subprocess.run(['bash', '-c', script, '_', payload], capture_output=True, timeout=15)
+            subprocess.run(["bash", "-c", script, "_", payload], capture_output=True, timeout=15)
         threading.Thread(target=work, daemon=True).start()
         self.message = f'ส่งข้อความ: "{text}"'
         return True
@@ -289,12 +289,12 @@ class Panel:
         running = self.voice_running()
         external = False
         if not running:
-            external = subprocess.run(['pgrep', '-f', 'voice_assistant.launch.py'], capture_output=True).returncode == 0
-        flow, heard = '', ''
+            external = subprocess.run(["pgrep", "-f", "voice_assistant.launch.py"], capture_output=True).returncode == 0
+        flow, heard = "", ""
         if running:
             for line in reversed(tail(VOICE_LOG, 400)):
                 if not flow:
-                    m = re.search(r'== state: (\w+) ==', line)
+                    m = re.search(r"== state: (\w+) ==", line)
                     if m:
                         flow = m.group(1)
                 if not heard:
@@ -304,12 +304,12 @@ class Panel:
                 if flow and heard:
                     break
         return {
-            'whisper': port_open(8080), 'llama': llama_state(),
-            'voice': running, 'external': external, 'cfg': self.voice_cfg if running else None,
-            'fake_arm': self.fake is not None and self.fake.poll() is None,
-            'arm': 'panel' if self.arm_running() else ('external' if self.arm_external() else 'off'),
-            'arm_hw': self.arm_hw if self.arm_running() else None,
-            'flow': flow, 'heard': heard, 'ram': ram(), 'job': self.job, 'message': self.message,
+            "whisper": port_open(8080), "llama": llama_state(),
+            "voice": running, "external": external, "cfg": self.voice_cfg if running else None,
+            "fake_arm": self.fake is not None and self.fake.poll() is None,
+            "arm": "panel" if self.arm_running() else ("external" if self.arm_external() else "off"),
+            "arm_hw": self.arm_hw if self.arm_running() else None,
+            "flow": flow, "heard": heard, "ram": ram(), "job": self.job, "message": self.message,
         }
 
     def shutdown(self):
@@ -505,72 +505,72 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def _send(self, body, ctype='application/json', code=200):
+    def _send(self, body, ctype="application/json", code=200):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
         self.send_response(code)
-        self.send_header('Content-Type', ctype)
-        self.send_header('Content-Length', str(len(data)))
-        self.send_header('Cache-Control', 'no-store')
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 
     def do_GET(self):
-        if self.path == '/':
-            self._send(PAGE.encode(), 'text/html; charset=utf-8')
-        elif self.path == '/api/status':
+        if self.path == "/":
+            self._send(PAGE.encode(), "text/html; charset=utf-8")
+        elif self.path == "/api/status":
             self._send(PANEL.status())
-        elif self.path.startswith('/api/log'):
-            self._send({'lines': tail(ARM_LOG if 'which=arm' in self.path else VOICE_LOG)})
+        elif self.path.startswith("/api/log"):
+            self._send({"lines": tail(ARM_LOG if "which=arm" in self.path else VOICE_LOG)})
         else:
-            self._send({'error': 'not found'}, code=404)
+            self._send({"error": "not found"}, code=404)
 
     def do_POST(self):
         try:
-            n = min(int(self.headers.get('Content-Length') or 0), 4096)
-            body = json.loads(self.rfile.read(n) or b'{}')
+            n = min(int(self.headers.get("Content-Length") or 0), 4096)
+            body = json.loads(self.rfile.read(n) or b"{}")
             if not isinstance(body, dict):
                 raise ValueError
         except ValueError:
-            return self._send({'error': 'bad request'}, code=400)
-        if self.path == '/api/start':
-            ok = PANEL.start(body.get('brain'), body.get('target'), bool(body.get('mic', True)))
-        elif self.path == '/api/stop_voice':
+            return self._send({"error": "bad request"}, code=400)
+        if self.path == "/api/start":
+            ok = PANEL.start(body.get("brain"), body.get("target"), bool(body.get("mic", True)))
+        elif self.path == "/api/stop_voice":
             ok = PANEL.stop_voice()
-        elif self.path == '/api/stop_all':
+        elif self.path == "/api/stop_all":
             ok = PANEL.stop_all()
-        elif self.path == '/api/fake_arm':
-            ok = PANEL.fake_arm(bool(body.get('on')))
-        elif self.path == '/api/arm':
-            ok = PANEL.arm_on(body.get('hardware')) if body.get('on') else PANEL.arm_off()
-        elif self.path == '/api/start_all':
-            ok = PANEL.start_all(bool(body.get('mic', True)))
-        elif self.path == '/api/say':
-            ok = PANEL.say(body.get('text', ''))
+        elif self.path == "/api/fake_arm":
+            ok = PANEL.fake_arm(bool(body.get("on")))
+        elif self.path == "/api/arm":
+            ok = PANEL.arm_on(body.get("hardware")) if body.get("on") else PANEL.arm_off()
+        elif self.path == "/api/start_all":
+            ok = PANEL.start_all(bool(body.get("mic", True)))
+        elif self.path == "/api/say":
+            ok = PANEL.say(body.get("text", ""))
         else:
-            return self._send({'error': 'not found'}, code=404)
-        self._send({'ok': bool(ok)}, code=200 if ok else 409)
+            return self._send({"error": "not found"}, code=404)
+        self._send({"ok": bool(ok)}, code=200 if ok else 409)
 
 
 def my_ip():
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(('10.255.255.255', 1))
+            s.connect(("10.255.255.255", 1))
             return s.getsockname()[0]
     except OSError:
-        return '<jetson-ip>'
+        return "<jetson-ip>"
 
 
 def main():
-    server = ThreadingHTTPServer(('0.0.0.0', PORT), Handler)
-    print(f'Robot Voice control panel:  http://{my_ip()}:{PORT}   (Ctrl+C to quit)', flush=True)
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    print(f"Robot Voice control panel:  http://{my_ip()}:{PORT}   (Ctrl+C to quit)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        print('stopping the voice system started from the panel...', flush=True)
+        print("stopping the voice system started from the panel...", flush=True)
         PANEL.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

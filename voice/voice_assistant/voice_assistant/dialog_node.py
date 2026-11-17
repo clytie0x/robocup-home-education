@@ -166,59 +166,59 @@ class DialogLogic:
 
 class DialogNode(Node):
     def __init__(self):
-        super().__init__('dialog_node')
-        self.declare_parameter('require_wake_word', True)
-        self.declare_parameter('robot_name', 'Predictably Slightly Unpredictable')
-        self.declare_parameter('wake_words', ['robot', 'robert', 'rowboat', 'hello'])
-        self.declare_parameter('fuzzy_words', ['robot'])  # only these also match similar-sounding words
-        self.declare_parameter('start_only_words', ['hello'])  # these wake the robot only at the start of a sentence
-        self.declare_parameter('wake_fuzzy', 0.78)    # 0 = exact only; lower = easier to wake (more false wakes)
-        self.declare_parameter('awake_timeout', 15.0)
-        self.declare_parameter('greeting', "Hi! I'm {name}. How can I help you?")
-        self.declare_parameter('capabilities',
-                               'I can carry your bag, drop the bag, follow you, move forward or backward, '
-                               'turn left or right, do a beatbox, and stop.')
-        self.declare_parameter('farewell', 'Okay. Just say hello if you need me.')
-        self.declare_parameter('sleep_message', '')   # said when the awake window times out ('' = silent)
+        super().__init__("dialog_node")
+        self.declare_parameter("require_wake_word", True)
+        self.declare_parameter("robot_name", "Predictably Slightly Unpredictable")
+        self.declare_parameter("wake_words", ["robot", "robert", "rowboat", "hello"])
+        self.declare_parameter("fuzzy_words", ["robot"])  # only these also match similar-sounding words
+        self.declare_parameter("start_only_words", ["hello"])  # these wake the robot only at the start of a sentence
+        self.declare_parameter("wake_fuzzy", 0.78)    # 0 = exact only; lower = easier to wake (more false wakes)
+        self.declare_parameter("awake_timeout", 15.0)
+        self.declare_parameter("greeting", "Hi! I'm {name}. How can I help you?")
+        self.declare_parameter("capabilities",
+                               "I can carry your bag, drop the bag, follow you, move forward or backward, "
+                               "turn left or right, do a beatbox, and stop.")
+        self.declare_parameter("farewell", "Okay. Just say hello if you need me.")
+        self.declare_parameter("sleep_message", "")   # said when the awake window times out ('' = silent)
         # Short sounds instead of long speech. '' = off (then it speaks instead).
-        self.declare_parameter('wake_chime', '~/robot_voice/sounds/wake_chime.wav')
-        self.declare_parameter('sleep_chime', '~/robot_voice/sounds/sleep_chime.wav')
-        self.declare_parameter('intro_once', True)    # full spoken intro only on the first wake after start
+        self.declare_parameter("wake_chime", "~/robot_voice/sounds/wake_chime.wav")
+        self.declare_parameter("sleep_chime", "~/robot_voice/sounds/sleep_chime.wav")
+        self.declare_parameter("intro_once", True)    # full spoken intro only on the first wake after start
 
         p = lambda n: self.get_parameter(n).value
-        self.logic = DialogLogic(list(p('wake_words')), p('greeting'), p('capabilities'),
-                                 p('farewell'), p('sleep_message'),
-                                 float(p('awake_timeout')), bool(p('require_wake_word')),
-                                 float(p('wake_fuzzy')), list(p('fuzzy_words')), p('robot_name'),
-                                 list(p('start_only_words')), p('wake_chime'), p('sleep_chime'),
-                                 bool(p('intro_once')))
+        self.logic = DialogLogic(list(p("wake_words")), p("greeting"), p("capabilities"),
+                                 p("farewell"), p("sleep_message"),
+                                 float(p("awake_timeout")), bool(p("require_wake_word")),
+                                 float(p("wake_fuzzy")), list(p("fuzzy_words")), p("robot_name"),
+                                 list(p("start_only_words")), p("wake_chime"), p("sleep_chime"),
+                                 bool(p("intro_once")))
 
-        self.pub_text = self.create_publisher(String, '/speech/text', 10)
-        self.pub_say = self.create_publisher(String, '/tts/say', 10)
-        self.pub_play = self.create_publisher(String, '/tts/play', 10)
-        self.pub_state = self.create_publisher(String, '/dialog/state', 10)
-        self.create_subscription(String, '/speech/heard', self._on_heard, 10)
-        self.create_subscription(Bool, '/tts/speaking', self._on_speaking, 10)
+        self.pub_text = self.create_publisher(String, "/speech/text", 10)
+        self.pub_say = self.create_publisher(String, "/tts/say", 10)
+        self.pub_play = self.create_publisher(String, "/tts/play", 10)
+        self.pub_state = self.create_publisher(String, "/dialog/state", 10)
+        self.create_subscription(String, "/speech/heard", self._on_heard, 10)
+        self.create_subscription(Bool, "/tts/speaking", self._on_speaking, 10)
         self.create_timer(0.5, self._on_tick)
 
-        state = 'awake' if self.logic.awake else 'sleeping'
+        state = "awake" if self.logic.awake else "sleeping"
         self.pub_state.publish(String(data=state))
         self.get_logger().info(f'dialog ready ({state}), say "Hey robot" to wake me '
                                f'(wake words: {list(p("wake_words"))}, fuzzy {p("wake_fuzzy")})')
 
     def _emit(self, outputs):
         for kind, text in outputs:
-            if kind == 'say':
+            if kind == "say":
                 self.get_logger().info(f'say: "{text}"')
                 self.pub_say.publish(String(data=text))
-            elif kind == 'play':
-                self.get_logger().info(f'play: {text}')
+            elif kind == "play":
+                self.get_logger().info(f"play: {text}")
                 self.pub_play.publish(String(data=text))
-            elif kind == 'forward':
+            elif kind == "forward":
                 self.get_logger().info(f'-> LLM: "{text}"')
                 self.pub_text.publish(String(data=text))
-            elif kind == 'state':
-                self.get_logger().info(f'state: {text}')
+            elif kind == "state":
+                self.get_logger().info(f"state: {text}")
                 self.pub_state.publish(String(data=text))
             else:
                 self.get_logger().info(text)
@@ -245,5 +245,5 @@ def main():
         rclpy.try_shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

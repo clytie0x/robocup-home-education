@@ -35,33 +35,33 @@ def rgba(r, g, b, a=1.0):
 
 class RvizRobotSim(Node):
     def __init__(self):
-        super().__init__('rviz_robot_sim')
-        self.declare_parameter('cmd_vel_topic', '/cmd_vel')
-        self.declare_parameter('odom_frame', 'odom')
-        self.declare_parameter('base_frame', 'base_link')
-        self.declare_parameter('rate', 30.0)
-        self.declare_parameter('marker_rate', 10.0)    # Hz, markers need less than TF
-        self.declare_parameter('cmd_timeout', 0.5)     # stop if no cmd_vel for this long
-        self.declare_parameter('trail_step', 0.02)     # m between trail points
-        self.declare_parameter('max_trail', 5000)
-        self.declare_parameter('robot_length', 0.5)
-        self.declare_parameter('robot_width', 0.4)
-        self.declare_parameter('simulate_events', True)   # send grab_success / drop_done
-        self.declare_parameter('simulate_person', True)   # send see_person every second
-        self.declare_parameter('event_delay', 1.0)
+        super().__init__("rviz_robot_sim")
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+        self.declare_parameter("odom_frame", "odom")
+        self.declare_parameter("base_frame", "base_link")
+        self.declare_parameter("rate", 30.0)
+        self.declare_parameter("marker_rate", 10.0)    # Hz, markers need less than TF
+        self.declare_parameter("cmd_timeout", 0.5)     # stop if no cmd_vel for this long
+        self.declare_parameter("trail_step", 0.02)     # m between trail points
+        self.declare_parameter("max_trail", 5000)
+        self.declare_parameter("robot_length", 0.5)
+        self.declare_parameter("robot_width", 0.4)
+        self.declare_parameter("simulate_events", True)   # send grab_success / drop_done
+        self.declare_parameter("simulate_person", True)   # send see_person every second
+        self.declare_parameter("event_delay", 1.0)
 
         p = lambda n: self.get_parameter(n).value
-        self.odom_frame = p('odom_frame')
-        self.base_frame = p('base_frame')
-        self.cmd_timeout = float(p('cmd_timeout'))
-        self.trail_step = float(p('trail_step'))
-        self.max_trail = int(p('max_trail'))
-        self.L = float(p('robot_length'))
-        self.W = float(p('robot_width'))
-        cmd_topic = p('cmd_vel_topic')
-        self.simulate_events = bool(p('simulate_events'))
-        self.simulate_person = bool(p('simulate_person'))
-        self.event_delay = float(p('event_delay'))
+        self.odom_frame = p("odom_frame")
+        self.base_frame = p("base_frame")
+        self.cmd_timeout = float(p("cmd_timeout"))
+        self.trail_step = float(p("trail_step"))
+        self.max_trail = int(p("max_trail"))
+        self.L = float(p("robot_length"))
+        self.W = float(p("robot_width"))
+        cmd_topic = p("cmd_vel_topic")
+        self.simulate_events = bool(p("simulate_events"))
+        self.simulate_person = bool(p("simulate_person"))
+        self.event_delay = float(p("event_delay"))
         self.pending = []                  # [(due_time, event)]
 
         self.x = self.y = self.yaw = 0.0
@@ -72,35 +72,35 @@ class RvizRobotSim(Node):
         self.trail = [(0.0, 0.0, False)]   # (x, y, carrying)
 
         self.tf = TransformBroadcaster(self)
-        self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
-        self.marker_pub = self.create_publisher(MarkerArray, '/voice_viz/markers', 10)
-        self.event_pub = self.create_publisher(String, '/robot/event', 10)
+        self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
+        self.marker_pub = self.create_publisher(MarkerArray, "/voice_viz/markers", 10)
+        self.event_pub = self.create_publisher(String, "/robot/event", 10)
 
         self.create_subscription(Twist, cmd_topic, self.on_cmd, 10)
-        self.create_subscription(Empty, '/robot/carry_bag', self.on_carry, 10)
-        self.create_subscription(Empty, '/robot/drop_bag', self.on_drop, 10)
-        self.create_subscription(Empty, '/voice_viz/reset', self.on_reset, 10)
+        self.create_subscription(Empty, "/robot/carry_bag", self.on_carry, 10)
+        self.create_subscription(Empty, "/robot/drop_bag", self.on_drop, 10)
+        self.create_subscription(Empty, "/voice_viz/reset", self.on_reset, 10)
 
-        self.dt = 1.0 / float(p('rate'))
+        self.dt = 1.0 / float(p("rate"))
         self.tick = 0
-        self.marker_every = max(1, round(float(p('rate')) / float(p('marker_rate'))))
+        self.marker_every = max(1, round(float(p("rate")) / float(p("marker_rate"))))
         self.last_time = self.get_clock().now()
         self.create_timer(self.dt, self.step)
         if self.simulate_person:
-            self.create_timer(1.0, lambda: self.send_event('see_person', log=False))
+            self.create_timer(1.0, lambda: self.send_event("see_person", log=False))
         self.dup_timer = self.create_timer(3.0, self.check_duplicates)
         self.get_logger().info(
-            f'RViz robot sim ready (cmd_vel: {cmd_topic}, events: {self.simulate_events}, '
-            f'person: {self.simulate_person})')
+            f"RViz robot sim ready (cmd_vel: {cmd_topic}, events: {self.simulate_events}, "
+            f"person: {self.simulate_person})")
 
     def check_duplicates(self):
         self.dup_timer.cancel()
         n = sum(1 for name in self.get_node_names() if name == self.get_name())
         if n > 1:
             self.get_logger().error(
-                f'{n} nodes named {self.get_name()} are running (other terminal, Jetson or a '
-                'teammate on the same ROS_DOMAIN_ID). They fight over /odom, TF and markers: '
-                'the robot will jump or blink. Stop the others or change ROS_DOMAIN_ID.')
+                f"{n} nodes named {self.get_name()} are running (other terminal, Jetson or a "
+                "teammate on the same ROS_DOMAIN_ID). They fight over /odom, TF and markers: "
+                "the robot will jump or blink. Stop the others or change ROS_DOMAIN_ID.")
 
     # ---------------- callbacks ----------------
     def on_cmd(self, msg):
@@ -110,18 +110,18 @@ class RvizRobotSim(Node):
 
     def on_carry(self, _):
         self.carrying = True
-        self.get_logger().info('carrying the bag')
-        self.schedule('grab_success')
+        self.get_logger().info("carrying the bag")
+        self.schedule("grab_success")
 
     def on_drop(self, _):
         if not self.carrying:
-            self.get_logger().info('drop_bag received (no bag carried, dropping anyway)')
+            self.get_logger().info("drop_bag received (no bag carried, dropping anyway)")
         self.carrying = False
         bx = self.x - math.cos(self.yaw) * (self.L / 2 + 0.25)
         by = self.y - math.sin(self.yaw) * (self.L / 2 + 0.25)
         self.bags.append((bx, by))
-        self.get_logger().info(f'bag_{len(self.bags)} dropped at ({bx:.2f}, {by:.2f})')
-        self.schedule('drop_done')
+        self.get_logger().info(f"bag_{len(self.bags)} dropped at ({bx:.2f}, {by:.2f})")
+        self.schedule("drop_done")
 
     def on_reset(self, _):
         self.x = self.y = self.yaw = self.v = self.w = 0.0
@@ -130,7 +130,7 @@ class RvizRobotSim(Node):
         self.trail = [(0.0, 0.0, False)]
         self.pending.clear()
         self.publish_markers(clear=True)
-        self.get_logger().info('reset')
+        self.get_logger().info("reset")
 
     # ---------------- fake robot events ----------------
     def schedule(self, event):
@@ -142,7 +142,7 @@ class RvizRobotSim(Node):
     def send_event(self, event, log=True):
         self.event_pub.publish(String(data=event))
         if log:
-            self.get_logger().info(f'event -> {event}')
+            self.get_logger().info(f"event -> {event}")
 
     # ---------------- simulation ----------------
     def step(self):
@@ -225,23 +225,23 @@ class RvizRobotSim(Node):
             arr = MarkerArray()
 
         # robot body, drawn at the robot pose (no TF lookup)
-        body = self.at_robot(self.marker('robot', 0, Marker.CUBE), 0.1)
+        body = self.at_robot(self.marker("robot", 0, Marker.CUBE), 0.1)
         body.scale.x, body.scale.y, body.scale.z = self.L, self.W, 0.2
         body.color = rgba(0.2, 0.5, 1.0)
         arr.markers.append(body)
 
-        arrow = self.at_robot(self.marker('robot', 1, Marker.ARROW), 0.22)
+        arrow = self.at_robot(self.marker("robot", 1, Marker.ARROW), 0.22)
         arrow.scale.x, arrow.scale.y, arrow.scale.z = self.L * 0.8, 0.06, 0.06
         arrow.color = rgba(1.0, 1.0, 1.0)
         arr.markers.append(arrow)
 
-        carried = self.at_robot(self.marker('robot', 2, Marker.CUBE), 0.3)
+        carried = self.at_robot(self.marker("robot", 2, Marker.CUBE), 0.3)
         carried.scale.x = carried.scale.y = carried.scale.z = 0.2
         carried.color = rgba(1.0, 0.85, 0.1, 1.0 if self.carrying else 0.0)
         arr.markers.append(carried)
 
         # trail: blue normally, green while carrying
-        trail = self.marker('trail', 0, Marker.LINE_LIST)
+        trail = self.marker("trail", 0, Marker.LINE_LIST)
         trail.scale.x = 0.03
         for (x0, y0, c0), (x1, y1, _) in zip(self.trail, self.trail[1:]):
             col = rgba(0.1, 0.9, 0.2) if c0 else rgba(0.3, 0.6, 1.0, 0.8)
@@ -252,16 +252,16 @@ class RvizRobotSim(Node):
 
         # dropped bags
         for i, (bx, by) in enumerate(self.bags):
-            b = self.marker('bags', i, Marker.CUBE)
+            b = self.marker("bags", i, Marker.CUBE)
             b.pose.position.x, b.pose.position.y, b.pose.position.z = bx, by, 0.1
             b.scale.x = b.scale.y = b.scale.z = 0.2
             b.color = rgba(1.0, 0.85, 0.1)
             arr.markers.append(b)
-            lbl = self.marker('bag_labels', i, Marker.TEXT_VIEW_FACING)
+            lbl = self.marker("bag_labels", i, Marker.TEXT_VIEW_FACING)
             lbl.pose.position.x, lbl.pose.position.y, lbl.pose.position.z = bx, by, 0.35
             lbl.scale.z = 0.15
             lbl.color = rgba(1.0, 0.85, 0.1)
-            lbl.text = f'bag_{i + 1}'
+            lbl.text = f"bag_{i + 1}"
             arr.markers.append(lbl)
 
         self.marker_pub.publish(arr)
@@ -280,5 +280,5 @@ def main(args=None):
             rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

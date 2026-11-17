@@ -24,7 +24,7 @@ def fit_plane(pts, iters=300, tol=0.008, seed=0, up=None, max_tilt=70.0, max_ran
         up = np.asarray(up, float) / np.linalg.norm(up)
         pts = pts[np.linalg.norm(pts, axis=1) < max_range]
     if len(pts) < 50:
-        raise ValueError('not enough points for a table plane')
+        raise ValueError("not enough points for a table plane")
     min_cos = math.cos(math.radians(max_tilt))
     rng = np.random.default_rng(seed)
     best, best_n = None, -1
@@ -42,7 +42,7 @@ def fit_plane(pts, iters=300, tol=0.008, seed=0, up=None, max_tilt=70.0, max_ran
         if k > best_n:
             best, best_n = inl, k
     if best is None:
-        raise ValueError('no table-like plane below the camera')
+        raise ValueError("no table-like plane below the camera")
     q = pts[best]
     centre = q.mean(axis=0)
     n = np.linalg.svd(q - centre)[2][2]          # least-squares refit on the inliers
@@ -76,7 +76,7 @@ def calibrate_2pt(a_tab, b_tab, a_base, b_base):
     a_tab, b_tab, a_base, b_base = (np.asarray(v, float)[:2] for v in (a_tab, b_tab, a_base, b_base))
     dt, db = b_tab - a_tab, b_base - a_base
     if np.linalg.norm(db) < 0.03:
-        raise ValueError('the two spots must be at least 3 cm apart')
+        raise ValueError("the two spots must be at least 3 cm apart")
     yaw = math.atan2(db[1], db[0]) - math.atan2(dt[1], dt[0])
     r = rot_z(yaw)[:2, :2]
     t = ((a_base - r @ a_tab) + (b_base - r @ b_tab)) / 2
@@ -96,11 +96,11 @@ class CameraPose:
         return pts @ self.R.T + self.t
 
     def to_dict(self):
-        return {'n': self.n.tolist(), 'd': self.d, 'yaw': self.yaw, 'txy': list(self.txy), 'table_z': self.table_z}
+        return {"n": self.n.tolist(), "d": self.d, "yaw": self.yaw, "txy": list(self.txy), "table_z": self.table_z}
 
     @classmethod
     def from_dict(cls, v):
-        return cls(v['n'], v['d'], v['yaw'], v['txy'], v['table_z'])
+        return cls(v["n"], v["d"], v["yaw"], v["txy"], v["table_z"])
 
     def quaternion(self):
         """(x, y, z, w) of R."""
@@ -156,16 +156,16 @@ def find_objects(pts, table_z=0.0, keep=None, z_min=0.008, z_max=0.30, cell=0.01
         b0, b1 = np.percentile(b, [4, 96])
         centre = c + u * (a0 + a1) / 2 + vv * (b0 + b1) / 2
         height = float(np.percentile(q[:, 2] - table_z, 98))
-        obj = {'x': float(centre[0]), 'y': float(centre[1]), 'yaw': math.atan2(u[1], u[0]),
-               'size': (float(a1 - a0 + pad), float(b1 - b0 + pad), height), 'points': len(q), 'completed': False}
+        obj = {"x": float(centre[0]), "y": float(centre[1]), "yaw": math.atan2(u[1], u[0]),
+               "size": (float(a1 - a0 + pad), float(b1 - b0 + pad), height), "points": len(q), "completed": False}
         if camera is not None and known_size is not None:
             obj = fit_known_box(obj, xy, u, camera, known_size)
-            if obj.get('ambiguous'):
+            if obj.get("ambiguous"):
                 continue
         elif camera is not None:
             obj = complete_far_side(obj, xy, camera, table_z, pad)
         if with_points:
-            obj['pts'] = q
+            obj["pts"] = q
         found.append(obj)
     return found
 
@@ -195,7 +195,7 @@ def grasp_top(pts, table_z, arm_xy, slice_h=0.03, max_thick=0.045, rim_band=0.02
     v = np.array([-u[1], u[0]])
     b = (xy - c) @ v
     b0, b1 = np.percentile(b, [5, 95])
-    part = 'top'
+    part = "top"
     if b1 - b0 > max_thick:                                   # wide: take the side facing the arm
         d = np.asarray(arm_xy, float) - c
         d /= np.linalg.norm(d)
@@ -212,39 +212,39 @@ def grasp_top(pts, table_z, arm_xy, slice_h=0.03, max_thick=0.045, rim_band=0.02
             d = v if v @ d > 0 else -v
             b = (xy - c) @ v
             b0, b1 = np.percentile(b, [5, 95])
-            part = 'side'
+            part = "side"
     a = (xy - c) @ u
     a0, a1 = np.percentile(a, [5, 95])
     centre = c + u * (a0 + a1) / 2 + v * (b0 + b1) / 2
-    return {'x': float(centre[0]), 'y': float(centre[1]), 'z': float(table_z + top), 'yaw': math.atan2(u[1], u[0]),
-            'length': float(a1 - a0), 'thickness': float(max(b1 - b0, 0.005)), 'height': top, 'part': part}
+    return {"x": float(centre[0]), "y": float(centre[1]), "z": float(table_z + top), "yaw": math.atan2(u[1], u[0]),
+            "length": float(a1 - a0), "thickness": float(max(b1 - b0, 0.005)), "height": top, "part": part}
 
 
 def fit_known_box(obj, xy, u, camera, size):
     """Box of known size: the seen face fixes one edge (position + turn), the rest lies behind it."""
     long_, short = max(size[0], size[1]), min(size[0], size[1])
     v = np.array([-u[1], u[0]])
-    if (np.array([obj['x'], obj['y']]) - np.asarray(camera, float)[:2]) @ v < 0:
+    if (np.array([obj["x"], obj["y"]]) - np.asarray(camera, float)[:2]) @ v < 0:
         v = -v                                     # v points away from the camera
     a, b = xy @ u, xy @ v
     a0, a1 = np.percentile(a, [4, 96])
     near = np.percentile(b, 4)
     seen = a1 - a0
     if 1.4 * short < seen < 0.6 * long_:
-        return dict(obj, ambiguous=True, seen=(float(seen), obj['size'][2]))   # can't tell which side it sees
+        return dict(obj, ambiguous=True, seen=(float(seen), obj["size"][2]))   # can't tell which side it sees
     along, depth = (long_, short) if seen > (long_ + short) / 2 else (short, long_)
     centre = u * (a0 + a1) / 2 + v * (near + depth / 2)
     return dict(obj, x=float(centre[0]), y=float(centre[1]), yaw=math.atan2(u[1], u[0]),
-                size=(float(along), float(depth), float(size[2])), seen=(float(seen), obj['size'][2]),
+                size=(float(along), float(depth), float(size[2])), seen=(float(seen), obj["size"][2]),
                 completed=True)
 
 
 def complete_far_side(obj, xy, camera, table_z, pad):
     """Low view: measure along / across the line of sight; a shallow depth means the back is hidden."""
     cam = np.asarray(camera, float)
-    d = np.array([obj['x'], obj['y']]) - cam[:2]
+    d = np.array([obj["x"], obj["y"]]) - cam[:2]
     dist = float(np.linalg.norm(d))
-    if dist < 1e-6 or math.atan2(cam[2] - table_z - obj['size'][2], dist) > LOW_VIEW:
+    if dist < 1e-6 or math.atan2(cam[2] - table_z - obj["size"][2], dist) > LOW_VIEW:
         return obj
     d /= dist
     perp = np.array([-d[1], d[0]])
@@ -257,7 +257,7 @@ def complete_far_side(obj, xy, camera, table_z, pad):
     near = a0 * d + (b0 + b1) / 2 * perp               # the seen front, middle across
     centre = near + d * across / 2
     return dict(obj, x=float(centre[0]), y=float(centre[1]), yaw=math.atan2(d[1], d[0]),
-                size=(float(across), float(across), obj['size'][2]), completed=True)
+                size=(float(across), float(across), obj["size"][2]), completed=True)
 
 
 def fuse(history, near=0.03, min_frames=2):
@@ -269,9 +269,9 @@ def fuse(history, near=0.03, min_frames=2):
     groups = []
     for k, frame in enumerate(history):
         for o in frame:
-            g = min(groups, key=lambda g: math.hypot(g[0]['x'] - o['x'], g[0]['y'] - o['y']), default=None)
-            if g is not None and math.hypot(g[0]['x'] - o['x'], g[0]['y'] - o['y']) < near and k not in g[1]:
-                g[0].setdefault('_all', [g[0]]).append(o)
+            g = min(groups, key=lambda g: math.hypot(g[0]["x"] - o["x"], g[0]["y"] - o["y"]), default=None)
+            if g is not None and math.hypot(g[0]["x"] - o["x"], g[0]["y"] - o["y"]) < near and k not in g[1]:
+                g[0].setdefault("_all", [g[0]]).append(o)
                 g[1].add(k)
             else:
                 groups.append([dict(o), {k}])
@@ -280,11 +280,11 @@ def fuse(history, near=0.03, min_frames=2):
     for first, frames in groups:
         if len(frames) < need:
             continue
-        same = first.get('_all', [first])
-        yaw0 = same[-1]['yaw']
-        yaws = [yaw0 + math.remainder(o['yaw'] - yaw0, math.pi) for o in same]   # boxes repeat every 180 deg
-        out.append({'x': float(np.median([o['x'] for o in same])), 'y': float(np.median([o['y'] for o in same])),
-                    'yaw': float(np.median(yaws)),
-                    'size': tuple(float(np.median([o['size'][j] for o in same])) for j in range(3)),
-                    'points': same[-1]['points'], 'frames': len(frames)})
+        same = first.get("_all", [first])
+        yaw0 = same[-1]["yaw"]
+        yaws = [yaw0 + math.remainder(o["yaw"] - yaw0, math.pi) for o in same]   # boxes repeat every 180 deg
+        out.append({"x": float(np.median([o["x"] for o in same])), "y": float(np.median([o["y"] for o in same])),
+                    "yaw": float(np.median(yaws)),
+                    "size": tuple(float(np.median([o["size"][j] for o in same])) for j in range(3)),
+                    "points": same[-1]["points"], "frames": len(frames)})
     return out

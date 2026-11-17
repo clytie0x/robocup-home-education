@@ -27,7 +27,7 @@ class RealArm:
         self.gripper_torque_limit = gripper_torque_limit
         missing = [i for i in IDS if not self.bus.ping(i)]
         if missing:
-            raise RuntimeError(f'servos not answering: {missing}. Check 12V power and USB cable.')
+            raise RuntimeError(f"servos not answering: {missing}. Check 12V power and USB cable.")
 
     def configure(self):
         """RAM-only settings, re-applied at every start. EEPROM stays untouched (Lock=1)."""
@@ -46,7 +46,7 @@ class RealArm:
             for addr, val in ((ft.P_GAIN, self.p[k]), (ft.D_GAIN, self.d[k]), (ft.ACCELERATION, self.acc[k]),
                               (ft.CW_DEAD_ZONE, self.dead_zone[k]), (ft.CCW_DEAD_ZONE, self.dead_zone[k])):
                 if not 0 <= val <= 254:
-                    raise ValueError(f'ID{i}: gain {val} out of range')
+                    raise ValueError(f"ID{i}: gain {val} out of range")
                 self.bus.write1(i, addr, val)
 
     def read_positions(self):
@@ -71,8 +71,8 @@ class RealArm:
         for i, d in data.items():
             load = (d[0] | (d[1] << 8))
             load = -(load & 0x3FF) if load & 0x400 else load & 0x3FF
-            out[i] = {'load': load / 10.0, 'voltage': d[2] / 10.0, 'temp': d[3], 'status': d[5],
-                      'torque': torque[i][0]}
+            out[i] = {"load": load / 10.0, "voltage": d[2] / 10.0, "temp": d[3], "status": d[5],
+                      "torque": torque[i][0]}
         return out
 
     def gripper_load(self):
@@ -113,7 +113,7 @@ class SimArm:
             self.goal = dict(self.pos)
 
     def health(self):
-        return {i: {'load': 0.0, 'voltage': 12.0, 'temp': 30, 'status': 0, 'torque': int(self.enabled)}
+        return {i: {"load": 0.0, "voltage": 12.0, "temp": 30, "status": 0, "torque": int(self.enabled)}
                 for i in IDS}
 
     def gripper_load(self):

@@ -8,12 +8,12 @@ import pytest
 
 from voice_assistant.rules import RuleParser
 
-ALLOWED = ['none', 'move_forward', 'move_backward', 'turn', 'stop', 'go_to', 'follow_me', 'look_at',
-           'drop_bag', 'carry_bag', 'beatbox', 'go_back', 'resume']
+ALLOWED = ["none", "move_forward", "move_backward", "turn", "stop", "go_to", "follow_me", "look_at",
+           "drop_bag", "carry_bag", "beatbox", "go_back", "resume"]
 
 
 def parser(task_words=True):
-    p = RuleParser('I can carry your bag and stop.', ALLOWED, 'Test Robot')
+    p = RuleParser("I can carry your bag and stop.", ALLOWED, "Test Robot")
     p.task_words = task_words
     return p
 

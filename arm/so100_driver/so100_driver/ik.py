@@ -19,7 +19,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-ARM = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll')
+ARM = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
 
 FIXED_INNER_X = 0.008     # fixed finger inner face (gripper frame x)
 TIP_Y = -0.106            # finger tips (gripper frame y)
@@ -94,11 +94,11 @@ def _wrap_into(a, lo, hi):
 
 def read_stl(path, max_points=400):
     """Vertices of a binary STL (subsampled), as an (n, 3) array."""
-    with open(path, 'rb') as f:
+    with open(path, "rb") as f:
         data = f.read()
-    n = struct.unpack('<I', data[80:84])[0]
-    tri = np.frombuffer(data[84:84 + n * 50], dtype=np.dtype([('n', '<f4', 3), ('v', '<f4', 9), ('a', '<u2')]))
-    v = np.unique(tri['v'].reshape(-1, 3).astype(float).round(4), axis=0)
+    n = struct.unpack("<I", data[80:84])[0]
+    tri = np.frombuffer(data[84:84 + n * 50], dtype=np.dtype([("n", "<f4", 3), ("v", "<f4", 9), ("a", "<u2")]))
+    v = np.unique(tri["v"].reshape(-1, 3).astype(float).round(4), axis=0)
     if len(v) > max_points:   # keep the extremes along z plus an even sample
         idx = np.unique(np.r_[np.linspace(0, len(v) - 1, max_points).astype(int), np.argsort(v[:, 2])[:40]])
         v = v[idx]
@@ -110,23 +110,23 @@ class Kinematics:
         root = ET.fromstring(urdf_xml)
         self.meshes = {}          # link -> (n, 3) vertices in the link frame (for the table check)
         if mesh_dir:
-            for link in root.findall('link'):
-                pts = [read_stl(os.path.join(mesh_dir, os.path.basename(m.get('filename'))))
-                       for m in link.findall('visual/geometry/mesh')]
+            for link in root.findall("link"):
+                pts = [read_stl(os.path.join(mesh_dir, os.path.basename(m.get("filename"))))
+                       for m in link.findall("visual/geometry/mesh")]
                 if pts:
-                    self.meshes[link.get('name')] = np.vstack(pts)
+                    self.meshes[link.get("name")] = np.vstack(pts)
         self.joints = []          # (name, parent, child, origin 4x4, axis or None)
         self.urdf_limits = {}
-        for j in root.findall('joint'):
-            o = j.find('origin')
-            xyz = [float(v) for v in o.get('xyz', '0 0 0').split()] if o is not None else [0, 0, 0]
-            rpy = [float(v) for v in o.get('rpy', '0 0 0').split()] if o is not None else [0, 0, 0]
+        for j in root.findall("joint"):
+            o = j.find("origin")
+            xyz = [float(v) for v in o.get("xyz", "0 0 0").split()] if o is not None else [0, 0, 0]
+            rpy = [float(v) for v in o.get("rpy", "0 0 0").split()] if o is not None else [0, 0, 0]
             axis = None
-            if j.get('type') != 'fixed':
-                axis = [float(v) for v in j.find('axis').get('xyz').split()]
-                lim = j.find('limit')
-                self.urdf_limits[j.get('name')] = (float(lim.get('lower')), float(lim.get('upper')))
-            self.joints.append((j.get('name'), j.find('parent').get('link'), j.find('child').get('link'),
+            if j.get("type") != "fixed":
+                axis = [float(v) for v in j.find("axis").get("xyz").split()]
+                lim = j.find("limit")
+                self.urdf_limits[j.get("name")] = (float(lim.get("lower")), float(lim.get("upper")))
+            self.joints.append((j.get("name"), j.find("parent").get("link"), j.find("child").get("link"),
                                 _tf(xyz, _rpy(*rpy)), axis))
         self.limits = dict(self.urdf_limits)
         if limits:
@@ -134,7 +134,7 @@ class Kinematics:
         self._measure()
 
     def frames(self, q):
-        world = {'base': np.eye(4)}
+        world = {"base": np.eye(4)}
         todo = list(self.joints)
         while todo:
             rest = []
@@ -169,33 +169,33 @@ class Kinematics:
 
     def gripper_point(self, q, local):
         """World position of a point given in the gripper link frame."""
-        return (self.frames(q)['gripper'] @ np.array([*local, 1.0]))[:3]
+        return (self.frames(q)["gripper"] @ np.array([*local, 1.0]))[:3]
 
     # ------------------------------------------------------------------- planar model from the URDF
     def _measure(self):
         z = {n: 0.0 for n in ARM}
         w = self.frames(z)
-        self.pan_point = w['shoulder'][:3, 3][:2].copy()
-        self.pan_axis = w['shoulder'][:3, :3] @ np.array(self.joints_axis('shoulder_pan'))
+        self.pan_point = w["shoulder"][:3, 3][:2].copy()
+        self.pan_axis = w["shoulder"][:3, :3] @ np.array(self.joints_axis("shoulder_pan"))
         if abs(abs(self.pan_axis[2]) - 1) > 1e-3:
-            raise ValueError('shoulder_pan axis is not vertical')
-        ref = {**z, 'shoulder_lift': 1.2, 'elbow_flex': -1.2}
+            raise ValueError("shoulder_pan axis is not vertical")
+        ref = {**z, "shoulder_lift": 1.2, "elbow_flex": -1.2}
         self.heading0 = self._heading(ref)
-        self.pan_sign = 1.0 if self._ang(self._heading({**ref, 'shoulder_pan': 0.3}) - self.heading0) > 0 else -1.0
-        self.l1 = np.linalg.norm(self._rz(z, 'lower_arm') - self._rz(z, 'upper_arm'))
-        self.l2 = np.linalg.norm(self._rz(z, 'wrist') - self._rz(z, 'lower_arm'))
-        self.wrist_to_gripper = np.linalg.norm(w['gripper'][:3, 3] - w['wrist'][:3, 3])
-        self.s = self._rz(z, 'upper_arm')
+        self.pan_sign = 1.0 if self._ang(self._heading({**ref, "shoulder_pan": 0.3}) - self.heading0) > 0 else -1.0
+        self.l1 = np.linalg.norm(self._rz(z, "lower_arm") - self._rz(z, "upper_arm"))
+        self.l2 = np.linalg.norm(self._rz(z, "wrist") - self._rz(z, "lower_arm"))
+        self.wrist_to_gripper = np.linalg.norm(w["gripper"][:3, 3] - w["wrist"][:3, 3])
+        self.s = self._rz(z, "upper_arm")
         # angle model: b1 = c1 + a1*lift, b2 = c2 + a2*lift + a3*elbow, phi = c3 + a4*lift + a5*elbow + a6*wflex
         base = self._angles(z)
         d = 0.2
-        dl = (self._angles({**z, 'shoulder_lift': d}) - base) / d
-        de = (self._angles({**z, 'elbow_flex': -d}) - base) / -d
-        dw = (self._angles({**z, 'wrist_flex': -d}) - base) / -d
+        dl = (self._angles({**z, "shoulder_lift": d}) - base) / d
+        de = (self._angles({**z, "elbow_flex": -d}) - base) / -d
+        dw = (self._angles({**z, "wrist_flex": -d}) - base) / -d
         self.c = base
         self.a = np.array([dl, de, dw]).round()      # each entry is -1, 0 or +1
         if not (np.allclose(self.a, np.array([dl, de, dw]), atol=1e-6)):
-            raise ValueError('lift/elbow/wrist axes are not parallel')
+            raise ValueError("lift/elbow/wrist axes are not parallel")
 
     def joints_axis(self, name):
         return next(a for n, _, _, _, a in self.joints if n == name)
@@ -205,27 +205,27 @@ class Kinematics:
         return (a + math.pi) % (2 * math.pi) - math.pi
 
     def _heading(self, q):
-        p = self.frames(q)['wrist'][:3, 3][:2] - self.pan_point
+        p = self.frames(q)["wrist"][:3, 3][:2] - self.pan_point
         return math.atan2(p[1], p[0])
 
     def _rz(self, q, link):
         """(r, z) of a link origin in the arm plane (r measured along the arm heading)."""
         p = self.frames(q)[link][:3, 3]
-        h = self.heading0 + self.pan_sign * q.get('shoulder_pan', 0.0)
+        h = self.heading0 + self.pan_sign * q.get("shoulder_pan", 0.0)
         u = np.array([math.cos(h), math.sin(h)])
         return np.array([float(np.dot(p[:2] - self.pan_point, u)), p[2]])
 
     def _angles(self, q):
         w = self.frames(q)
-        s, e, wr = self._rz(q, 'upper_arm'), self._rz(q, 'lower_arm'), self._rz(q, 'wrist')
-        h = self.heading0 + self.pan_sign * q.get('shoulder_pan', 0.0)
-        tool = -w['wrist'][:3, 1]
+        s, e, wr = self._rz(q, "upper_arm"), self._rz(q, "lower_arm"), self._rz(q, "wrist")
+        h = self.heading0 + self.pan_sign * q.get("shoulder_pan", 0.0)
+        tool = -w["wrist"][:3, 1]
         t = np.array([tool[0] * math.cos(h) + tool[1] * math.sin(h), tool[2]])
         return np.array([math.atan2(*(e - s)[::-1]), math.atan2(*(wr - e)[::-1]), math.atan2(t[1], t[0])])
 
     # ------------------------------------------------------------------------------------------ IK
     def heading(self, q):
-        return self.heading0 + self.pan_sign * q['shoulder_pan']
+        return self.heading0 + self.pan_sign * q["shoulder_pan"]
 
     def tool_dir(self, heading, pitch):
         return np.array([math.cos(pitch) * math.cos(heading), math.cos(pitch) * math.sin(heading), math.sin(pitch)])
@@ -239,7 +239,7 @@ class Kinematics:
         r = float(np.hypot(*v))
         if r < 1e-6:
             return []
-        pan = _wrap_into(self._ang((math.atan2(v[1], v[0]) - self.heading0) * self.pan_sign), *self.limits['shoulder_pan'])
+        pan = _wrap_into(self._ang((math.atan2(v[1], v[0]) - self.heading0) * self.pan_sign), *self.limits["shoulder_pan"])
         if pan is None:
             return []
         reach = self.wrist_to_gripper + depth
@@ -257,26 +257,26 @@ class Kinematics:
             lift = self._ang(b1 - self.c[0]) / self.a[0][0]
             elbow = self._ang(b2 - self.c[1] - self.a[0][1] * lift) / self.a[1][1]
             wflex = self._ang(pitch - self.c[2] - self.a[0][2] * lift - self.a[1][2] * elbow) / self.a[2][2]
-            q = {'shoulder_pan': pan}
+            q = {"shoulder_pan": pan}
             ok = True
-            for name, val in (('shoulder_lift', lift), ('elbow_flex', elbow), ('wrist_flex', wflex)):
+            for name, val in (("shoulder_lift", lift), ("elbow_flex", elbow), ("wrist_flex", wflex)):
                 q[name] = _wrap_into(val, *self.limits[name])
                 ok = ok and q[name] is not None
             if ok:
-                q['wrist_roll'] = 0.0
-                q['_branch'] = sgn
+                q["wrist_roll"] = 0.0
+                q["_branch"] = sgn
                 out.append(q)
         return out
 
     def roll_for(self, q, close_dir, prefer=0.0):
         """wrist_roll that lines the jaw closing axis up with `close_dir` (either sign). (roll, alignment)."""
-        qa = {**q, 'wrist_roll': 0.0}
-        qb = {**q, 'wrist_roll': math.pi / 2}
-        a = self.frames(qa)['gripper'][:3, 0]
-        b = self.frames(qb)['gripper'][:3, 0]
+        qa = {**q, "wrist_roll": 0.0}
+        qb = {**q, "wrist_roll": math.pi / 2}
+        a = self.frames(qa)["gripper"][:3, 0]
+        b = self.frames(qb)["gripper"][:3, 0]
         c = np.asarray(close_dir, float) / np.linalg.norm(close_dir)
         best = math.atan2(float(b @ c), float(a @ c))
-        lo, hi = self.limits['wrist_roll']
+        lo, hi = self.limits["wrist_roll"]
         cands = [x for x in (best + k * math.pi for k in range(-3, 4)) if lo <= x <= hi]
         if not cands:
             return None, 0.0
@@ -284,7 +284,7 @@ class Kinematics:
         return roll, abs(float(a @ c) * math.cos(roll) + float(b @ c) * math.sin(roll))
 
     def close_axis(self, q):
-        return self.frames(q)['gripper'][:3, 0]
+        return self.frames(q)["gripper"][:3, 0]
 
     # ------------------------------------------------------------------------------- user frame
     def to_user(self, p):
@@ -329,7 +329,7 @@ class PlanError(Exception):
         super().__init__(msg)
         self.stage = stage      # how far planning got (higher = more informative reason)
         # API error code (see so100_interfaces): table hits COLLISION, width TOO_WIDE, otherwise UNREACHABLE
-        self.code = code or ('COLLISION' if 'ชน' in msg else 'TOO_WIDE' if 'เกินก้าม' in msg else 'UNREACHABLE')
+        self.code = code or ("COLLISION" if "ชน" in msg else "TOO_WIDE" if "เกินก้าม" in msg else "UNREACHABLE")
 
 
 class GraspPlanner:
@@ -339,8 +339,8 @@ class GraspPlanner:
     STEP = 0.005         # straight-line interpolation step (m)
     TABLE_CLEAR = 0.006  # finger tips stay this far above the table top
     ARM_CLEAR = 0.012    # arm links (motors, wrist) stay this far above the table top
-    ARM_LINKS = ('shoulder', 'upper_arm', 'lower_arm', 'wrist')
-    HAND_LINKS = ('gripper', 'jaw')
+    ARM_LINKS = ("shoulder", "upper_arm", "lower_arm", "wrist")
+    HAND_LINKS = ("gripper", "jaw")
 
     DECK_CLEAR = 0.012   # arm and hand stay this far from the robot body (deck_box)
     BAG_OVER_DECK = 0.20  # things stand on the deck (computer, power strip): a bag stays off the deck below this
@@ -354,38 +354,38 @@ class GraspPlanner:
     # pitch candidates: straight down first, then tilting up towards a horizontal side grasp
     PITCHES = [math.radians(a) for a in range(-90, 1, 5)]
 
-    def pitches(self, mode='auto'):
+    def pitches(self, mode="auto"):
         """Pitch candidates for a grasp mode: 'top' = (nearly) straight down, 'side' = tilted/horizontal."""
-        if mode in ('', 'auto', None):
+        if mode in ("", "auto", None):
             return self.PITCHES
-        if mode == 'top':
+        if mode == "top":
             return [p for p in self.PITCHES if p <= self.NEAR_DOWN]
-        if mode == 'side':
+        if mode == "side":
             return [p for p in self.PITCHES if p > self.NEAR_DOWN]
-        raise PlanError(f'grasp_mode ไม่รู้จัก: {mode!r} (ใช้ auto / top / side)', 9, 'FAILED')
+        raise PlanError(f"grasp_mode ไม่รู้จัก: {mode!r} (ใช้ auto / top / side)", 9, "FAILED")
 
-    def picks(self, obj, current=None, mode='auto', errors=None, target=None, wide=False, grip_depth=None):
+    def picks(self, obj, current=None, mode="auto", errors=None, target=None, wide=False, grip_depth=None):
         """All fully checked ways to pick `obj`, best first (generator). wide: the jaws open fully
         (JAW_G_MAX) instead of the object plus the margins (a bag part whose place is known only roughly).
         grip_depth: finger tips this far below the top on a top-down grasp (default GRIP_DEPTH)."""
         k = self.k
         errors = [] if errors is None else errors
-        prefer = (current or {}).get('wrist_roll', 0.0)
+        prefer = (current or {}).get("wrist_roll", 0.0)
         for pitch in self.pitches(mode):
             for branch in (1, -1):
                 centre = np.array([obj.x, obj.y, self._grasp_height(obj, pitch, grip_depth)])
                 sols = k.solve(centre, pitch, branch=branch)
                 if not sols:
-                    errors.append(PlanError('เอื้อมไม่ถึงตำแหน่งของ', 0))
+                    errors.append(PlanError("เอื้อมไม่ถึงตำแหน่งของ", 0))
                     continue
                 if target is not None and not k.solve(np.array([target.x, target.y, centre[2] + 0.005]), pitch,
                                                       branch=branch):
-                    errors.append(PlanError('เอื้อมไม่ถึงจุดวาง (ด้วยท่าจับเดียวกัน)', 4))   # cheap early reject
+                    errors.append(PlanError("เอื้อมไม่ถึงจุดวาง (ด้วยท่าจับเดียวกัน)", 4))   # cheap early reject
                     continue
                 for extent, close_dir in self._close_dirs(obj, k.heading(sols[0]), pitch):
                     if extent > MAX_OBJECT + 1e-4:     # (rounding: a 6.5 cm side may come out as 6.50001)
                         errors.append(PlanError(
-                            f'ของกว้าง {extent * 100:.1f} ซม. เกินก้าม (สูงสุด {MAX_OBJECT * 100:.1f})', 1))
+                            f"ของกว้าง {extent * 100:.1f} ซม. เกินก้าม (สูงสุด {MAX_OBJECT * 100:.1f})", 1))
                         continue
                     try:
                         gap = jaw_gap(JAW_G_MAX) if wide else opening_for(extent)
@@ -395,13 +395,13 @@ class GraspPlanner:
 
     @staticmethod
     def _best(errors):
-        return max(errors, key=lambda e: e.stage) if errors else PlanError('เอื้อมไม่ถึงตำแหน่งของ', 0)
+        return max(errors, key=lambda e: e.stage) if errors else PlanError("เอื้อมไม่ถึงตำแหน่งของ", 0)
 
     @staticmethod
     def _join(held, place):
-        return {**held, **place, 'steps': {**held['steps'], **place['steps']}}
+        return {**held, **place, "steps": {**held["steps"], **place["steps"]}}
 
-    def plan_pick(self, obj, current=None, mode='auto', wide=False, grip_depth=None):
+    def plan_pick(self, obj, current=None, mode="auto", wide=False, grip_depth=None):
         """Pick only (Pick action / voice 'carry'; wide, grip_depth: see picks)."""
         errors = []
         for held in self.picks(obj, current, mode, errors, wide=wide, grip_depth=grip_depth):
@@ -412,7 +412,7 @@ class GraspPlanner:
         """Place only, keeping the grasp `held` from plan_pick (Place action / voice 'drop')."""
         return self._join(held, self._place_part(obj, held, target))
 
-    def plan(self, obj, target, current=None, mode='auto'):
+    def plan(self, obj, target, current=None, mode="auto"):
         """Pick and place: the first grasp that also works at the target (same grasp at both ends)."""
         errors = []
         for held in self.picks(obj, current, mode, errors, target):
@@ -447,26 +447,26 @@ class GraspPlanner:
         for _ in range(4):           # offset depends on roll, roll depends on pan: converge
             sols = self.k.solve(point, pitch, branch=branch)
             if not sols:
-                raise PlanError('เอื้อมไม่ถึงบางช่วงของการหยิบ/วาง', 3)
+                raise PlanError("เอื้อมไม่ถึงบางช่วงของการหยิบ/วาง", 3)
             q = sols[0]
             roll, align = self.k.roll_for(q, close_dir, prefer_roll)
             if roll is None or align < 0.95:
-                raise PlanError('หมุนข้อมือให้ก้ามตรงกับของไม่ได้', 3)
-            q['wrist_roll'] = roll
+                raise PlanError("หมุนข้อมือให้ก้ามตรงกับของไม่ได้", 3)
+            q["wrist_roll"] = roll
             prefer_roll = roll   # stick to this jaw side (+90 vs -90 can tie and flip every iteration)
             point = np.asarray(centre, float) - x_off * self.k.close_axis(q)
         err = np.linalg.norm(self.k.gripper_point(q, (x_off, GRASP_Y, 0)) - centre)
         if err > 0.002:
-            raise PlanError(f'IK ไม่ลงตัว ({err * 1000:.0f} มม.)', 3)
+            raise PlanError(f"IK ไม่ลงตัว ({err * 1000:.0f} มม.)", 3)
         return q
 
     def describe(self, pitch):
         d = math.degrees(-pitch)        # 90 = pointing straight down, 0 = horizontal
         if d >= 89.5:
-            return 'จับจากด้านบน (ก้ามชี้ลงตรง)'
+            return "จับจากด้านบน (ก้ามชี้ลงตรง)"
         if pitch <= self.NEAR_DOWN:
-            return f'จับจากด้านบน (ก้ามเอียงจากแนวดิ่ง {90 - d:.0f}°)'
-        return f'จับจากด้านข้าง (ก้ามก้มลงจากแนวนอน {d:.0f}°)'
+            return f"จับจากด้านบน (ก้ามเอียงจากแนวดิ่ง {90 - d:.0f}°)"
+        return f"จับจากด้านข้าง (ก้ามก้มลงจากแนวนอน {d:.0f}°)"
 
     def _tips_low(self, q, gap):
         pts = [(FIXED_INNER_X + 0.005, TIP_Y, 0.0), (FIXED_INNER_X - gap - 0.005, TIP_Y + 0.003, 0.0)]
@@ -478,15 +478,15 @@ class GraspPlanner:
         for q in qs:
             if not self.k.meshes:
                 if self._tips_low(q, gap) < self.table_z + self.TABLE_CLEAR:
-                    raise PlanError(f'{what}: ปลายก้ามจะชนโต๊ะ', stage)
+                    raise PlanError(f"{what}: ปลายก้ามจะชนโต๊ะ", stage)
                 continue
-            qj = {**q, 'gripper': jaw}
+            qj = {**q, "gripper": jaw}
             if self.k.lowest(qj, self.ARM_LINKS) < self.table_z + self.ARM_CLEAR:
-                raise PlanError(f'{what}: ข้อแขน/ข้อมือจะชนโต๊ะ', stage)
+                raise PlanError(f"{what}: ข้อแขน/ข้อมือจะชนโต๊ะ", stage)
             if self.k.lowest(qj, self.HAND_LINKS) < self.table_z + self.TABLE_CLEAR - 0.002:
-                raise PlanError(f'{what}: ก้ามจะชนโต๊ะ', stage)
+                raise PlanError(f"{what}: ก้ามจะชนโต๊ะ", stage)
             if self.obstacles and self.hits_body(qj):
-                raise PlanError(f'{what}: แขนจะชนตัวหุ่น', stage)
+                raise PlanError(f"{what}: แขนจะชนตัวหุ่น", stage)
 
     def hits_body(self, q):
         pts = self.k.link_points(q, self.ARM_LINKS + self.HAND_LINKS)
@@ -501,7 +501,7 @@ class GraspPlanner:
         for i in range(1, n + 1):
             q = self._pose(a + (b - a) * i / n, pitch, close_dir, gap, branch, roll, x_off)
             if prev is not None and max(abs(q[j] - prev[j]) for j in ARM) > 0.25:
-                raise PlanError('ท่าแขนกระโดดกลางทาง', 3)
+                raise PlanError("ท่าแขนกระโดดกลางทาง", 3)
             out.append(q)
             prev = q
         return out
@@ -509,47 +509,47 @@ class GraspPlanner:
     def _pick_part(self, obj, pitch, branch, centre, close_dir, extent, gap, prefer):
         k = self.k
         grasp = self._pose(centre, pitch, close_dir, gap, branch, prefer)
-        self.check_table([grasp], gap, 'ตอนหยิบ', 2)
+        self.check_table([grasp], gap, "ตอนหยิบ", 2)
         back = self.approach_dist(obj, centre, pitch)
         pre = centre - back * k.tool_dir(k.heading(grasp), pitch)
         lift = centre + np.array([0, 0, self.LIFT])
         steps = {
-            'pre': self._pose(pre, pitch, close_dir, gap, branch, grasp['wrist_roll']),
-            'approach': self._line(pre, centre, pitch, close_dir, gap, branch, grasp['wrist_roll']),
-            'lift': self._line(centre, lift, pitch, close_dir, gap, branch, grasp['wrist_roll']),
+            "pre": self._pose(pre, pitch, close_dir, gap, branch, grasp["wrist_roll"]),
+            "approach": self._line(pre, centre, pitch, close_dir, gap, branch, grasp["wrist_roll"]),
+            "lift": self._line(centre, lift, pitch, close_dir, gap, branch, grasp["wrist_roll"]),
         }
-        self.check_table([steps['pre']] + steps['approach'] + steps['lift'], gap, 'ช่วงหยิบ', 2)
+        self.check_table([steps["pre"]] + steps["approach"] + steps["lift"], gap, "ช่วงหยิบ", 2)
         return {
-            'pitch': pitch, 'branch': branch, 'extent': extent, 'gap': gap, 'close_dir': close_dir,
-            'jaw_open': min(jaw_for_gap(gap), JAW_G_MAX), 'grasp_centre': centre, 'grasp': grasp,
-            'back': back, 'object': (obj.x, obj.y, obj.yaw, obj.size), 'steps': steps,
+            "pitch": pitch, "branch": branch, "extent": extent, "gap": gap, "close_dir": close_dir,
+            "jaw_open": min(jaw_for_gap(gap), JAW_G_MAX), "grasp_centre": centre, "grasp": grasp,
+            "back": back, "object": (obj.x, obj.y, obj.yaw, obj.size), "steps": steps,
             # fully closed jaws = nothing caught. A thin part (paper bag wall, handle) closes the jaws almost
             # fully too, so it cannot be told from a miss: no check (None)
-            'miss_below': 0.05 if extent >= 0.02 else None,
-            'mode': self.describe(pitch),
+            "miss_below": 0.05 if extent >= 0.02 else None,
+            "mode": self.describe(pitch),
         }
 
     def _place_part(self, obj, held, target):
         k = self.k
-        pitch, branch, gap, back = held['pitch'], held['branch'], held['gap'], held['back']
+        pitch, branch, gap, back = held["pitch"], held["branch"], held["gap"], held["back"]
         # place: same pitch keeps the object upright; bottom 5 mm above the table
-        place = np.array([target.x, target.y, held['grasp_centre'][2] + 0.005])
+        place = np.array([target.x, target.y, held["grasp_centre"][2] + 0.005])
         sols = k.solve(place, pitch, branch=branch)
         if not sols:
-            raise PlanError('เอื้อมไม่ถึงจุดวาง (ด้วยท่าจับเดียวกัน)', 4)
+            raise PlanError("เอื้อมไม่ถึงจุดวาง (ด้วยท่าจับเดียวกัน)", 4)
         p_head = k.heading(sols[0])
-        place_close, final_yaw = self._place_close(obj, target.yaw, pitch, held['close_dir'], p_head, held['grasp'])
-        place_q = self._pose(place, pitch, place_close, gap, branch, held['grasp']['wrist_roll'])
-        self.check_table([place_q], gap, 'ตอนวาง', 4)
+        place_close, final_yaw = self._place_close(obj, target.yaw, pitch, held["close_dir"], p_head, held["grasp"])
+        place_q = self._pose(place, pitch, place_close, gap, branch, held["grasp"]["wrist_roll"])
+        self.check_table([place_q], gap, "ตอนวาง", 4)
         above_place = place + np.array([0, 0, self.LIFT])
         retreat = place - back * k.tool_dir(p_head, pitch)
         steps = {
-            'above_place': self._pose(above_place, pitch, place_close, gap, branch, place_q['wrist_roll']),
-            'lower': self._line(above_place, place, pitch, place_close, gap, branch, place_q['wrist_roll']),
-            'retreat': self._line(place, retreat, pitch, place_close, gap, branch, place_q['wrist_roll']),
+            "above_place": self._pose(above_place, pitch, place_close, gap, branch, place_q["wrist_roll"]),
+            "lower": self._line(above_place, place, pitch, place_close, gap, branch, place_q["wrist_roll"]),
+            "retreat": self._line(place, retreat, pitch, place_close, gap, branch, place_q["wrist_roll"]),
         }
-        self.check_table([steps['above_place']] + steps['lower'] + steps['retreat'], gap, 'ช่วงวาง', 4)
-        return {'place_centre': place, 'final_yaw': final_yaw, 'steps': steps}
+        self.check_table([steps["above_place"]] + steps["lower"] + steps["retreat"], gap, "ช่วงวาง", 4)
+        return {"place_centre": place, "final_yaw": final_yaw, "steps": steps}
 
     def approach_dist(self, obj, centre, pitch):
         """How far back along the tool axis the approach starts: far enough that the finger tips start
@@ -574,7 +574,7 @@ class GraspPlanner:
     # A bag held by its top hangs straight down `hang` m below the grasp point (it stood on the floor =
     # table_z, so hang = grasp height above it). It is modelled as a vertical cylinder of radius bag_r.
     def held_point(self, q, held):
-        return self.k.gripper_point(q, (object_offset(held['gap']), GRASP_Y, 0))
+        return self.k.gripper_point(q, (object_offset(held["gap"]), GRASP_Y, 0))
 
     def bag_clear(self, q, hang, bag_r, held):
         """Bag hanging from the jaws in pose q stays above the floor and off the robot body. Straight above
@@ -583,7 +583,7 @@ class GraspPlanner:
         bottom = g[2] - hang
         if bottom < self.table_z + 0.003:
             return False
-        if np.linalg.norm(g[:2] - held['grasp_centre'][:2]) < 0.02:
+        if np.linalg.norm(g[:2] - held["grasp_centre"][:2]) < 0.02:
             return True
         for lo, hi in self.obstacles:
             if bottom > hi[2] + self.BAG_OVER_DECK or g[2] < lo[2]:
@@ -601,10 +601,10 @@ class GraspPlanner:
         return [{j: qa[j] + (qb[j] - qa[j]) * i / n for j in ARM} for i in range(1, n + 1)]
 
     def check_path(self, qs, held, hang, bag_r, what, stage=5):
-        self.check_table(qs, held['gap'], what, stage)
+        self.check_table(qs, held["gap"], what, stage)
         for q in qs:
             if not self.bag_clear(q, hang, bag_r, held):
-                raise PlanError(f'{what}: ถุงจะชนตัวหุ่นหรือลากพื้น', stage)
+                raise PlanError(f"{what}: ถุงจะชนตัวหุ่นหรือลากพื้น", stage)
 
     def bag_pose(self, held, fwd, left, z, prefer_pitch):
         """Joint poses holding the grasp point at user (fwd, left), height z, jaw roll kept; any pitch."""
@@ -612,10 +612,10 @@ class GraspPlanner:
         x, y = k.from_user(fwd, left)
         pitches = sorted((math.radians(a) for a in range(-90, 46, 5)), key=lambda p: abs(p - prefer_pitch))
         for pitch in pitches:
-            for branch in (held['branch'], -held['branch']):
+            for branch in (held["branch"], -held["branch"]):
                 for q in k.solve(np.array([x, y, z]), pitch, branch=branch):
-                    q['wrist_roll'] = held['grasp']['wrist_roll']
-                    q.pop('_branch', None)
+                    q["wrist_roll"] = held["grasp"]["wrist_roll"]
+                    q.pop("_branch", None)
                     # solve() puts the tool-axis point there; the held point sits off-axis by the jaw offset
                     if np.linalg.norm(self.held_point(q, held) - np.array([x, y, z])) < 0.03:
                         yield q
@@ -636,10 +636,10 @@ class GraspPlanner:
 
     def _at(self, held, r, a, z, pitch):
         x, y = self.k.from_user(r * math.cos(a), r * math.sin(a))
-        for branch in (held['branch'], -held['branch']):
+        for branch in (held["branch"], -held["branch"]):
             for q in self.k.solve(np.array([x, y, z]), pitch, branch=branch):
-                q['wrist_roll'] = held['grasp']['wrist_roll']
-                q.pop('_branch', None)
+                q["wrist_roll"] = held["grasp"]["wrist_roll"]
+                q.pop("_branch", None)
                 if np.linalg.norm(self.held_point(q, held) - np.array([x, y, z])) < 0.03:
                     return q
         return None
@@ -653,7 +653,7 @@ class GraspPlanner:
         top = max([hi[2] for _, hi in self.obstacles] + [self.table_z])
         heights = sorted({round(max(z0, z1), 4), round(max(z0, z1, top + self.BAG_OVER_DECK + hang + 0.01), 4)})
         routes = [[end]]
-        pitches = sorted((math.radians(d) for d in range(-90, 46, 5)), key=lambda x: abs(x - held['pitch']))
+        pitches = sorted((math.radians(d) for d in range(-90, 46, 5)), key=lambda x: abs(x - held["pitch"]))
         for zr in heights:
             for r in sorted({round(r0, 3), round(r1, 3)}):
                 for pitch in pitches:
@@ -673,21 +673,21 @@ class GraspPlanner:
         """Carry pose for a bag picked with `held`: grasp point raised so the bag bottom is bottom_min above
         the floor, out to the side at user angle `side` (rad, 0 = front, +pi/2 = left), as close in as the
         bag allows. Returns {'q', 'path'}: joint-space moves from the lifted pose (or `start`)."""
-        start = start or held['steps']['lift'][-1]
+        start = start or held["steps"]["lift"][-1]
         z = self.table_z + bottom_min + hang
         err = None
         for dz in (0.0, 0.02, 0.04):
             for r in np.arange(0.24, 0.38, 0.02):
-                q = next(iter(self.bag_pose(held, r * math.cos(side), r * math.sin(side), z + dz, held['pitch'])),
+                q = next(iter(self.bag_pose(held, r * math.cos(side), r * math.sin(side), z + dz, held["pitch"])),
                          None)
                 if q is None:
                     continue
                 try:
-                    self.check_path([q], held, hang, bag_r, 'ท่าถือถุง')
-                    return {'q': q, 'path': self.bag_move(start, q, held, hang, bag_r, 'ทางไปท่าถือถุง')}
+                    self.check_path([q], held, hang, bag_r, "ท่าถือถุง")
+                    return {"q": q, "path": self.bag_move(start, q, held, hang, bag_r, "ทางไปท่าถือถุง")}
                 except PlanError as exc:
                     err = exc
-        raise err or PlanError('หาท่าถือถุงไม่ได้ (ยกไม่สูงพอ)', 5)
+        raise err or PlanError("หาท่าถือถุงไม่ได้ (ยกไม่สูงพอ)", 5)
 
     def plan_bag_put(self, obj, held, target):
         """Put-down plan for a held bag: the pick's tool pitch first, then others (the bag hangs from its
@@ -696,8 +696,8 @@ class GraspPlanner:
             return self.plan_place(obj, held, target)
         except PlanError as exc:
             err = exc
-        for deg in sorted(range(-90, -39, 5), key=lambda d: abs(math.radians(d) - held['pitch'])):
-            for branch in (held['branch'], -held['branch']):
+        for deg in sorted(range(-90, -39, 5), key=lambda d: abs(math.radians(d) - held["pitch"])):
+            for branch in (held["branch"], -held["branch"]):
                 alt = dict(held, pitch=math.radians(deg), branch=branch)
                 try:
                     return self.plan_place(obj, alt, target)
@@ -707,7 +707,7 @@ class GraspPlanner:
 
     def plan_bag_place(self, held, place, hang, bag_r=0.08):
         """Joint path from the carry pose to the place plan's 'above_place' pose."""
-        return self.bag_move(held['carry']['q'], place['steps']['above_place'], held, hang, bag_r, 'ทางไปจุดวางถุง')
+        return self.bag_move(held["carry"]["q"], place["steps"]["above_place"], held, hang, bag_r, "ทางไปจุดวางถุง")
 
     PROBE_GAP = 0.016    # closed jaws, for the table / body check (as so100/touch)
 
@@ -719,20 +719,20 @@ class GraspPlanner:
         The jaws are closed, so they close sideways (as so100/touch): that roll fits every pitch.
         Returns {'start': q, 'steps': [[q, ...] the STEP-spaced poses of each probe step], 'tip_h': [tip height
         above the floor at the end of each step], 'pitch'}. PlanError if fewer than min_steps steps fit."""
-        prefer = (current or {}).get('wrist_roll', 0.0)
+        prefer = (current or {}).get("wrist_roll", 0.0)
         v = np.array([x, y]) - self.k.pan_point
         h0 = math.atan2(v[1], v[0])
         close_dir = np.array([-math.sin(h0), math.cos(h0), 0.0])
         per = max(1, int(round(step / self.STEP)))
-        best, err = None, PlanError('เอื้อมไปเหนือถุงไม่ได้ (แตะหาความสูงถุง)', 0)
-        for pitch in self.pitches('top'):
+        best, err = None, PlanError("เอื้อมไปเหนือถุงไม่ได้ (แตะหาความสูงถุง)", 0)
+        for pitch in self.pitches("top"):
             drop = (GRASP_Y - TIP_Y) * math.sin(-pitch)        # tips this far below the point _pose places
             h, start = top_h, None
             while start is None and h - min_steps * step >= bottom_h - 1e-9:
                 c = np.array([x, y, self.table_z + h + drop])
                 try:
                     q = self._pose(c, pitch, close_dir, self.PROBE_GAP, None, prefer, x_off=0.0)
-                    self.check_table([q], self.PROBE_GAP, 'แตะหาความสูงถุง', 1)
+                    self.check_table([q], self.PROBE_GAP, "แตะหาความสูงถุง", 1)
                     start = q
                 except PlanError as exc:
                     err = exc
@@ -745,11 +745,11 @@ class GraspPlanner:
                     qs = []
                     for i in range(1, per + 1):
                         c = np.array([x, y, self.table_z + h + drop - (k - 1 + i / per) * step])
-                        q = self._pose(c, pitch, close_dir, self.PROBE_GAP, start['_branch'], start['wrist_roll'],
+                        q = self._pose(c, pitch, close_dir, self.PROBE_GAP, start["_branch"], start["wrist_roll"],
                                        x_off=0.0)
                         if max(abs(q[j] - prev[j]) for j in ARM) > 0.25:
-                            raise PlanError('ท่าแขนกระโดดกลางทาง', 3)
-                        self.check_table([q], self.PROBE_GAP, 'แตะหาความสูงถุง', 3)
+                            raise PlanError("ท่าแขนกระโดดกลางทาง", 3)
+                        self.check_table([q], self.PROBE_GAP, "แตะหาความสูงถุง", 3)
                         qs.append(q)
                         prev = q
                 except PlanError as exc:
@@ -757,21 +757,21 @@ class GraspPlanner:
                     break
                 steps.append(qs)
                 tips.append(h - k * step)
-            span = lambda p: p['tip_h'][0] - p['tip_h'][-1]
-            cand = {'start': start, 'steps': steps, 'tip_h': tips, 'pitch': pitch}
+            span = lambda p: p["tip_h"][0] - p["tip_h"][-1]
+            cand = {"start": start, "steps": steps, "tip_h": tips, "pitch": pitch}
             if len(steps) >= min_steps and (best is None or span(cand) > span(best) + 1e-9):
                 best = cand
-            if best is not None and best['tip_h'][-1] <= bottom_h + 1e-6 and best['tip_h'][0] >= top_h - step - 1e-6:
+            if best is not None and best["tip_h"][-1] <= bottom_h + 1e-6 and best["tip_h"][0] >= top_h - step - 1e-6:
                 break                                   # the whole range asked for: no need to tilt
         if best is None:
-            raise PlanError(f'แตะหาความสูงถุงไม่ได้: {err}', err.stage, err.code)
+            raise PlanError(f"แตะหาความสูงถุงไม่ได้: {err}", err.stage, err.code)
         return best
 
     # ------------------------------------------------------------- "where can it go" map for RViz
     def pick_options(self, obj, current=None):
         """Ways to pick `obj` (grasp + pre-grasp checked; the straight lines are not), best first."""
         k = self.k
-        prefer = (current or {}).get('wrist_roll', 0.0)
+        prefer = (current or {}).get("wrist_roll", 0.0)
         opts = []
         for pitch in self.PITCHES:
             for branch in (1, -1):
@@ -786,8 +786,8 @@ class GraspPlanner:
                     try:
                         grasp = self._pose(centre, pitch, close_dir, gap, branch, prefer)
                         pre = centre - self.approach_dist(obj, centre, pitch) * k.tool_dir(k.heading(grasp), pitch)
-                        self.check_table([grasp, self._pose(pre, pitch, close_dir, gap, branch, grasp['wrist_roll'])],
-                                         gap, '', 2)
+                        self.check_table([grasp, self._pose(pre, pitch, close_dir, gap, branch, grasp["wrist_roll"])],
+                                         gap, "", 2)
                     except PlanError:
                         continue
                     opts.append((pitch, branch, centre, close_dir, gap, grasp))
@@ -805,11 +805,11 @@ class GraspPlanner:
         p_head = k.heading(sols[0])
         place_close, _ = self._place_close(obj, yaw, pitch, close_dir, p_head, grasp)
         try:
-            q = self._pose(place, pitch, place_close, gap, branch, grasp['wrist_roll'])
-            above = self._pose(place + np.array([0, 0, self.LIFT]), pitch, place_close, gap, branch, q['wrist_roll'])
+            q = self._pose(place, pitch, place_close, gap, branch, grasp["wrist_roll"])
+            above = self._pose(place + np.array([0, 0, self.LIFT]), pitch, place_close, gap, branch, q["wrist_roll"])
             back = self._pose(place - self.approach_dist(obj, centre, pitch) * k.tool_dir(p_head, pitch), pitch,
-                              place_close, gap, branch, q['wrist_roll'])
-            self.check_table([q, above, back], gap, '', 4)
+                              place_close, gap, branch, q["wrist_roll"])
+            self.check_table([q, above, back], gap, "", 4)
         except PlanError:
             return False
         return True

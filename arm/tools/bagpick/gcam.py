@@ -29,18 +29,18 @@ from so100_driver.ik import ARM, GraspPlanner, Kinematics, deck_box
 FLOOR, DECK_Z = -0.31, -0.068
 DECK = (0.18, 0.22, 0.18, 0.22)
 SPEED = 0.5
-WEB = 'http://localhost:8082/snap.jpg'
+WEB = "http://localhost:8082/snap.jpg"
 
 
 class G(Node):
     def __init__(self):
-        super().__init__('gcam')
+        super().__init__("gcam")
         self.urdf, self.js = None, {}
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.create_subscription(String, '/robot_description', lambda m: setattr(self, 'urdf', m.data), qos)
-        self.create_subscription(JointState, '/joint_states', lambda m: self.js.update(zip(m.name, m.position)), 20)
-        self.arm = ActionClient(self, FollowJointTrajectory, '/arm_controller/follow_joint_trajectory')
-        self.grip = ActionClient(self, GripperCommand, '/gripper_controller/gripper_cmd')
+        self.create_subscription(String, "/robot_description", lambda m: setattr(self, "urdf", m.data), qos)
+        self.create_subscription(JointState, "/joint_states", lambda m: self.js.update(zip(m.name, m.position)), 20)
+        self.arm = ActionClient(self, FollowJointTrajectory, "/arm_controller/follow_joint_trajectory")
+        self.grip = ActionClient(self, GripperCommand, "/gripper_controller/gripper_cmd")
 
     def gripper(self, pos):
         g = GripperCommand.Goal()
@@ -51,7 +51,7 @@ class G(Node):
         self.spin_until(f.done, 5)
         h = f.result()
         if not h or not h.accepted:
-            raise RuntimeError('gripper goal rejected')
+            raise RuntimeError("gripper goal rejected")
         r = h.get_result_async()
         self.spin_until(r.done, 12)
         return r.result().result
@@ -78,7 +78,7 @@ class G(Node):
         self.spin_until(f.done, 5)
         h = f.result()
         if not h or not h.accepted:
-            raise RuntimeError('trajectory rejected')
+            raise RuntimeError("trajectory rejected")
         r = h.get_result_async()
         self.spin_until(r.done, t + 10)
         if not r.done() or r.result().result.error_code != 0:
@@ -88,89 +88,89 @@ class G(Node):
 def snap(name):
     for _ in range(3):
         try:
-            open(name, 'wb').write(urllib.request.urlopen(WEB, timeout=8).read())
+            open(name, "wb").write(urllib.request.urlopen(WEB, timeout=8).read())
             return
         except Exception as exc:  # noqa: BLE001
             err = exc
             time.sleep(0.5)
-    print('snap ERROR', err)
+    print("snap ERROR", err)
 
 
 def describe(kin, q):
-    T = kin.frames(q)['gripper']
+    T = kin.frames(q)["gripper"]
     p = T[:3, 3]
     tool = -T[:3, 1]
     f, l = kin.to_user(p)
     tip = kin.gripper_point(q, (0, -0.106, 0))
-    return {'fwd': round(f, 4), 'left': round(l, 4), 'z': round(float(p[2]), 4),
-            'tip_z': round(float(tip[2]), 4), 'tool': [round(float(v), 3) for v in tool],
-            'jaw_axis': [round(float(v), 3) for v in T[:3, 0]], 'q': {k: round(v, 4) for k, v in q.items()}}
+    return {"fwd": round(f, 4), "left": round(l, 4), "z": round(float(p[2]), 4),
+            "tip_z": round(float(tip[2]), 4), "tool": [round(float(v), 3) for v in tool],
+            "jaw_axis": [round(float(v), 3) for v in T[:3, 0]], "q": {k: round(v, 4) for k, v in q.items()}}
 
 
 def main():
-    console_gate('bagpick gcam')
+    console_gate("bagpick gcam")
     a = sys.argv[1:]
     rclpy.init()
     n = G()
-    if a[0] == 'grip':
+    if a[0] == "grip":
         r = n.gripper(float(a[1]))
-        print(f'grip: position {r.position:.3f} effort {r.effort:.1f} reached {r.reached_goal} stalled {r.stalled}')
+        print(f"grip: position {r.position:.3f} effort {r.effort:.1f} reached {r.reached_goal} stalled {r.stalled}")
         return
-    if a[0] == 'snap':
+    if a[0] == "snap":
         snap(a[1])
         return
     if not n.spin_until(lambda: n.urdf and all(j in n.js for j in ARM), 10):
-        sys.exit('no /robot_description or /joint_states')
+        sys.exit("no /robot_description or /joint_states")
     from ament_index_python.packages import get_package_share_directory
-    kin = Kinematics(n.urdf, None, get_package_share_directory('so100_moveit_config') + '/meshes')
+    kin = Kinematics(n.urdf, None, get_package_share_directory("so100_moveit_config") + "/meshes")
     if not kin.meshes:
-        sys.exit('no arm meshes')
+        sys.exit("no arm meshes")
     pl = GraspPlanner(kin, FLOOR, [deck_box(kin, *DECK, DECK_Z, FLOOR)])
     cur = n.q_now()
-    if a[0] == 'state':
+    if a[0] == "state":
         print(json.dumps(describe(kin, cur)))
         return
-    if a[0] == 'look':
+    if a[0] == "look":
         fwd, left, z = float(a[1]), float(a[2]), float(a[3])
         roll = None
-        if len(a) > 4 and not a[4].startswith('--'):
+        if len(a) > 4 and not a[4].startswith("--"):
             roll = math.radians(float(a[4]))
-        pitch = math.radians(float(a[a.index('--pitch') + 1])) if '--pitch' in a else -math.pi / 2
-        dry = '--dry' in a
+        pitch = math.radians(float(a[a.index("--pitch") + 1])) if "--pitch" in a else -math.pi / 2
+        dry = "--dry" in a
         x, y = kin.from_user(fwd, left)
-        q, why = None, 'no IK'
+        q, why = None, "no IK"
         for s in kin.solve(np.array([x, y, z]), pitch, depth=0.0):
-            s.pop('_branch', None)
-            s['wrist_roll'] = cur['wrist_roll'] if roll is None else roll
-            lo, hi = kin.limits['wrist_roll']
-            if not lo <= s['wrist_roll'] <= hi:
-                why = 'roll out of range'
+            s.pop("_branch", None)
+            s["wrist_roll"] = cur["wrist_roll"] if roll is None else roll
+            lo, hi = kin.limits["wrist_roll"]
+            if not lo <= s["wrist_roll"] <= hi:
+                why = "roll out of range"
                 continue
             steps = max(2, int(max(abs(s[j] - cur[j]) for j in ARM) / 0.03))
             path = [{j: cur[j] + (s[j] - cur[j]) * t for j in ARM} for t in np.linspace(0, 1, steps)]
             if pl.hits_body(s):
-                why = 'pose hits body'
+                why = "pose hits body"
                 continue
             if any(pl.hits_body(p) for p in path):
-                why = 'path hits body'
+                why = "path hits body"
                 continue
             if min(kin.gripper_point(p, (0, -0.11, 0))[2] for p in path) < FLOOR + 0.02:
-                why = 'floor'
+                why = "floor"
                 continue
             q = s
             break
         if q is None:
-            sys.exit(f'cannot: {why}')
+            sys.exit(f"cannot: {why}")
         t = max(1.5, max(abs(q[j] - cur[j]) for j in ARM) / SPEED)
-        print('plan', json.dumps(describe(kin, q)), f'{t:.1f}s', flush=True)
+        print("plan", json.dumps(describe(kin, q)), f"{t:.1f}s", flush=True)
         if dry:
             return
         n.move(q, t)
         time.sleep(1.0)
-        print('now ', json.dumps(describe(kin, n.q_now())), flush=True)
-        if '--snap' in a:
-            snap(a[a.index('--snap') + 1])
+        print("now ", json.dumps(describe(kin, n.q_now())), flush=True)
+        if "--snap" in a:
+            snap(a[a.index("--snap") + 1])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

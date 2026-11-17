@@ -1,0 +1,5 @@
+# One quote style for the whole repo, double quotes (2026-11-17), checked in CI: python -m ruff check .
+target-version = "py310"  # never writes f-string quote nesting that Python before 3.12 cannot read
+
+[lint]
+select = ["Q000", "Q001"]  # inline and multiline strings in double quotes where that needs no escaping

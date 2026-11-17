@@ -29,10 +29,10 @@ def output_devices_text() -> str:
     try:
         devs = sd.query_devices()
     except Exception as e:  # noqa: BLE001
-        return f'(could not list devices: {e})'
+        return f"(could not list devices: {e})"
     lines = [f'  {i}: {d["name"]}  ({d["max_output_channels"]} out, {int(d["default_samplerate"])} Hz)'
-             for i, d in enumerate(devs) if d['max_output_channels'] > 0]
-    return '\n'.join(lines) or '  (no output devices found - is the speaker plugged in?)'
+             for i, d in enumerate(devs) if d["max_output_channels"] > 0]
+    return "\n".join(lines) or "  (no output devices found - is the speaker plugged in?)"
 
 
 def resample(audio: np.ndarray, src: int, dst: int) -> np.ndarray:
@@ -48,44 +48,44 @@ def resample(audio: np.ndarray, src: int, dst: int) -> np.ndarray:
 
 class TtsNode(Node):
     def __init__(self):
-        super().__init__('tts_node')
-        self.declare_parameter('voice_model', '/opt/robot_voice/models/piper/en_US-lessac-medium.onnx')
-        self.declare_parameter('speaker_device', '')   # '' = default output
-        self.declare_parameter('volume', 1.0)
-        self.declare_parameter('lead_silence_s', 0.3)   # silence before each sound: speakers that sleep cut the start
+        super().__init__("tts_node")
+        self.declare_parameter("voice_model", "/opt/robot_voice/models/piper/en_US-lessac-medium.onnx")
+        self.declare_parameter("speaker_device", "")   # '' = default output
+        self.declare_parameter("volume", 1.0)
+        self.declare_parameter("lead_silence_s", 0.3)   # silence before each sound: speakers that sleep cut the start
 
         p = lambda n: self.get_parameter(n).value
-        self.voice = PiperVoice.load(p('voice_model'))
+        self.voice = PiperVoice.load(p("voice_model"))
         self.rate = int(self.voice.config.sample_rate)
-        dev = p('speaker_device')
+        dev = p("speaker_device")
         self.device = int(dev) if str(dev).isdigit() else (dev or None)
-        self.volume = float(p('volume'))
-        self.lead = float(p('lead_silence_s'))
+        self.volume = float(p("volume"))
+        self.lead = float(p("lead_silence_s"))
         self.last_end = 0.0
 
-        self.pub_speaking = self.create_publisher(Bool, '/tts/speaking', 10)
-        self.create_subscription(String, '/tts/say', self._on_say, 10)
-        self.create_subscription(String, '/tts/play', self._on_play, 10)   # path to a .wav clip
-        self.create_subscription(Empty, '/tts/interrupt', self._on_interrupt, 10)
+        self.pub_speaking = self.create_publisher(Bool, "/tts/speaking", 10)
+        self.create_subscription(String, "/tts/say", self._on_say, 10)
+        self.create_subscription(String, "/tts/play", self._on_play, 10)   # path to a .wav clip
+        self.create_subscription(Empty, "/tts/interrupt", self._on_interrupt, 10)
         # "I can talk now" for flow_node: latched (transient local), so a late subscriber still gets it
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
-        self.pub_ready = self.create_publisher(Bool, '/tts/ready', latched)
+        self.pub_ready = self.create_publisher(Bool, "/tts/ready", latched)
         self.pub_ready.publish(Bool(data=True))
         self.q: queue.Queue = queue.Queue()
         self.interrupted = threading.Event()
         threading.Thread(target=self._worker, daemon=True).start()
         try:
-            out = sd.query_devices(self.device, 'output')
+            out = sd.query_devices(self.device, "output")
             self.get_logger().info(f'TTS ready ({p("voice_model")}, {self.rate} Hz) -> speaker: "{out["name"]}" '
                                    f'({int(out["default_samplerate"])} Hz, {out["max_output_channels"]} ch)')
         except Exception as e:  # noqa: BLE001
-            self.get_logger().error(f'speaker_device={self.device!r} is not an output: {e}\n'
-                                    f'Output devices you can use for speaker_device:\n{output_devices_text()}')
+            self.get_logger().error(f"speaker_device={self.device!r} is not an output: {e}\n"
+                                    f"Output devices you can use for speaker_device:\n{output_devices_text()}")
 
     def _on_say(self, msg: String):
         text = msg.data.strip()
         if text:
-            self.q.put(('say', text))
+            self.q.put(("say", text))
 
     def _drain(self):
         try:
@@ -98,18 +98,18 @@ class TtsNode(Node):
         self.interrupted.set()
         self._drain()
         sd.stop()                       # cuts the sd.play() running in the worker thread
-        self.get_logger().info('interrupted by the user')
+        self.get_logger().info("interrupted by the user")
 
     def _on_play(self, msg: String):
         path = os.path.expanduser(msg.data.strip())
         if path:
-            self.q.put(('play', path))
+            self.q.put(("play", path))
 
     def _load_wav(self, path):
         """16-bit PCM .wav -> (int16 array [frames, channels], sample_rate)."""
-        with wave.open(path, 'rb') as w:
+        with wave.open(path, "rb") as w:
             if w.getsampwidth() != 2:
-                raise ValueError(f'{path}: only 16-bit PCM wav is supported')
+                raise ValueError(f"{path}: only 16-bit PCM wav is supported")
             ch, rate = w.getnchannels(), w.getframerate()
             audio = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).reshape(-1, ch)
         if self.volume != 1.0:
@@ -117,10 +117,10 @@ class TtsNode(Node):
         return audio, rate
 
     def _synth(self, sentence: str) -> np.ndarray:
-        if hasattr(self.voice, 'synthesize_stream_raw'):        # piper-tts <= 1.2
-            raw = b''.join(self.voice.synthesize_stream_raw(sentence))
+        if hasattr(self.voice, "synthesize_stream_raw"):        # piper-tts <= 1.2
+            raw = b"".join(self.voice.synthesize_stream_raw(sentence))
         else:                                                     # piper-tts >= 1.3
-            raw = b''.join(c.audio_int16_bytes for c in self.voice.synthesize(sentence))
+            raw = b"".join(c.audio_int16_bytes for c in self.voice.synthesize(sentence))
         audio = np.frombuffer(raw, dtype=np.int16)
         if self.volume != 1.0:
             audio = np.clip(audio * self.volume, -32768, 32767).astype(np.int16)
@@ -134,14 +134,14 @@ class TtsNode(Node):
             audio = np.concatenate([np.zeros((int(self.lead * rate), audio.shape[1]), dtype=audio.dtype), audio])
         ch = audio.shape[1]
         try:
-            sd.check_output_settings(device=self.device, channels=ch, samplerate=rate, dtype='int16')
+            sd.check_output_settings(device=self.device, channels=ch, samplerate=rate, dtype="int16")
         except Exception:  # noqa: BLE001
-            info = sd.query_devices(self.device, 'output')
-            dev_rate = int(info['default_samplerate'])
-            dev_ch = max(ch, min(2, int(info['max_output_channels'])))
+            info = sd.query_devices(self.device, "output")
+            dev_rate = int(info["default_samplerate"])
+            dev_ch = max(ch, min(2, int(info["max_output_channels"])))
             for r, c in [(rate, dev_ch), (dev_rate, ch), (dev_rate, dev_ch), (48000, dev_ch), (44100, dev_ch)]:
                 try:
-                    sd.check_output_settings(device=self.device, channels=c, samplerate=r, dtype='int16')
+                    sd.check_output_settings(device=self.device, channels=c, samplerate=r, dtype="int16")
                     break
                 except Exception:  # noqa: BLE001
                     continue
@@ -150,7 +150,7 @@ class TtsNode(Node):
             if c != ch:
                 audio = np.repeat(audio[:, :1], c, axis=1)
             audio, rate = resample(audio, rate, r), r
-            self.get_logger().info(f'speaker needs {r} Hz / {c} ch -> converting', once=True)
+            self.get_logger().info(f"speaker needs {r} Hz / {c} ch -> converting", once=True)
         try:
             sd.play(audio, rate, device=self.device, blocking=True)
         finally:
@@ -165,20 +165,20 @@ class TtsNode(Node):
             self.interrupted.clear()
             self.pub_speaking.publish(Bool(data=True))   # mutes the mic (also while a clip plays)
             try:
-                if kind == 'play':
+                if kind == "play":
                     audio, rate = self._load_wav(item)
-                    self.get_logger().info(f'playing {item} ({len(audio) / rate:.1f}s)')
+                    self.get_logger().info(f"playing {item} ({len(audio) / rate:.1f}s)")
                     self._play(audio, rate)
                 else:
                     # speak sentence by sentence -> first audio comes out sooner
-                    for s in re.split(r'(?<=[.!?])\s+', item):
+                    for s in re.split(r"(?<=[.!?])\s+", item):
                         if self.interrupted.is_set():
                             break
                         if s.strip():
                             self._play(self._synth(s), self.rate)
             except Exception as e:
-                self.get_logger().error(f'TTS/playback failed: {e}\n'
-                                        f'Output devices you can use for speaker_device:\n{output_devices_text()}')
+                self.get_logger().error(f"TTS/playback failed: {e}\n"
+                                        f"Output devices you can use for speaker_device:\n{output_devices_text()}")
             finally:
                 if self.interrupted.is_set():
                     self._drain()
@@ -199,5 +199,5 @@ def main():
         rclpy.try_shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

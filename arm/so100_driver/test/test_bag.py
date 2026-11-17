@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 from so100_driver.ik import GRASP_Y, GRIP_DEPTH, JAW_G_MAX, TIP_Y, Box, GraspPlanner, PlanError, bag_shifts, deck_box, jaw_gap  # noqa: E402
 from so100_driver.tabletop import find_objects, grasp_top  # noqa: E402
@@ -53,36 +53,36 @@ class BagGrasp(unittest.TestCase):
         objs = find_objects(bag_cloud(cx, cy, yaw, handles_up), FLOOR, z_min=0.02, z_max=0.55, min_points=60,
                             with_points=True)
         self.assertEqual(len(objs), 1)
-        return grasp_top(objs[0]['pts'], FLOOR, PAN), (cx, cy, yaw)
+        return grasp_top(objs[0]["pts"], FLOOR, PAN), (cx, cy, yaw)
 
     def near_arm(self, g, cx, cy):
-        return np.linalg.norm(np.array([g['x'], g['y']]) - PAN) < np.linalg.norm(np.array([cx, cy]) - PAN) - 0.03
+        return np.linalg.norm(np.array([g["x"], g["y"]]) - PAN) < np.linalg.norm(np.array([cx, cy]) - PAN) - 0.03
 
     def test_handles_up_holds_the_near_handle(self):
         g, (cx, cy, yaw) = self.bag(True)
-        self.assertEqual(g['part'], 'side')           # two handles: too wide together, take the near one
-        self.assertAlmostEqual(g['height'], 0.37, delta=0.015)
-        self.assertLess(g['thickness'], 0.045)        # the jaws (max 6.5 cm) close across it
+        self.assertEqual(g["part"], "side")           # two handles: too wide together, take the near one
+        self.assertAlmostEqual(g["height"], 0.37, delta=0.015)
+        self.assertLess(g["thickness"], 0.045)        # the jaws (max 6.5 cm) close across it
         self.assertTrue(self.near_arm(g, cx, cy))
-        self.assertAlmostEqual(math.remainder(g['yaw'] - yaw, math.pi), 0.0, delta=0.25)
+        self.assertAlmostEqual(math.remainder(g["yaw"] - yaw, math.pi), 0.0, delta=0.25)
 
     def test_one_handle_up_is_held_as_it_is(self):
         cx, cy, yaw = 0.0, -0.33, -0.4
         pts = bag_cloud(cx, cy, yaw, True)
         far = (pts[:, 2] > FLOOR + 0.275) & ((pts[:, :2] - (cx, cy)) @ (-math.sin(yaw), math.cos(yaw)) > 0)
         objs = find_objects(pts[~far], FLOOR, z_min=0.02, z_max=0.55, min_points=60, with_points=True)
-        g = grasp_top(objs[0]['pts'], FLOOR, PAN)
-        self.assertEqual(g['part'], 'top')
-        self.assertAlmostEqual(g['height'], 0.37, delta=0.015)
-        self.assertLess(g['thickness'], 0.03)
+        g = grasp_top(objs[0]["pts"], FLOOR, PAN)
+        self.assertEqual(g["part"], "top")
+        self.assertAlmostEqual(g["height"], 0.37, delta=0.015)
+        self.assertLess(g["thickness"], 0.03)
 
     def test_handles_down_holds_the_near_rim_wall(self):
         g, (cx, cy, yaw) = self.bag(False)
-        self.assertEqual(g['part'], 'side')
-        self.assertAlmostEqual(g['height'], 0.27, delta=0.015)
-        self.assertLess(g['thickness'], 0.045)
+        self.assertEqual(g["part"], "side")
+        self.assertAlmostEqual(g["height"], 0.27, delta=0.015)
+        self.assertLess(g["thickness"], 0.045)
         self.assertTrue(self.near_arm(g, cx, cy))     # the long wall nearest the arm
-        self.assertAlmostEqual(math.remainder(g['yaw'] - yaw, math.pi), 0.0, delta=0.25)
+        self.assertAlmostEqual(math.remainder(g["yaw"] - yaw, math.pi), 0.0, delta=0.25)
 
 
 class BagPlan(unittest.TestCase):
@@ -100,31 +100,31 @@ class BagPlan(unittest.TestCase):
 
     def test_pick_carry_put_down(self):
         obj = self.part(0.28, 0.0, 0.27)
-        held = self.pl.plan_pick(obj, None, 'top')
-        hang = held['grasp_centre'][2] - FLOOR
-        held['carry'] = carry = self.pl.plan_carry(held, hang, math.pi / 2, 0.36)
-        g = self.pl.held_point(carry['q'], held)
+        held = self.pl.plan_pick(obj, None, "top")
+        hang = held["grasp_centre"][2] - FLOOR
+        held["carry"] = carry = self.pl.plan_carry(held, hang, math.pi / 2, 0.36)
+        g = self.pl.held_point(carry["q"], held)
         self.assertGreaterEqual(g[2] - hang - FLOOR, 0.36 - 1e-6)          # bag bottom high enough
         f, l_ = self.k.to_user(g)
         self.assertGreater(l_, 0.18 + 0.05)                               # out at the left, off the deck
         self.assertLess(abs(f), 0.08)
-        for q in carry['path']:
+        for q in carry["path"]:
             self.assertFalse(self.pl.hits_body(q))
         place = self.pl.plan_place(obj, held, self.part(0.28, 0.06, 0.27))
         path = self.pl.plan_bag_place(held, place, hang)
         self.assertTrue(path)
         # put down: the bag bottom ends up just above the floor
-        down = self.pl.held_point(place['steps']['lower'][-1], held)
+        down = self.pl.held_point(place["steps"]["lower"][-1], held)
         self.assertAlmostEqual(down[2] - hang - FLOOR, 0.005, delta=0.004)
 
     def test_bag_jaws_open_fully_and_still_carry(self):
         obj = self.part(0.28, 0.0, 0.27)
-        held = self.pl.plan_pick(obj, None, 'top', wide=True)
-        self.assertAlmostEqual(held['jaw_open'], JAW_G_MAX, places=6)
-        self.assertAlmostEqual(held['gap'], jaw_gap(JAW_G_MAX), places=6)       # 7.5 cm, not thickness + 2.4
-        self.assertLess(self.pl.plan_pick(obj, None, 'top')['gap'], 0.05)        # other picks unchanged
-        hang = held['grasp_centre'][2] - FLOOR
-        held['carry'] = self.pl.plan_carry(held, hang, math.pi / 2, 0.36)
+        held = self.pl.plan_pick(obj, None, "top", wide=True)
+        self.assertAlmostEqual(held["jaw_open"], JAW_G_MAX, places=6)
+        self.assertAlmostEqual(held["gap"], jaw_gap(JAW_G_MAX), places=6)       # 7.5 cm, not thickness + 2.4
+        self.assertLess(self.pl.plan_pick(obj, None, "top")["gap"], 0.05)        # other picks unchanged
+        hang = held["grasp_centre"][2] - FLOOR
+        held["carry"] = self.pl.plan_carry(held, hang, math.pi / 2, 0.36)
         place = self.pl.plan_bag_put(obj, held, self.part(0.28, 0.06, 0.27))
         self.assertTrue(self.pl.plan_bag_place(held, place, hang))
 
@@ -133,8 +133,8 @@ class BagPlan(unittest.TestCase):
         for fwd in (0.24, 0.27, 0.30):
             for top in (0.22, 0.27, 0.32):
                 try:
-                    held = self.pl.plan_pick(self.part(fwd, 0.0, top), None, 'top', wide=True)
-                    self.pl.plan_carry(held, held['grasp_centre'][2] - FLOOR, math.pi / 2, 0.36)
+                    held = self.pl.plan_pick(self.part(fwd, 0.0, top), None, "top", wide=True)
+                    self.pl.plan_carry(held, held["grasp_centre"][2] - FLOOR, math.pi / 2, 0.36)
                     ok += 1
                 except PlanError:
                     pass
@@ -156,15 +156,15 @@ class BagPlan(unittest.TestCase):
     def test_body_blocks_reaching_under_the_deck(self):
         # 15 cm in front of the axis is above the deck: the arm cannot go down to a 22 cm top there
         with self.assertRaises(PlanError):
-            self.pl.plan_pick(self.part(0.15, 0.0, 0.22), None, 'top')
+            self.pl.plan_pick(self.part(0.15, 0.0, 0.22), None, "top")
 
     def test_mostly_reachable_in_front(self):
         ok = 0
         for fwd in (0.24, 0.27, 0.30):
             for top in (0.22, 0.27, 0.32):
                 try:
-                    held = self.pl.plan_pick(self.part(fwd, 0.0, top), None, 'top')
-                    self.pl.plan_carry(held, held['grasp_centre'][2] - FLOOR, math.pi / 2, 0.36)
+                    held = self.pl.plan_pick(self.part(fwd, 0.0, top), None, "top")
+                    self.pl.plan_carry(held, held["grasp_centre"][2] - FLOOR, math.pi / 2, 0.36)
                     ok += 1
                 except PlanError:
                     pass
@@ -174,23 +174,23 @@ class BagPlan(unittest.TestCase):
         # the bag grasp puts the tips GRIP_DEPTH (2.8 cm) below the top; a probed top may ask for more
         obj = self.part(0.28, 0.0, 0.27)
         for depth, want in ((None, GRIP_DEPTH), (0.028, 0.028), (0.04, 0.04)):
-            held = self.pl.plan_pick(obj, None, 'top', wide=True, grip_depth=depth)
-            tips = held['grasp_centre'][2] - (GRASP_Y - TIP_Y) * math.sin(-held['pitch'])
+            held = self.pl.plan_pick(obj, None, "top", wide=True, grip_depth=depth)
+            tips = held["grasp_centre"][2] - (GRASP_Y - TIP_Y) * math.sin(-held["pitch"])
             self.assertAlmostEqual(FLOOR + 0.27 - tips, want, delta=0.0015)
 
     def test_probe_goes_straight_down_in_steps(self):
         x, y = self.k.from_user(0.28, 0.0)
         pr = self.pl.plan_probe(x, y, 0.40, 0.12, 0.01, min_steps=4)
-        tips = pr['tip_h']
+        tips = pr["tip_h"]
         self.assertLessEqual(tips[0], 0.40 - 0.01 + 1e-9)          # starts no higher than asked
         self.assertGreater(tips[0], 0.30)                          # above the bags it can grasp at 28 cm
         self.assertGreaterEqual(tips[-1], 0.12 - 1e-6)               # floor + 12 cm at most
         self.assertLess(tips[-1], 0.16)                               # below the lowest top it grasps (22 cm)
         for a, b in zip(tips, tips[1:]):
             self.assertAlmostEqual(a - b, 0.01, delta=1e-6)
-        start_tip = self.k.gripper_point(pr['start'], (0.0, TIP_Y, 0))
+        start_tip = self.k.gripper_point(pr["start"], (0.0, TIP_Y, 0))
         self.assertAlmostEqual(start_tip[2] - FLOOR, tips[0] + 0.01, delta=0.003)
-        for qs, h in zip(pr['steps'], tips):
+        for qs, h in zip(pr["steps"], tips):
             self.assertEqual(len(qs), 2)                           # 5 mm line points
             tip = self.k.gripper_point(qs[-1], (0.0, TIP_Y, 0))
             self.assertAlmostEqual(tip[2] - FLOOR, h, delta=0.003)  # closed tips where the step says
@@ -201,15 +201,15 @@ class BagPlan(unittest.TestCase):
         # a push up on the tips turns a joint by (lever = horizontal distance from its axis to the tips)
         x, y = self.k.from_user(0.28, 0.0)
         pr = self.pl.plan_probe(x, y, 0.40, 0.12, 0.01, min_steps=4)
-        for qs in pr['steps']:
+        for qs in pr["steps"]:
             q = qs[-1]
             tip = self.k.gripper_point(q, (0.0, TIP_Y, 0))
             w = self.k.frames(q)
             lever = {j: np.hypot(*(tip[:2] - w[link][:3, 3][:2]))
-                     for j, link in (('shoulder_lift', 'upper_arm'), ('elbow_flex', 'lower_arm'), ('wrist_flex', 'wrist'))}
-            self.assertGreater(lever['shoulder_lift'], 0.15)
-            self.assertGreater(lever['elbow_flex'], 0.05)
-            self.assertLess(lever['wrist_flex'], 0.6 * lever['elbow_flex'])   # tilted 25 deg: 7 cm against 14
+                     for j, link in (("shoulder_lift", "upper_arm"), ("elbow_flex", "lower_arm"), ("wrist_flex", "wrist"))}
+            self.assertGreater(lever["shoulder_lift"], 0.15)
+            self.assertGreater(lever["elbow_flex"], 0.05)
+            self.assertLess(lever["wrist_flex"], 0.6 * lever["elbow_flex"])   # tilted 25 deg: 7 cm against 14
 
     def test_probe_never_goes_into_the_body(self):
         # 15 cm in front of the axis is over the deck: the closed jaws cannot go down to floor + 12 cm there
@@ -218,11 +218,11 @@ class BagPlan(unittest.TestCase):
             pr = self.pl.plan_probe(x, y, 0.40, 0.12, 0.01, min_steps=4)
         except PlanError:
             return
-        self.assertGreater(pr['tip_h'][-1], DECK_Z - FLOOR)      # stopped above the deck
-        for qs in pr['steps']:
+        self.assertGreater(pr["tip_h"][-1], DECK_Z - FLOOR)      # stopped above the deck
+        for qs in pr["steps"]:
             for q in qs:
                 self.assertFalse(self.pl.hits_body(q))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

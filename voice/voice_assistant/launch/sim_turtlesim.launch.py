@@ -10,11 +10,11 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    params = os.path.join(get_package_share_directory('voice_assistant'), 'config', 'params.yaml')
+    params = os.path.join(get_package_share_directory("voice_assistant"), "config", "params.yaml")
     return LaunchDescription([
-        Node(package='turtlesim', executable='turtlesim_node', name='turtlesim', output='screen'),
-        Node(package='voice_assistant', executable='command_bridge_node', name='command_bridge_node',
-             parameters=[params, {'cmd_vel_topic': '/turtle1/cmd_vel'}], output='screen'),
-        Node(package='voice_assistant', executable='turtlesim_bag_sim', name='turtlesim_bag_sim',
-             output='screen'),
+        Node(package="turtlesim", executable="turtlesim_node", name="turtlesim", output="screen"),
+        Node(package="voice_assistant", executable="command_bridge_node", name="command_bridge_node",
+             parameters=[params, {"cmd_vel_topic": "/turtle1/cmd_vel"}], output="screen"),
+        Node(package="voice_assistant", executable="turtlesim_bag_sim", name="turtlesim_bag_sim",
+             output="screen"),
     ])

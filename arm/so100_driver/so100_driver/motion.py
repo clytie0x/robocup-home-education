@@ -44,7 +44,7 @@ class Trajectory:
         whole move with a smooth trapezoid at retime_speed and simply arrives early.
         """
         if not points:
-            raise ValueError('empty trajectory')
+            raise ValueError("empty trajectory")
         self.names, self.points, self.start = list(names), points, start
         self.duration = points[-1][0]
         self.end = None          # why the driver let go of it (task_rules error code), None = still runs
@@ -115,21 +115,21 @@ class Motion:
         """Stop everything and hold the measured pose (used at torque-on and after faults).
         keep_gripper (faults): the gripper keeps its goal, so jaws squeezing a bag go on squeezing."""
         grip = None
-        if keep_gripper and 'gripper' in self.goal:
-            grip = self.goal['gripper'], self.target.get('gripper', self.goal['gripper'])
+        if keep_gripper and "gripper" in self.goal:
+            grip = self.goal["gripper"], self.target.get("gripper", self.goal["gripper"])
         self.traj = None
         self.goal = {n: float(present_raw[n]) for n in JOINTS}
         self.target = dict(self.goal)
         if grip:
-            self.goal['gripper'], self.target['gripper'] = grip
+            self.goal["gripper"], self.target["gripper"] = grip
         self.offset = {n: 0.0 for n in JOINTS}
         self._lag_since = None
 
     def fault_goals(self, present_raw):
         """Goals to send once on a fault: the arm joints where they are, the gripper its kept goal."""
         goals = {n: float(present_raw[n]) for n in JOINTS}
-        if 'gripper' in self.goal:
-            goals['gripper'] = float(self.goal['gripper'])
+        if "gripper" in self.goal:
+            goals["gripper"] = float(self.goal["gripper"])
         return goals
 
     def freeze(self):
@@ -139,8 +139,8 @@ class Motion:
 
     def set_trajectory(self, traj):
         for n in traj.names:
-            if n not in ARM_JOINTS and n != 'gripper':
-                raise ValueError(f'unknown joint {n}')
+            if n not in ARM_JOINTS and n != "gripper":
+                raise ValueError(f"unknown joint {n}")
         self.traj = traj
 
     def set_target(self, name, rad):
@@ -160,7 +160,7 @@ class Motion:
             want = desired.get(n, prev)
             lo, hi = self.calib.raw_limits(n)
             want = min(max(want, lo), hi)
-            speed = self.gripper_speed if n == 'gripper' else self.max_speed
+            speed = self.gripper_speed if n == "gripper" else self.max_speed
             step = speed * COUNTS_PER_RAD * dt
             new = prev + max(-step, min(step, want - prev))
             self.goal[n] = new
@@ -228,9 +228,9 @@ class Motion:
             self._lag_since = now
         elif now - self._lag_since > self.follow_error_time:
             bad = max(over, key=lag.get)
-            self.fault = (f'{bad} cannot reach its goal (off by '
-                          f'{math.degrees(abs(present_raw[bad] - self.goal[bad]) / COUNTS_PER_RAD):.0f} deg): '
-                          'blocked/collision, overloaded or power too weak. Holding current pose.')
+            self.fault = (f"{bad} cannot reach its goal (off by "
+                          f"{math.degrees(abs(present_raw[bad] - self.goal[bad]) / COUNTS_PER_RAD):.0f} deg): "
+                          "blocked/collision, overloaded or power too weak. Holding current pose.")
             self.hold(present_raw, keep_gripper=True)
 
     def joint_error(self, present_raw, names):

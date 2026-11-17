@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from so100_driver.tabletop import CameraPose, calibrate_2pt, find_objects, fit_plane, fuse, rot_z  # noqa: E402
 
 TABLE_Z = -0.075
@@ -60,9 +60,9 @@ class TableTop(unittest.TestCase):
         n, d, _ = fit_plane(self.cam)
         guess = CameraPose(n, d)
         spots = [(0.05, -0.25), (-0.10, -0.20)]
-        seen = [min(find_objects(guess.to_base(self.cam), 0.0), key=lambda o: o['size'][2]),
-                max(find_objects(guess.to_base(self.cam), 0.0), key=lambda o: o['size'][2])]
-        yaw, txy, err = calibrate_2pt((seen[0]['x'], seen[0]['y']), (seen[1]['x'], seen[1]['y']), *spots)
+        seen = [min(find_objects(guess.to_base(self.cam), 0.0), key=lambda o: o["size"][2]),
+                max(find_objects(guess.to_base(self.cam), 0.0), key=lambda o: o["size"][2])]
+        yaw, txy, err = calibrate_2pt((seen[0]["x"], seen[0]["y"]), (seen[1]["x"], seen[1]["y"]), *spots)
         self.assertLess(err, 0.005)
         return CameraPose(n, d, yaw, txy, TABLE_Z)
 
@@ -84,13 +84,13 @@ class TableTop(unittest.TestCase):
 
     def test_objects_in_base(self):
         pose = self.calibrated()
-        found = sorted(find_objects(pose.to_base(self.cam), TABLE_Z), key=lambda o: o['x'], reverse=True)
+        found = sorted(find_objects(pose.to_base(self.cam), TABLE_Z), key=lambda o: o["x"], reverse=True)
         self.assertEqual(len(found), 2)
         for o, (x, y, yaw, size) in zip(found, self.objs):
-            self.assertAlmostEqual(o['x'], x, delta=0.006)
-            self.assertAlmostEqual(o['y'], y, delta=0.006)
-            self.assertAlmostEqual(o['size'][2], size[2], delta=0.008)
-            got = sorted(o['size'][:2])
+            self.assertAlmostEqual(o["x"], x, delta=0.006)
+            self.assertAlmostEqual(o["y"], y, delta=0.006)
+            self.assertAlmostEqual(o["size"][2], size[2], delta=0.008)
+            got = sorted(o["size"][:2])
             for g, w in zip(got, sorted(size[:2])):
                 self.assertAlmostEqual(g, w, delta=0.009)
 
@@ -99,7 +99,7 @@ class TableTop(unittest.TestCase):
         frames = [find_objects(pose.to_base(self.cam), TABLE_Z) for _ in range(3)]
         f = fuse(frames)
         self.assertEqual(len(f), 2)
-        self.assertEqual(f[0]['frames'], 3)
+        self.assertEqual(f[0]["frames"], 3)
 
     def test_quaternion_roundtrip(self):
         pose = self.calibrated()
@@ -120,18 +120,18 @@ class LowCamera(unittest.TestCase):
         n, d, _ = fit_plane(cam_pts)
         self.assertAlmostEqual(d, 0.18, delta=0.004)
         pose = CameraPose(n, d, 0.0, (0.0, 0.0), 0.0)        # table frame; calibrate from the two objects
-        seen = sorted(find_objects(pose.to_base(cam_pts), 0.0, camera=(0.0, 0.0, d)), key=lambda o: o['size'][2])
-        yaw, txy, err = calibrate_2pt((seen[0]['x'], seen[0]['y']), (seen[1]['x'], seen[1]['y']),
+        seen = sorted(find_objects(pose.to_base(cam_pts), 0.0, camera=(0.0, 0.0, d)), key=lambda o: o["size"][2])
+        yaw, txy, err = calibrate_2pt((seen[0]["x"], seen[0]["y"]), (seen[1]["x"], seen[1]["y"]),
                                       objs[0][:2], objs[1][:2])
         pose = CameraPose(n, d, yaw, txy, TABLE_Z)
-        found = sorted(find_objects(pose.to_base(cam_pts), TABLE_Z, camera=pose.t), key=lambda o: o['size'][2])
+        found = sorted(find_objects(pose.to_base(cam_pts), TABLE_Z, camera=pose.t), key=lambda o: o["size"][2])
         for o, (x, y, _, size) in zip(found, objs):
-            self.assertTrue(o['completed'])
-            self.assertAlmostEqual(o['x'], x, delta=0.008)
-            self.assertAlmostEqual(o['y'], y, delta=0.008)
+            self.assertTrue(o["completed"])
+            self.assertAlmostEqual(o["x"], x, delta=0.008)
+            self.assertAlmostEqual(o["y"], y, delta=0.008)
             # seen width = the object's extent across the line of sight (a turned square looks wider)
-            self.assertGreater(o['size'][1], size[1] - 0.005)
-            self.assertLess(o['size'][1], size[1] * math.sqrt(2) + 0.006)
+            self.assertGreater(o["size"][1], size[1] - 0.005)
+            self.assertLess(o["size"][1], size[1] * math.sqrt(2) + 0.006)
 
 
     def test_known_box(self):
@@ -146,11 +146,11 @@ class LowCamera(unittest.TestCase):
         found = find_objects(true.to_base(cam_pts), TABLE_Z, camera=t, known_size=size)
         self.assertEqual(len(found), 1)
         o = found[0]
-        self.assertAlmostEqual(o['x'], 0.04, delta=0.008)
-        self.assertAlmostEqual(o['y'], -0.26, delta=0.008)
-        self.assertAlmostEqual(math.remainder(o['yaw'] - 0.3, math.pi), 0.0, delta=0.08)
-        self.assertEqual(o['size'], size)
+        self.assertAlmostEqual(o["x"], 0.04, delta=0.008)
+        self.assertAlmostEqual(o["y"], -0.26, delta=0.008)
+        self.assertAlmostEqual(math.remainder(o["yaw"] - 0.3, math.pi), 0.0, delta=0.08)
+        self.assertEqual(o["size"], size)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
