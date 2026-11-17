@@ -10,12 +10,14 @@
 #   base/tools/deploy.sh --rollback      put back the files the newest deploy backup holds, on both hosts
 #   base/tools/deploy.sh --voice         also voice/voice_assistant -> Jetson ~/ros2_ws/src/voice_assistant, then
 #                                        colcon build --symlink-install --packages-select voice_assistant
-#   base/tools/deploy.sh --arm [--arm-ref arm-system]
-#                                        also the arm packages (branch arm-system, arm/so100_*, API.md, README.md)
+#   base/tools/deploy.sh --arm [--arm-ref REF]
+#                                        also the arm packages from the same commit (or REF; branch arm-system
+#                                        before 2026-11-17): arm/so100_*, API.md, README.md
 #                                        -> Jetson ~/so100_ws/src, then colcon build of the three packages; the
 #                                        running arm stack keeps the old code until it is restarted; and
-#                                        arm/tools/bagpick/{bagpick,bagvision,gcam}.py -> ~/so100_ws (the console's
-#                                        arm bagpick runs them there), backed up first to
+#                                        arm/tools/bagpick/{bagpick,bagvision,gcam}.py and arm/webcam_view.py ->
+#                                        ~/so100_ws (the console's arm bagpick and the agent's webcam run them
+#                                        there), backed up first to
 #                                        ~/so100_ws/backups/deploy-<time>-bagpick.tar.gz
 #
 # What goes where (as before 2026-11-15):
@@ -32,7 +34,7 @@ cd "$(dirname "$0")/../.."
 
 PI_HOSTS="xohm@192.168.31.21 xohm@100.73.128.36"
 JETSON_HOSTS="robotpsu@192.168.31.137 robotpsu@100.108.202.48"
-REF=HEAD DRY=0 RESTART=0 PARAMS=0 ROLLBACK=0 VOICE=0 ARM=0 ARM_REF=arm-system
+REF=HEAD DRY=0 RESTART=0 PARAMS=0 ROLLBACK=0 VOICE=0 ARM=0 ARM_REF=
 while [ $# -gt 0 ]; do
   case $1 in
     --ref) REF=$2; shift ;;
@@ -189,7 +191,8 @@ if [ $VOICE = 1 ]; then  # the voice package, built where it always was (symlink
   echo "$VERSION" | ssh "$JETSON" "cat > ~/ros2_ws/src/voice_assistant/VERSION.json"
   ssh "$JETSON" 'source /opt/ros/jazzy/setup.bash && cd ~/ros2_ws && colcon build --symlink-install --packages-select voice_assistant 2>&1 | tail -3'
 fi
-if [ $ARM = 1 ]; then  # the arm packages from their own branch; calibration and top-level files stay as they are
+if [ $ARM = 1 ]; then  # the arm packages; calibration and the other top-level files stay as they are
+  ARM_REF=${ARM_REF:-$REF}  # the same commit as the Pi and the Jetson unless --arm-ref says otherwise
   ARM_COMMIT=$(git rev-parse --verify "$ARM_REF^{commit}")
   ARM_LIST=$( { for d in so100_driver so100_interfaces so100_moveit_config; do git ls-tree -r --name-only "$ARM_COMMIT:arm/$d" | sed "s#^#$d/#"; done; echo API.md; echo README.md; } )
   echo "$ARM_LIST" | backup "$JETSON" so100_ws/src
@@ -198,8 +201,9 @@ if [ $ARM = 1 ]; then  # the arm packages from their own branch; calibration and
   done
   for f in API.md README.md; do git show "$ARM_COMMIT:arm/$f" | ssh "$JETSON" "cat > ~/so100_ws/src/$f"; done
   # bagpick's three files sit in the workspace root (arm/tools/bagpick/README.md); its gcam.py is the one there
-  printf '%s\n' bagpick.py bagvision.py gcam.py | backup "$JETSON" so100_ws -bagpick
+  printf '%s\n' bagpick.py bagvision.py gcam.py webcam_view.py | backup "$JETSON" so100_ws -bagpick
   for f in bagpick.py bagvision.py gcam.py; do git show "$ARM_COMMIT:arm/tools/bagpick/$f" | ssh "$JETSON" "cat > ~/so100_ws/$f"; done
+  git show "$ARM_COMMIT:arm/webcam_view.py" | ssh "$JETSON" "cat > ~/so100_ws/webcam_view.py"
   printf '{"commit": "%s", "describe": "%s", "branch": "%s", "deployed": "%s"}' "$ARM_COMMIT"     "$(git describe --always "$ARM_COMMIT")" "$ARM_REF" "$(date -Iseconds)" | ssh "$JETSON" "cat > ~/so100_ws/src/VERSION.json"
   ssh "$JETSON" 'source /opt/ros/jazzy/setup.bash && cd ~/so100_ws && colcon build --symlink-install --packages-select so100_interfaces so100_driver so100_moveit_config 2>&1 | tail -4'
 fi

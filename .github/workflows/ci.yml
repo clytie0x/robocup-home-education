@@ -29,3 +29,37 @@ jobs:
         with:
           name: scenario-output
           path: hmc/out/
+
+  # The robot's code: no ROS needed, every suite runs with pytest from its own folder (base/pi/conftest.py finds hmc).
+  robot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -r base/pi/requirements.txt -r base/jetson/requirements.txt scipy pytest ruff  # scipy: the arm's IK
+      - name: One quote style (ruff.toml)
+        run: python -m ruff check .
+      - name: base/pi
+        working-directory: base/pi
+        run: python -m pytest -q
+      - name: base/jetson
+        working-directory: base/jetson
+        run: python -m pytest -q
+      - name: base/firmware tools
+        working-directory: base/firmware/tools
+        run: python -m pytest -q
+      - name: base/firmware (C, laptop build)
+        working-directory: base/firmware
+        run: make test
+      - name: base/pc virtual operator
+        working-directory: base/pc/virtual_operator
+        run: python -m pytest -q
+      - name: arm (so100_driver, no ROS)
+        working-directory: arm/so100_driver
+        run: python -m pytest -q test  # not so100_driver/*_test.py: those are ROS tools that move the arm
+      - name: voice (voice_assistant, no ROS)
+        working-directory: voice/voice_assistant
+        run: python -m pytest -q

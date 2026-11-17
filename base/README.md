@@ -23,8 +23,13 @@ Docs:
 - [Systemd user units](systemd/README.md)
 - [New base firmware, design](docs/firmware-design.md); code in [firmware/](firmware/README.md), flashed 2026-11-14 (0c020e4)
 
-Run the tests from the repo root (Windows, `;` separates paths):
+Run the tests with pytest from each suite's folder, as CI does (`.github/workflows/ci.yml`, job `robot`):
 
 ```
-PYTHONPATH="hmc/src;base/pi" python -m unittest discover -s base/pi/tests -v
+pip install -r base/pi/requirements.txt -r base/jetson/requirements.txt pytest
+cd base/pi && python -m pytest -q
 ```
+
+The same in base/jetson, base/firmware/tools, base/pc/virtual_operator and voice/voice_assistant,
+`python -m pytest -q test` in arm/so100_driver (with scipy), `make test` in base/firmware for the C code. On the Pi, without pytest:
+`.venv/bin/python -m unittest discover -s tests`.

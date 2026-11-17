@@ -1,0 +1,6 @@
+# The Pi's Python packages (~/hmc-base/.venv): python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# Lower bounds are the versions the tests passed with (laptop 2026-11-17; the Pi's .venv had numpy 2.5.4 on
+# 2026-11-13). Exact pins wait for `.venv/bin/pip freeze` on the Pi, which was offline on 2026-11-17.
+numpy>=2.2
+opencv-python-headless>=4.13
+pyserial>=3.5

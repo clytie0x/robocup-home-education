@@ -1,0 +1,7 @@
+# The Jetson's Python packages for ~/hmc-follow (python3 -m pip install -r requirements.txt).
+# Lower bounds are the versions the tests passed with (laptop 2026-11-17); exact pins wait for `pip freeze` on
+# the Jetson, which was offline that day. Not from pip: TensorRT (JetPack apt, engine.py), rclpy and the ROS
+# messages (ROS 2 Jazzy, base_bridge.py and hmc_flow.py), ultralytics (tools only, for exporting models).
+numpy>=2.2
+opencv-python-headless>=4.13
+onnxruntime>=1.27
