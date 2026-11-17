@@ -41,6 +41,15 @@ COMPANY = MAX_WIDTH  # m; someone this close to the operator can become one LiDA
 # link down, 10 rode the stranger before these tracks and 5 after; vanished counted from born for everyone
 # gave 0, but held a lone walker with a 0.3 to 0.6 m stride in 21 of 150 walks (0 now, 0 before).
 COMPANY_MIN = 0.6
+# Revealed. An id born next to a still operator where the previous scan already had a return at its range is
+# no one coming apart from them: the robot's own move (turning toward them on arrival) cut a leg-sized piece out
+# of something that stood there all along. Run 20261115-023855 at 160 s: a cabinet edge 0.59 m from the operator
+# became a new id that way, the split rule dropped the track and the robot searched for a person in front of it
+# (tests/test_follow_scenes.py). A stranger coming apart from a still operator was their object before, so the
+# vanished rule dropped the track when they merged; a split needs the operator to have moved.
+STILL = 0.10  # m the operator's fix moved since the previous one
+SEEN_THERE = 0.10  # m: a previous return this much past the new id's range showed its spot free
+SEEN_DEG = 1.5  # degrees each side of the new id's bearing searched for such a return
 WALKED_IN = 0.7  # m: first seen this far from the operator, it is someone else, not a leg of a long stride (up to
 # 0.6 m apart in the scratch walker model, and the track may sit on either leg). It was 1.0, and the 5 scenes
 # above were strangers first seen 0.64 to 0.99 m away. In the walker (2 x 150 walks) every id that came within
@@ -168,6 +177,7 @@ class RealSenses:
         self._merged = None  # [odometry point, last time seen, ids seen there] where the operator may be merged
         self._lights = []  # box light of each look given while the brain learned (LIGHT_RATIO)
         self.camera_refused = None  # why the Jetson refused this cycle's fresh frame ("dark", ...), for the log
+        self._scan_before = None  # (scan, pose) of the previous read
 
     @property
     def locked(self):
@@ -297,6 +307,7 @@ class RealSenses:
 
         self.ambiguous = now - self._unsure_at <= UNSURE_LATCH
         self._last_now = now
+        self._scan_before = (scan, pose)  # for _was_there on the next cycle
         if self.ambiguous:
             look, looks = None, {}  # never learn or score a look from a merged scene
         if look is not None and look_light is not None and self.learned < LEARNED and len(self._lights) < LEARNED:
@@ -417,12 +428,20 @@ class RealSenses:
                 walked_up = math.dist(pt, operator) <= CROWDED and track.far >= MOVED
                 near[pid] = (track.run_since, -math.inf if walked_up else track.born if pid in self._walked_in else track.run_since)
         if self._fixed_before:  # the first fix of a track has nothing to compare with
-            self._born_near |= {pid for pid, (since, _) in near.items() if since == now}
+            born = {pid for pid, (since, _) in near.items() if since == now}
+            self._born_near |= born
+            self._revealed |= {pid for pid in born if self._was_there(measured[pid], operator)}
+        # a revealed piece goes as it came, with the view: no one merged or came apart. Its centre slides along
+        # the thing it is cut from as the view changes, so `far` cannot tell; the camera can: once it saw a
+        # person there, it counts like anyone.
+        self._revealed -= set(self._camera_at)
         vanished = {pid for pid, (since, born) in self._company.items() if now - born >= COMPANY_MIN
-                    and (pid not in measured or self.tracks[pid].run_since != since)}
-        split = {pid for pid in self._born_near if pid in measured and now - self.tracks[pid].run_since >= COMPANY_MIN}
-        self._company, self._fixed_before = near, True
+                    and (pid not in measured or self.tracks[pid].run_since != since)} - self._revealed
+        split = {pid for pid in self._born_near - self._revealed
+                 if pid in measured and now - self.tracks[pid].run_since >= COMPANY_MIN}
+        self._company, self._fixed_before, self._fix_before = near, True, operator
         self._born_near = {pid for pid in self._born_near if pid in measured}
+        self._revealed &= self._born_near
         exempt = {pid for pid in vanished | split if self._camera_fresh and pid in self.tracks and self.tracks[pid].object}
         vanished, split = vanished - exempt, split - exempt
         if not vanished and not split:
@@ -467,10 +486,23 @@ class RealSenses:
         return (there == [person] and person[2] is not None
                 and abs(person[2] - self._camera_range(c)) <= RANGE_TOL)
 
+    def _was_there(self, at, operator):
+        """With the operator standing still, did the previous scan show odometry point `at` free? Not free (a return
+        there or nearer, or no return at all on those bearings) means whatever is there may have stood there."""
+        if self._scan_before is None or self._fix_before is None or math.dist(operator, self._fix_before) > STILL:
+            return False
+        scan, pose = self._scan_before
+        bx, by = geometry.odom_to_base(at, pose)
+        lx = bx - self.p["lidar_x"]
+        deg, rng = math.degrees(math.atan2(by, lx)), math.hypot(lx, by)
+        return not any(abs((b - deg + 180.0) % 360.0 - 180.0) <= SEEN_DEG and m > rng + SEEN_THERE for b, m in scan)
+
     def _new_tracker(self):
         self._company = {}  # id -> (start of its run, start of its age) for the ids within COMPANY of the operator at the last fix
         self._born_near = set()  # ids that first appeared within COMPANY of the operator
+        self._revealed = set()  # of those, the ones that stood there before the robot's move showed them (STILL)
         self._fixed_before = False
+        self._fix_before = None  # the operator's odometry point at the previous fix
         return LegTracker(lost_after=self.p["track_coast_max"])
 
     def _fix_ok(self, now, pos, predicted, last_fix, cands, score):

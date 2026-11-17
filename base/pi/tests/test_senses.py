@@ -1046,3 +1046,29 @@ class Lighting(unittest.TestCase):
         near = (1.5, -0.25)
         read(s, 2.2, scan_of(person(*near)), Answer(2.2, [lit(*near, OTHER, 85.0)]))
         self.assertFalse(s.locked)
+
+
+class Revealed(unittest.TestCase):
+    """_was_there: an id born next to a still operator counts as someone coming apart only where the previous scan
+    showed its spot free (tests/test_follow_scenes.py has the recorded room this came from)."""
+
+    def senses(self, beams):
+        s = RealSenses(P)
+        s._scan_before = (beams, (0.0, 0.0, 0.0))
+        s._fix_before = (1.5, 0.0)
+        return s
+
+    def spot(self, deg, m):  # odometry point m from the LiDAR on bearing deg, base at the origin
+        return (P["lidar_x"] + m * math.cos(math.radians(deg)), m * math.sin(math.radians(deg)))
+
+    def test_a_return_at_the_spot_before_is_something_that_stood_there(self):
+        self.assertTrue(self.senses([(-20.0, 1.2)])._was_there(self.spot(-20.0, 1.2), (1.5, 0.0)))
+
+    def test_no_return_there_before_is_no_proof_of_free_space(self):
+        self.assertTrue(self.senses([(-20.0, 0.0)])._was_there(self.spot(-20.0, 1.2), (1.5, 0.0)))
+
+    def test_a_spot_the_scan_saw_through_is_someone_new(self):
+        self.assertFalse(self.senses([(-20.0, 3.0)])._was_there(self.spot(-20.0, 1.2), (1.5, 0.0)))
+
+    def test_a_moving_operator_is_never_revealed(self):
+        self.assertFalse(self.senses([(-20.0, 1.2)])._was_there(self.spot(-20.0, 1.2), (1.7, 0.0)))

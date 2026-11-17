@@ -48,6 +48,23 @@ class PlanServerTest(unittest.TestCase):
         for point in path:
             self.assertGreaterEqual(min(s.clearance(tuple(point)) for s in shapes), min(here, 0.29 + 0.1) - 1e-9)
 
+    def test_answer_finds_the_way_out_of_a_berth_boxed_in_by_other_zones(self):
+        # Recorded 2026-11-15 (134.9 to 139.0 s): a remembered point 0.31 m from the base put it inside the wide
+        # berth; the cells freed round it (a disc of the berth) all ended inside the zones of the shapes beside
+        # it, so the operator 1.4 to 1.7 m away had no path and the robot stood. The way out now follows the
+        # cells no closer to anything than the base is (navigation.ESCAPE).
+        recorded = json.loads((Path(__file__).parent / "fixtures" / "no-path-start-in-zone-2026-11-15.json").read_text())
+        for i, request in enumerate(recorded["requests"]):
+            with self.subTest(i):
+                shapes = [Circle(*values) for _, *values in request["shapes"]]
+                start, goal = tuple(request["start"]), tuple(request["goal"])
+                path = plan_server.answer(dict(request, id=i, robot_radius=0.29, close_plan=True))["path"]
+                self.assertIsNotNone(path)
+                self.assertLess(math.dist(path[-1], goal), math.dist(start, goal) - 0.3)
+                here = min(s.clearance(start) for s in shapes)
+                for point in path:  # never nearer to anything than where it stood
+                    self.assertGreaterEqual(min(s.clearance(tuple(point)) for s in shapes), min(here, 0.29 + 0.1) - 1e-9)
+
     def test_only_the_newest_waiting_request_counts(self):
         self.assertEqual(plan_server.newest([b'{"id": 1}', b'{"id": 2}'])["id"], 2)
         self.assertIsNone(plan_server.newest([]))

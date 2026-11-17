@@ -72,6 +72,7 @@ LAST_PLAN_TIGHT = False
 # circles closed every way across open floor; it should come as close as it can instead. Off in the
 # simulation (its runs stay byte-identical); the real base (body.py, plan_server.py) turns it on.
 TOWARD_UNREACHABLE = False
+ESCAPE = 1.0  # metres from the start the way out of the safety zone may run
 TOWARD_GAIN = 2 * CELL  # metres the reachable cell must be nearer to the goal than we are, or we stay
 
 Cell = tuple[int, int]
@@ -257,8 +258,11 @@ def _grid_path(start: Point, goal: Point, shapes: list[Shape], near_side: bool,
     # around us that are no closer to anything than we are now: we may only move away.
     start_cell = cell_of(start)
     here_clear = min((s.clearance(start) for s in shapes), default=math.inf)
+    # Beyond that disc the way out goes on through the cells joined to it, up to ESCAPE away, until a free
+    # cell: the disc alone could end inside the zones of other shapes and trap us (run 20261115-023855).
     if here_clear < inflate:
         reach = int(inflate / CELL) + 1
+        disc = []
         for i in range(start_cell[0] - reach, start_cell[0] + reach + 1):
             for j in range(start_cell[1] - reach, start_cell[1] + reach + 1):
                 c = centre((i, j))
@@ -266,6 +270,22 @@ def _grid_path(start: Point, goal: Point, shapes: list[Shape], near_side: bool,
                     s.clearance(c) >= here_clear for s in shapes
                 ):
                     blocked.discard((i, j))
+                    disc.append((i, j))
+        out, todo = {start_cell, *disc}, [start_cell, *disc]
+        while todo:
+            cur = todo.pop()
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    nb = (cur[0] + di, cur[1] + dj)
+                    if nb in out or not inside(nb):
+                        continue
+                    out.add(nb)
+                    c = centre(nb)
+                    if nb in blocked and distance(c, start) <= ESCAPE and all(
+                        s.clearance(c) >= here_clear for s in shapes
+                    ):
+                        blocked.discard(nb)
+                        todo.append(nb)
     blocked.discard(start_cell)  # we are already here, so we must be able to leave
     goal_cell = cell_of(goal)
     if goal_cell in blocked:
