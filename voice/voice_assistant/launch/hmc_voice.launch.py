@@ -34,8 +34,10 @@ def generate_launch_description():
              parameters=params, output="screen", condition=IfCondition(use_mic)),
         # rules brain: it reports what the user wants on /robot/intent, it never drives the robot itself.
         # task_words = the Help Me Carry words (this is the car, go back to the start, ready, ...)
+        # speak_chat off whatever ~/.robot_voice_local.yaml says: hmc_flow alone speaks on /tts/say, a chat reply
+        # from the brain would talk over its lines ("Please point at the bag.")
         Node(package="voice_assistant", executable="rule_node", name="rule_node",
-             parameters=params + [{"task_words": True}], output="screen"),
+             parameters=params + [{"task_words": True, "speak_chat": False}], output="screen"),
         Node(package="voice_assistant", executable="tts_node", name="tts_node",
              parameters=params, output="screen"),
     ])

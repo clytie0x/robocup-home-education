@@ -1,0 +1,34 @@
+{
+  "calibrated": true,
+  "fx": 805.6566516199323,
+  "cx": 319.5,
+  "cy": 239.5,
+  "width": 640,
+  "height": 480,
+  "x": 0.33,
+  "y": 0.0,
+  "z": 0.89,
+  "yaw_deg": 1.4024275508991533,
+  "pitch_deg": 61.36732280365156,
+  "roll_deg": 0.0,
+  "mirror": false,
+  "info": {
+    "method": "13 red discs on the floor at taped points, 2 frames (tools/front_cam_bag_cal.py discs)",
+    "date": "2026-11-18 18:16",
+    "rms_px": 5.42,
+    "fixed": {
+      "x": 0.33,
+      "y": 0.0,
+      "z": 0.89,
+      "roll_deg": 0.0
+    },
+    "measured_by_owner": "lens 89 cm above the floor, 4-5 cm behind F; F 20 cm ahead of the LiDAR; LiDAR 0.175 m ahead of the turning centre (slam_bridge.LASER_X)",
+    "std": {
+      "fx_px": 5.85,
+      "yaw_deg": 0.2,
+      "pitch_deg": 0.11
+    },
+    "check": "bag handle top measured 0.371 m, owner's tape 0.36-0.37 m; disc on the centre line within 3-4 px",
+    "session": "cal/discs.json"
+  }
+}

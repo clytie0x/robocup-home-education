@@ -169,6 +169,23 @@ class AgentTest(unittest.TestCase):
             (d / "stat").write_text("%d (x) S 1 %d %d 0" % (pid, pid, pid))
         self.assertEqual(agent.outside(set(), proc), {"whisper": [201], "voice": [202], "arm": [203]})
 
+    def test_outside_counts_voices_generic_stack_as_a_clash(self):
+        # control_panel.py's voice_assistant.launch.py (flow_node, command_bridge_node, arm_action_bridge) next to
+        # hmc_flow would say and command twice: it blocks voice, flow and arm; its nodes block what they clash with
+        proc = Path(self.tmp.name) / "proc"
+        cases = {301: [b"/usr/bin/python3", b"/opt/ros/jazzy/bin/ros2", b"launch", b"voice_assistant",
+                       b"voice_assistant.launch.py", b"brain:=rules"],
+                 302: [b"/usr/bin/python3", b"/home/u/ros2_ws/install/voice_assistant/lib/voice_assistant/flow_node",
+                       b"--ros-args"],
+                 303: [b"/usr/bin/python3", b"/x/lib/voice_assistant/arm_action_bridge"],
+                 304: [b"/usr/bin/python3", b"/x/lib/voice_assistant/rule_node"]}  # hmc_voice's own node: no clash
+        for pid, args in cases.items():
+            d = proc / str(pid)
+            d.mkdir(parents=True)
+            (d / "cmdline").write_bytes(b"\0".join(args) + b"\0")
+            (d / "stat").write_text("%d (x) S 1 %d %d 0" % (pid, pid, pid))
+        self.assertEqual(agent.outside(set(), proc), {"voice": [301], "flow": [301, 302], "arm": [301, 303]})
+
     def holding_agent(self):
         holds = []
         a = self.agent

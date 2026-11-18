@@ -10,7 +10,7 @@ The flow matches the task's own words in /speech/heard first ("follow me", "stop
 "go back", "done", ...). Only sentences it does not handle in the current state go on to the brain
 on /speech/text, so one sentence never triggers twice. Intents from the brain are used as well.
 
-Start: the flow enters ready once tts_node subscribes to /tts/say (so the first line is heard), or after
+Start: the flow enters ready once tts_node says so on /tts/ready (latched, so the first line is heard), or after
 START_WAIT s without it (warning logged; lines are still published), and once one /base/status was read
 (at most STATUS_WAIT s: link and person as the Pi has them, so a restarted flow does not take the person
 for lost), or at the first /speech/heard or /robot/intent, which is then handled in ready. So the base
@@ -83,7 +83,7 @@ REMEASURE_CODES = ("MISSED", "NOT_FOUND")  # a grab that missed: the Pi measures
 BAG_REASONS = {"NOT_POINTED": "I did not see you point.", "NO_BAG": "I see no bag there.",
                "BLOCKED": "Something is in my way.", "TIMEOUT": "That took me too long.",
                "LOST_BAG": "I lost sight of the bag."}
-# s to wait for tts_node on /tts/say before starting anyway: it may start late, crash or be absent,
+# s to wait for tts_node's /tts/ready before starting anyway: it may start late, crash or be absent,
 # and the base must still be commandable
 START_WAIT = 3.0
 STATUS_WAIT = 1.0  # s to wait at start for one /base/status (link and person as the Pi has them)
@@ -138,10 +138,11 @@ def classify(text):
     return None
 
 
-def should_start(listeners, waited_s, wait_s=START_WAIT, status_seen=True, status_wait_s=STATUS_WAIT):
-    """The node starts the flow once someone listens on /tts/say (or after wait_s without a listener) and a
-    /base/status was read (or after status_wait_s without one)."""
-    return (listeners > 0 or waited_s >= wait_s) and (status_seen or waited_s >= status_wait_s)
+def should_start(tts_ready, waited_s, wait_s=START_WAIT, status_seen=True, status_wait_s=STATUS_WAIT):
+    """The node starts the flow once tts_node published /tts/ready (or after wait_s without it) and a
+    /base/status was read (or after status_wait_s without one). Not the subscriber count of /tts/say: stt_node
+    subscribes to it too (to drop the robot's own voice), so a count above 0 does not mean tts_node is up."""
+    return (bool(tts_ready) or waited_s >= wait_s) and (status_seen or waited_s >= status_wait_s)
 
 
 class HmcFlow:
@@ -465,7 +466,8 @@ def make_node():
     """The rclpy node, built here so the rest of the file imports without ROS."""
     import rclpy
     from rclpy.node import Node
-    from std_msgs.msg import String
+    from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+    from std_msgs.msg import Bool, String
 
     class HmcFlowNode(Node):
         def __init__(self):
@@ -492,6 +494,11 @@ def make_node():
             self.create_subscription(String, "/robot/intent", self.on_intent, 10)
             self.create_subscription(String, "/robot/event", self.on_event, 10)
             self.create_subscription(String, "/base/status", self.on_status, 10)
+            # tts_node's "I can talk now", latched like its publisher (same QoS as voice's flow_node)
+            self.tts_ready = False
+            latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                                 reliability=ReliabilityPolicy.RELIABLE)
+            self.create_subscription(Bool, "/tts/ready", self.on_tts_ready, latched)
             self.create_timer(0.2, self.on_tick)
             self.t0 = time.time()
 
@@ -535,14 +542,16 @@ def make_node():
             if isinstance(status, dict):
                 self.emit(self.logic.on_status(status, time.time()))
 
+        def on_tts_ready(self, msg):
+            self.tts_ready = self.tts_ready or bool(msg.data)
+
         def on_tick(self):
             now = time.time()
             if self.logic.state is None:  # wait for tts_node (first line heard) and one /base/status
-                listeners = self.pub_say.get_subscription_count()
-                if not should_start(listeners, now - self.t0, status_seen=self.logic.status_seen):
+                if not should_start(self.tts_ready, now - self.t0, status_seen=self.logic.status_seen):
                     return
-                if listeners == 0:
-                    self.get_logger().warn("no tts_node on /tts/say after %.0f s: starting without voice"
+                if not self.tts_ready:
+                    self.get_logger().warn("no /tts/ready from tts_node after %.0f s: starting without voice"
                                            % START_WAIT)
                 if not self.logic.status_seen:
                     self.get_logger().warn("no /base/status after %.0f s (base_bridge down?): starting without it"

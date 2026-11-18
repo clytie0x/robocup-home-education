@@ -30,6 +30,13 @@ def test_hmc_voice_launch_starts_the_three_voice_nodes():
     assert executables == ["stt_node", "rule_node", "tts_node"]
 
 
+def test_hmc_voice_launch_keeps_the_brain_quiet():
+    # the local yaml may set rule_node speak_chat: true for the generic launch; here hmc_flow alone speaks,
+    # and the override comes after the yaml files in parameters, so it wins
+    src = LAUNCH.read_text(encoding="utf-8")
+    assert '"speak_chat": False' in src
+
+
 def test_hmc_voice_launch_leaves_the_task_flow_alone():
     # hmc_flow.py owns /tts/say and /robot/command; flow_node and command_bridge_node would duplicate them
     src = LAUNCH.read_text(encoding="utf-8")

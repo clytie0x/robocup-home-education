@@ -109,6 +109,13 @@ SCRIPTS = {"detector": "server.py", "voice": "hmc_voice.launch.py", "bridge": "b
            "armstack": "arm.launch.py", "webcam": "webcam_view.py",
            "flow": "hmc_flow.py"}  # a python* argv with this file name (ros2 is python: its launch file counts)
 EXECUTABLES = {"whisper": "whisper-server"}  # argv[0]'s file name
+# Programs of voice's generic stack (voice_assistant.launch.py, as robot_voice/scripts/control_panel.py starts it,
+# or its nodes run one by one) that clash with ours on domain 42: its flow_node answers /speech/heard next to
+# hmc_flow (both say /tts/say and send /robot/command), its stt/tts would share the mic and speaker with ours,
+# command_bridge_node drives /cmd_vel and calls /arm/stop, arm_action_bridge calls /arm/pick and /arm/place on
+# drop_bag next to bag_arm. A python* argv with one of these file names counts as an outside copy of each name.
+CLASHES = {"voice_assistant.launch.py": ("voice", "flow", "arm"), "flow_node": ("flow",),
+           "command_bridge_node": ("flow", "arm"), "arm_action_bridge": ("arm",)}
 SHARED = ("whisper", "armstack", "webcam")  # start-all uses a copy started by hand (servers.sh start-stt) instead of stopping there
 LOG_LINES = 20
 STOP_STEPS = ((signal.SIGINT, 5.0), (signal.SIGTERM, 3.0))  # ROS nodes end cleanly on Ctrl+C; SIGKILL after
@@ -276,6 +283,10 @@ def outside(ours, proc=Path("/proc")):
         for name, script in SCRIPTS.items():
             if script in names:
                 found.setdefault(name, []).append(int(entry.name))
+        for script, blocked in CLASHES.items():
+            if script in names:
+                for name in blocked:
+                    found.setdefault(name, []).append(int(entry.name))
     return {name: sorted(pids) for name, pids in found.items()}  # /proc's own order differs between machines
 
 
@@ -486,9 +497,10 @@ class Agent:
         if not pids:
             return None
         listed = ", ".join(str(pid) for pid in pids)
-        return ("มี %s ที่เปิดเองด้วยมืออยู่แล้ว (pid %s) "
-                "ให้ปิดตัวนั้นก่อน / "
-                "%s is already running, started by hand (pid %s): stop that copy first" % (name, listed, name, listed))
+        return ("มี %s หรือโปรแกรมที่ชนกับมัน (voice_assistant.launch.py, flow_node, ...) เปิดเองด้วยมืออยู่แล้ว "
+                "(pid %s) ให้ปิดตัวนั้นก่อน / "
+                "%s, or a program that clashes with it (voice_assistant.launch.py, flow_node, ...), is already "
+                "running, started by hand (pid %s): stop that copy first" % (name, listed, name, listed))
 
     def _start_all(self):
         try:

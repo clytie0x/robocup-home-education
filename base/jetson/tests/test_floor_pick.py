@@ -526,6 +526,34 @@ def floor_image():
 
 
 @unittest.skipUnless(HAVE_CV2, "OpenCV is not installed")
+class OwnMoveSettleTest(unittest.TestCase):
+    """RosArm.moving: joint motion right after our own goal ended is our arm settling, not someone else."""
+
+    def arm(self, ended_ago, moves_ago=(0.4, 0.2)):
+        a = floor_pick.RosArm.__new__(floor_pick.RosArm)  # no ROS: only the bookkeeping moving() reads
+        now = floor_pick.time.monotonic()
+        a._goal, a._goal_ended = None, now - ended_ago
+        a._history = [(now - moves_ago[0], {n: 0.0 for n in ARM}), (now - moves_ago[1], {n: 0.05 for n in ARM})]
+        return a
+
+    def test_motion_just_after_our_goal_is_not_someone_else(self):
+        self.assertFalse(self.arm(ended_ago=0.6).moving())   # 0.6 s: the calibration view's wait
+
+    def test_motion_long_after_our_goal_is_someone_else(self):
+        self.assertTrue(self.arm(ended_ago=30.0).moving())
+
+    def test_shoulder_pan_jitter_at_rest_is_not_motion(self):
+        a = self.arm(ended_ago=30.0)
+        now = floor_pick.time.monotonic()
+        a._history = [(now - 0.4, {n: 0.0 for n in ARM}), (now - 0.2, dict({n: 0.0 for n in ARM}, shoulder_pan=0.011))]
+        self.assertFalse(a.moving())   # measured on the robot, arm still: 0.0107 rad
+
+    def test_motion_while_our_goal_runs_is_ours(self):
+        a = self.arm(ended_ago=30.0)
+        a._goal = object()
+        self.assertFalse(a.moving())
+
+
 class DetectorTest(unittest.TestCase):
     def test_pink_bag_is_found(self):
         img = floor_image()

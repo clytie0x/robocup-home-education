@@ -48,6 +48,7 @@ GRIP_HELD = 0.3             # rad: about where the jaws stop on the bag (for pla
 START_TOLERANCE = 0.12      # rad: the arm must be this close to where a move starts
 SETTLE = 0.5                # s after the lift before checking the bag is still held
 OK_STATES = ("idle", "resting")
+OWN_MOVE_SETTLE = 0.5       # s after a goal of ours ends: joint motion this soon is our own arm settling
 
 Result = collections.namedtuple("Result", "ok code message")
 
@@ -732,6 +733,7 @@ class RosArm:
         self._history = collections.deque(maxlen=200)
         self._api = {}
         self._goal = None
+        self._goal_ended = float("-inf")  # time.monotonic() when our last trajectory goal ended
         self.node.create_subscription(ArmState, "/arm/state", self._on_state, 10)
         self.node.create_subscription(JointState, "/joint_states", self._on_joints, 10)
         self.ex = MultiThreadedExecutor()
@@ -748,13 +750,16 @@ class RosArm:
         self._joints_t = time.monotonic()
         self._history.append((self._joints_t, self._joints))
 
-    def moving(self, seconds=1.5, tol=0.01):
+    def moving(self, seconds=1.5, tol=0.03):  # 0.01 was below shoulder_pan's own jitter at rest (0.011 rad, 2026-11-18)
         """True when a joint moved more than `tol` rad in the last `seconds` while no goal of ours ran:
         someone else (another program on the driver) is moving the arm."""
         if self._goal is not None:
             return False
         now = time.monotonic()
-        recent = [q for t, q in list(self._history) if now - t <= seconds]
+        # our own goal's last motion and the servos settling after it are not someone else (seen 2026-11-18:
+        # views 0.6 s apart were refused as "someone else is moving the arm")
+        since = max(now - seconds, self._goal_ended + OWN_MOVE_SETTLE)
+        recent = [q for t, q in list(self._history) if t > since]
         if len(recent) < 2:
             return False
         return any(max(q.get(n, 0.0) for q in recent) - min(q.get(n, 0.0) for q in recent) > tol for n in ARM)
@@ -850,6 +855,7 @@ class RosArm:
         self._goal = handle
         res, why = self._wait(handle.get_result_async(), timeout, watch_busy=True)
         self._goal = None
+        self._goal_ended = time.monotonic()
         if res is None:
             handle.cancel_goal_async()
             return False, why, {"TIMEOUT": "timed out", "BUSY": "the arm team's node became busy",

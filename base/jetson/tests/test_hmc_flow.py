@@ -176,6 +176,11 @@ class ShouldStartTests(unittest.TestCase):
     def test_starts_when_tts_listens(self):
         self.assertTrue(hmc_flow.should_start(1, 0.0))
 
+    def test_a_listener_count_is_not_ready(self):
+        # stt_node subscribes to /tts/say as well: only tts_node's /tts/ready (True) starts the flow early
+        self.assertTrue(hmc_flow.should_start(True, 0.0))
+        self.assertFalse(hmc_flow.should_start(False, 0.0))
+
     def test_waits_for_tts_up_to_start_wait(self):
         self.assertFalse(hmc_flow.should_start(0, hmc_flow.START_WAIT - 0.1))
         self.assertTrue(hmc_flow.should_start(0, hmc_flow.START_WAIT))
