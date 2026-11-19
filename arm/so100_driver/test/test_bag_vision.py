@@ -220,6 +220,24 @@ class BagVisionTest(unittest.TestCase):
         self.assertAlmostEqual(same["centre"][1], rim["centre"][1], delta=0.01)
         self.assertEqual(aimed["from"], "handle")
         self.assertGreater(abs(aimed["centre"][1] - rim["centre"][1]), 0.01)
+        self.assertAlmostEqual(aimed["centre"][0], rim["centre"][0], delta=0.01)
+
+    def test_a_handle_above_the_rim_keeps_the_forward_distance(self):
+        cam = FrontCamera({
+            "calibrated": True, "fx": 500.0, "cx": 320.0, "cy": 240.0,
+            "x": 0.05, "y": 0.0, "z": 0.80, "pitch_deg": 40.0,
+            "width": 640, "height": 480,
+        })
+        cols = np.arange(200, 441, 4)
+        tops = np.stack([cols, np.full(cols.shape, 320.0)], axis=1)
+        blob = {"x0": 200.0, "x1": 440.0, "tops": tops, "all_tops": tops, "y0": 220.0, "y1": 430.0}
+        rim = locate(cam, blob, (0.0, 0.0), 0.05, 0.27)
+        on_row = locate(cam, dict(blob, handle={"cx": 400.0, "cy": 320.0, "area": 80}), (0.0, 0.0), 0.05, 0.27)
+        above = locate(cam, dict(blob, handle={"cx": 400.0, "cy": 260.0, "area": 80}), (0.0, 0.0), 0.05, 0.27)
+        self.assertEqual(above["aim"], "handle")
+        self.assertAlmostEqual(above["centre"][0], rim["centre"][0], delta=0.01)
+        self.assertGreater(abs(above["centre"][1] - rim["centre"][1]), 0.01)
+        self.assertAlmostEqual(above["centre"][1], on_row["centre"][1], delta=0.02)
 
 
 if __name__ == "__main__":

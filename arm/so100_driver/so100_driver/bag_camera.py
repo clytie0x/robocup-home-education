@@ -17,7 +17,8 @@ team's calibration (front_camera.json, robot frame with its origin at the turnin
      robot (handles parallel to the robot's y axis).
   2. what: the bag's FRONT wall (the one nearer the arm), bag_cam_half_depth in front of the centre. The jaws
      (pitched -60 deg) close across that wall. When the tuned model gives a handle centroid, the grasp
-     aims there; otherwise the paper rim (a handle has rope only at its very top). Finger tips are
+     keeps the rim's forward distance and shifts sideways onto the handle; otherwise the paper rim
+     (a handle has rope only at its very top). Finger tips are
      bag_cam_close_h above the floor. One jaw moves, so
      the middle of the open gap (gripper x GAP_MID), not the tool axis, is put on the wall. The wrist roll
      lines the closing axis up with the wall's normal (Kinematics.roll_for), not a guessed sign.
@@ -413,6 +414,47 @@ def _requested_pose(obj):
     return {"x": _num(getattr(obj, "x", None)), "y": _num(getattr(obj, "y", None)), "yaw": yaw, "height": height}
 
 
+def _centre_beyond(point_xy, pan, half_depth):
+    """Bag centre half_depth past a wall point, (forward, left) from the pan axis."""
+    rel = np.asarray(point_xy, float) - np.asarray(pan[:2], float)
+    nrm = float(np.linalg.norm(rel))
+    if nrm < 1e-9:
+        return None
+    return rel + half_depth * rel / nrm
+
+
+def _wall_forward(centre, half_depth):
+    """Forward distance of the wall point that _centre_beyond would turn into `centre`."""
+    c = np.asarray(centre, float)
+    nrm = float(np.linalg.norm(c))
+    if nrm <= half_depth + 1e-6:
+        return None
+    return float(c[0] * (nrm - half_depth) / nrm)
+
+
+def _handle_left_at(cam, hx, hy, pan, half_depth, centre):
+    """Left of the bag centre from the handle ray, read at the rim/foot wall depth.
+
+    The handle centroid is above the rim. Intersecting that ray with the rim-height plane lands
+    too far forward, by about (handle rise) / tan(pitch). The forward distance stays the rim/foot
+    estimate; only the left comes from the handle.
+    """
+    wall_fwd = _wall_forward(centre, half_depth)
+    if wall_fwd is None:
+        return None
+    d = cam.ray(hx, hy)
+    if d[0] <= 1e-6:
+        return None
+    s = (float(pan[0]) + wall_fwd - float(cam.pos[0])) / float(d[0])
+    if s <= 0:
+        return None
+    at = cam.pos + s * d
+    shifted = _centre_beyond(at[:2], pan, half_depth)
+    if shifted is None:
+        return None
+    return float(shifted[1])
+
+
 def locate(cam, b, pan, half_depth, top_h, foot=None, lying_h=0.12):
     """The bag's centre from a front-camera blob (bag_vision.find_bag), the bag standing and facing the arm.
     pan: the arm's pan axis (x, y) in the camera's robot frame. Two ways, then reconcile_edges:
@@ -421,8 +463,9 @@ def locate(cam, b, pan, half_depth, top_h, foot=None, lying_h=0.12):
       top:    the blob's top edge (median over its columns) is the front wall's rim, top_h above the floor
               (the camera looks steeply down on the front wall): centre half_depth beyond it. The usual case
               at pick distances, when the foot is out of the picture (less exact: top_h is per bag).
-    When the blob has a handle centroid (the tuned model), that pixel is the aim and the centre is taken
-    from it. Otherwise the rim. The rim width is rim_span of the top edge, not the blob's widest row, and
+    When the blob has a handle centroid (the tuned model), the centre keeps this forward distance and
+    takes its left from the handle ray at that depth. The handle sits above the rim, so the ray is not
+    intersected with z = top_h. The rim width is rim_span of the top edge, not the blob's widest row, and
     the standing check stays on the rim. Returns dict(centre (forward, left) from the pan axis, from, aim
     "handle" or "rim", confidence, spread, standing True / False / None, top_seen_h, centre_top,
     centre_bottom, width) or None when no ray hits."""
@@ -433,18 +476,10 @@ def locate(cam, b, pan, half_depth, top_h, foot=None, lying_h=0.12):
     handle = b.get("handle") if isinstance(b.get("handle"), dict) else None
     hx = _num(None if handle is None else handle.get("cx"))
     hy = _num(None if handle is None else handle.get("cy"))
-    ut, vt, aim = (hx, hy, "handle") if hx is not None and hy is not None else (rim_u, rim_v, "rim")
-    out = {"standing": None, "aim": aim}
-    point = _at_height(cam, ut, vt, top_h)
-    if point is None and aim == "handle":
-        ut, vt, aim = rim_u, rim_v, "rim"
-        out["aim"] = aim
-        point = _at_height(cam, ut, vt, top_h)
+    out = {"standing": None, "aim": "rim"}
+    point = _at_height(cam, rim_u, rim_v, top_h)
     if point is not None:
-        rel = point[:2] - pan
-        out["centre_top"] = rel + half_depth * rel / np.linalg.norm(rel)
-        if aim == "handle":
-            out["centre_handle"] = out["centre_top"]
+        out["centre_top"] = _centre_beyond(point[:2], pan, half_depth)
         span = rim_span(t, rim_v, float(np.min(t[:, 1])), float(b.get("y1", np.max(t[:, 1]))))
         if span is not None:
             a, c = _at_height(cam, span[0], rim_v, top_h), _at_height(cam, span[1], rim_v, top_h)
@@ -461,13 +496,15 @@ def locate(cam, b, pan, half_depth, top_h, foot=None, lying_h=0.12):
                 s = (rel @ n - (cam.pos[:2] - pan) @ n) / (d[:2] @ n)
                 out["top_seen_h"] = float(cam.pos[2] + s * d[2])
                 out["standing"] = out["top_seen_h"] > lying_h
-    edges = reconcile_edges(out.get("centre_top") if out.get("aim") != "handle" else None, out.get("centre_bottom"))
-    # A handle aim keeps the handle point. The foot is still used when there is no handle (the rim).
-    if out.get("aim") == "handle" and out.get("centre_handle") is not None:
-        edges = {"centre": out["centre_handle"], "method": "handle", "spread": edges["spread"],
-                 "confidence": max(edges["confidence"], 0.70)}
+    edges = reconcile_edges(out.get("centre_top"), out.get("centre_bottom"))
     if edges["centre"] is None:
         return None
+    if hx is not None and hy is not None:
+        left = _handle_left_at(cam, hx, hy, pan, half_depth, edges["centre"])
+        if left is not None:
+            edges = {"centre": (float(edges["centre"][0]), left), "method": "handle",
+                     "spread": edges["spread"], "confidence": max(edges["confidence"], 0.70)}
+            out["aim"] = "handle"
     out["centre"] = edges["centre"]
     out["from"] = edges["method"]
     out["spread"] = edges["spread"]
