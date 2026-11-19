@@ -13,6 +13,9 @@ JSON holds no comments, so where a number was measured is written here (the rest
 - max_speed 0.12 m/s is the follow cap (run_follow, body.limit, wheels.packet). The next step is 0.15 m/s.
   Leave 0.12 until tools/brake_distance.py has written a JSON whose gate.ok is true. Then set decel to that
   JSON's gate.decel and max_speed to 0.15. When gate.ok is false, leave both numbers as they are.
+- self_mask: the arm, cable and a carried bag. skin_m is how far past the outline still counts as the robot.
+  sectors are base-frame degrees (0 ahead, positive left) and a range from the centre. polygons are extra
+  [x, y] rings in that same frame. Missing the key uses footprint.DEFAULT_SECTORS.
 """
 import json
 from pathlib import Path
