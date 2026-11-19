@@ -1,6 +1,8 @@
-// Robot Console page. /api/state once a second, and only while this tab is in view (that read is also the
-// run's page heartbeat while a task runs). LiDAR and the skeleton once a second while they are on screen.
-// Camera streams are img tags. The Robot tab is drawn by robot.js (Preact + htm, one local file).
+// Robot Console page. Operate is the default workspace (Preact islands in robot.js). Engineer keeps
+// Jetson, checks, data, logs and help. /api/state is polled once a second only while the tab is visible.
+// The run's status is polled 3 times a second while a task runs and this tab is visible (that read is the
+// run's page heartbeat). The LiDAR is drawn while it is on screen. The power bank and the 21V battery
+// refresh every 15 s. The Data charts load when Engineer > ข้อมูล is open.
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -24,14 +26,21 @@ const STOP_TEXT = { // run_follow's stop reasons
 };
 const DOT = { ok: "", warn: "ring", bad: "bad", idle: "idle" };
 function dotOf(level) { return level in DOT ? DOT[level] : "idle"; }
-const DESK = window.matchMedia("(min-width: 900px)");
+const DESK = window.matchMedia("(min-width: 800px)");
+const ENGINEER_TABS = ["jetson", "checks", "data", "logs", "help"];
 
 let state = null;      // the newest /api/state
 let run = null;        // the newest run status, from /api/state while a task runs
 let localEvents = [];  // lines this page saw itself (a dead console never reaches the server list)
 let bank = null;       // the newest /api/bank
-let arm = null;        // the newest /api/arm while the Jetson tab is open
-let tab = "robot";
+let arm = null;        // the newest /api/arm while Operate or the Jetson tab is open
+let workspace = "operate";
+let tab = "jetson";
+let ackedBanner = storeGet("hmc-banner-ack");
+let selectedLight = null;
+let seenBanner = null;
+const seenLights = {};
+let snapBackoff = 0;
 const MISSION_TEXT = { follow_only: "ตามคนอย่างเดียว", bag_only: "หาและหยิบถุง", full: "โจทย์จริง HMC" };
 let choice = { mode: "dry", mission: "full", speed: null, minutes: 5, virtual: false };
 
@@ -55,7 +64,8 @@ async function getJSON(url, headers) {
   return body;
 }
 
-async function post(url, body) {
+async function post(url, body, options) {
+  options = options || {};
   const headers = { "Content-Type": "application/json", "X-HMC-Console": "1" }; // the console takes no other POST
   if (session()) headers["X-HMC-Session"] = session();
   const pin = storeGet("console-pin");
@@ -74,7 +84,15 @@ async function post(url, body) {
     if (askPin()) return post(url, body);
     return null;
   }
-  if (data && data.error) toast(data.error, true);
+  if (data && data.error) {
+    const explained = window.HmcRobot ? HmcRobot.explainMessage(data.error) : null;
+    if (!(explained && explained.noise)) {
+      if (!options.quiet) toast(explained ? explained.th : data.error, true);
+      if (explained && window.HmcRobot) {
+        HmcRobot.pushEvent({ t: Date.now() / 1000, level: explained.level || "warn", th: explained.th, fix: explained.fix || "", key: explained.key || data.error });
+      }
+    }
+  }
   return data;
 }
 
@@ -156,21 +174,36 @@ function tagHTML(text, dot, bad) {
 // ------------------------------------------------------------ tabs
 
 function showTab(name) {
-  if (!TABS.includes(name)) name = "robot";
-  if (DESK.matches && PHONE_ONLY_TABS.includes(name)) name = "overview";
-  tab = name;
-  for (const t of TABS) $(`tab-${t}`).hidden = t !== name;
-  const phoneTab = MORE_TABS.includes(name) ? "more" : name;
-  for (const a of document.querySelectorAll("#tabbar a")) a.classList.toggle("here", a.dataset.tab === phoneTab);
-  for (const a of document.querySelectorAll("#desk-tabs a")) a.classList.toggle("here", a.dataset.tab === name);
-  if (name === "logs") loadLogs();
-  if (name === "jetson" || name === "task") fetchArm();
-  if (name === "data") loadData();
+  name = String(name || "").replace(/^#/, "");
+  if (name === "engineer") {
+    workspace = "engineer";
+    if (!ENGINEER_TABS.includes(tab)) tab = "jetson";
+  } else if (ENGINEER_TABS.includes(name)) {
+    workspace = "engineer";
+    tab = name;
+  } else {
+    workspace = "operate";
+  }
+  document.body.classList.toggle("ws-operate", workspace === "operate");
+  document.body.classList.toggle("ws-engineer", workspace === "engineer");
+  const operate = $("operate"), engineer = $("engineer");
+  if (operate) operate.hidden = workspace !== "operate";
+  if (engineer) engineer.hidden = workspace !== "engineer";
+  for (const t of TABS) {
+    const el = $(`tab-${t}`);
+    if (el) el.hidden = !(workspace === "engineer" && t === tab);
+  }
+  $("ws-operate").classList.toggle("on", workspace === "operate");
+  $("ws-engineer").classList.toggle("on", workspace === "engineer");
+  for (const a of document.querySelectorAll(".eng-nav a")) a.classList.toggle("here", workspace === "engineer" && a.dataset.tab === tab);
+  if (workspace === "engineer" && tab === "logs") loadLogs();
+  if (workspace === "operate" || (workspace === "engineer" && tab === "jetson")) fetchArm();
+  if (workspace === "engineer" && tab === "data") loadData();
   window.scrollTo(0, 0);
   render();
 }
 window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
-DESK.addEventListener("change", () => showTab(tab));
+DESK.addEventListener("change", () => showTab(workspace === "operate" ? "operate" : tab));
 let resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
@@ -203,7 +236,8 @@ async function pollState() {
     setTimeout(pollState, 1000);
     return;
   }
-  const beat = taskRunning(state);
+  const missionOn = !!(state && state.mission && state.mission.active);
+  const beat = taskRunning(state) || missionOn;
   const headers = {};
   if (beat && session()) headers["X-HMC-Session"] = session();
   try {
@@ -235,23 +269,24 @@ async function pollRun() {
 async function pollBank() {
   if (document.visibilityState === "visible" && !(state && state.bank)) {
     try { bank = await getJSON("/api/bank"); } catch (e) { bank = null; }
-    renderBank();
+    if (state) render();
+    else renderBank();
   }
   setTimeout(pollBank, 15000);
 }
 
 function render() {
-  if (window.HmcRobot) window.HmcRobot.update({ state, localEvents, onStop: stop, onArm: sendArm });
-  refreshSnap();
-  if (!state) return;
+  if (!state) { place(); return; }
   renderJob();
   renderOverview();
   renderBank();
   renderRunParts();
-  if (tab === "live") renderLive();
-  if (tab === "task") { renderTask(); renderArm(); }
-  if (tab === "jetson") { renderJetson(); renderArm(); }
-  if (tab === "checks") renderChecks();
+  if (workspace === "engineer" && tab === "live") renderLive();
+  if (workspace === "operate" || (workspace === "engineer" && tab === "task")) { renderTask(); renderArm(); }
+  if (workspace === "engineer" && tab === "jetson") { renderJetson(); renderArm(); }
+  if (workspace === "engineer" && tab === "checks") renderChecks();
+  updateOperate();
+  if (window.HmcRobot && HmcRobot.update) HmcRobot.update({ state, localEvents, onStop: stop, onArm: sendArm });
   place();
 }
 
@@ -269,6 +304,10 @@ function runFigures() {
 
 function stateWord() {
   if (!state) return ["-", ""];
+  if (window.HmcRobot) {
+    const model = HmcRobot.viewModel(state, { run: run, bank: bank, arm: arm, ack: ackedBanner });
+    return [model.status.text, model.status.level === "bad" ? "bad" : ""];
+  }
   const j = jobOf(state), running = jobRunning(state);
   if (running && j.stopping) return ["กำลังหยุด", "bad"];
   if (running && j.kind === "task") {
@@ -300,7 +339,7 @@ function renderJob() {
   const j = jobOf(state), running = jobRunning(state);
   document.body.classList.toggle("job", running);
   const bar = $("stopbar"), desk = $("btn-stop-desk");
-  bar.hidden = false;
+  bar.hidden = true;
   desk.disabled = false;
   const stopping = running && !!j.stopping;
   bar.classList.toggle("stopping", stopping);
@@ -587,7 +626,8 @@ function liveStreams() {
   if (cam.dataset.on && cam.dataset.on !== source) { delete cam.dataset.on; delete cam.dataset.shown; cam.removeAttribute("src"); }
   const waiting = Date.now() < Number(cam.dataset.retry || 0); // after an error: try again a few seconds later
   if (source && !cam.dataset.on && !waiting) { cam.dataset.on = source; cam.src = `/stream?t=${Date.now()}`; }
-  const webOpen = onScreen("webcam-box") && state;
+  const webUp = !!(state && state.jetson && state.jetson.webcam === true);
+  const webOpen = onScreen("webcam-box") && webUp && document.visibilityState === "visible";
   if (webOpen && !web.dataset.on && Date.now() >= Number(web.dataset.retry || 0)) { web.dataset.on = "1"; web.src = `/usb-stream?t=${Date.now()}`; }
   if (!webOpen && web.dataset.on) { delete web.dataset.on; delete web.dataset.shown; web.removeAttribute("src"); }
   renderCamState();
@@ -895,6 +935,8 @@ function renderTask() {
   const running = jobRunning(state), task = taskRunning(state), j = jobOf(state);
   $("task-start").hidden = running;
   $("task-running").hidden = !task;
+  const actions = document.querySelector(".task-actions");
+  if (actions) actions.hidden = !!task;
   const activeMission = (task && j && j.meta && j.meta.mission) || "full";
   const showArm = task && activeMission !== "follow_only";
   $("task-webcam-panel").hidden = !showArm;
@@ -924,6 +966,10 @@ $("btn-start-task").addEventListener("click", async () => {
   }
   const r = await post("/api/task/start", body);
   if (r && !r.error) {
+    if (window.HmcRobot) HmcRobot.clearEvents();
+    ackedBanner = null;
+    seenBanner = null;
+    storeSet("hmc-banner-ack", "");
     const msg = choice.mission === "bag_only" ? "เริ่มหาและหยิบถุงแล้ว"
       : choice.mission === "follow_only" ? "เริ่มเดินตามคนอย่างเดียวแล้ว"
       : (drive ? "เริ่มโจทย์จริงแล้ว หุ่นรอ Follow" : "เริ่มทดลองแล้ว");
@@ -1011,18 +1057,79 @@ $("btn-task-arm-stop").addEventListener("click", async () => {
 });
 
 async function stop() {
-  const r = await post("/api/stop", {});
-  const a = await post("/api/arm/stop", {});
-  const j = await post("/api/jetson/stop-all", {});
-  const bad = [r, a, j].filter((x) => !x || x.error).map((x) => (x && x.error) || "console did not answer");
-  if (!bad.length) toast(r && r.note ? "ไม่มีงานของคอนโซลอยู่ ส่งหยุดไปที่หน้าของงานและส่ง S# ให้ล้อแล้ว" : "กำลังหยุด");
-  else toast(bad.join("; "), true);
+  const desk = $("btn-stop-desk");
+  desk.classList.add("stopping");
+  const r = await post("/api/stop", {}, { quiet: true });
+  const armStop = await post("/api/arm/stop", {}, { quiet: true });
+  desk.classList.remove("stopping");
+  if (window.HmcRobot) {
+    HmcRobot.pushEvent({ t: Date.now() / 1000, level: "warn", th: "กด STOP หยุดการเคลื่อนที่",
+      fix: "หยุดงานบน Pi และสั่งหยุดแขน ไม่ได้ปิดโปรแกรมบน Jetson", key: "stop:" + Date.now() });
+    if (armStop && armStop.error) {
+      const ex = HmcRobot.explainMessage(armStop.error);
+      if (ex && !ex.noise) HmcRobot.pushEvent({ t: Date.now() / 1000, level: ex.level, th: ex.th, fix: ex.fix, key: ex.key + ":" + Date.now() });
+    }
+  }
+  if (r && r.error) toast(r.error, true);
+  else toast(r && r.note ? "ไม่มีงานของคอนโซลอยู่ ส่งหยุดไปที่หน้าของงานและส่ง S# ให้ล้อแล้ว" : "กำลังหยุดการเคลื่อนที่");
+  render();
+}
+
+async function startPrograms() {
+  const r = await post("/api/jetson/start-all", {});
+  if (r && !r.error && window.HmcRobot) {
+    HmcRobot.pushEvent({ t: Date.now() / 1000, level: "info", th: "กำลังเปิดโปรแกรมบน Jetson",
+      fix: "รอจนไฟ Jetson ครบ แล้วค่อยเริ่มงาน", key: "start-programs:" + Date.now() });
+  }
+  render();
+}
+
+function updateOperate() {
+  if (!window.HmcRobot || !state || !$("operate")) return;
+  const model = HmcRobot.viewModel(state, { run: run, bank: bank, arm: arm, ack: ackedBanner });
+  if (model.banner && model.banner.key !== seenBanner) {
+    seenBanner = model.banner.key;
+    HmcRobot.pushEvent({ t: Date.now() / 1000, level: model.banner.level, th: model.banner.title, fix: model.banner.fix, key: "banner:" + model.banner.key });
+  }
+  if (!model.banner) seenBanner = null;
+  model.lights.forEach((l) => {
+    const prev = seenLights[l.id];
+    seenLights[l.id] = l.level;
+    if (prev && prev !== l.level && l.level !== "ok") {
+      HmcRobot.pushEvent({ t: Date.now() / 1000, level: l.level, th: l.detail, fix: l.fix, key: "light:" + l.id + ":" + l.level + ":" + l.label });
+    }
+  });
+  HmcRobot.renderOperate(model, {
+    events: HmcRobot.getEvents(),
+    selected: selectedLight,
+    startPrograms: startPrograms,
+    ack: (key) => { ackedBanner = key; storeSet("hmc-banner-ack", key); updateOperate(); },
+    select: (id) => { selectedLight = selectedLight === id ? null : id; updateOperate(); },
+  });
+  refreshJetsonSnap(model);
+}
+
+function refreshJetsonSnap(model) {
+  const img = $("img-jetson-snap");
+  if (!img) return;
+  const url = model && model.cameras.jetson.url;
+  if (!url || workspace !== "operate" || document.visibilityState !== "visible" || Date.now() < snapBackoff) {
+    img.hidden = true;
+    if (!url) img.removeAttribute("src");
+    return;
+  }
+  img.hidden = false;
+  img.src = url + (url.indexOf("?") >= 0 ? "&" : "?") + "t=" + Date.now();
 }
 $("stopbar").addEventListener("click", stop);
 $("btn-stop-desk").addEventListener("click", stop);
 $("pin-tag").addEventListener("click", () => { if (state && state.pin) askPin(); });
-$("btn-go-task").addEventListener("click", () => { location.hash = "#task"; });
-$("btn-go-task-desk").addEventListener("click", () => { location.hash = "#task"; });
+$("btn-go-task").addEventListener("click", () => { location.hash = "#operate"; });
+$("btn-go-task-desk").addEventListener("click", () => { location.hash = "#operate"; });
+$("ws-operate").addEventListener("click", () => { if (location.hash !== "#operate") location.hash = "#operate"; else showTab("operate"); });
+$("ws-engineer").addEventListener("click", () => { if (!location.hash.endsWith("engineer") && !ENGINEER_TABS.includes(location.hash.slice(1))) location.hash = "#engineer"; else showTab("engineer"); });
+$("btn-start-programs").addEventListener("click", startPrograms);
+$("img-jetson-snap").addEventListener("error", () => { snapBackoff = Date.now() + 15000; $("img-jetson-snap").hidden = true; });
 
 // ------------------------------------------------------------ Jetson
 
@@ -1088,9 +1195,11 @@ $("btn-start-all").addEventListener("click", async () => {
   if (r && !r.error) toast("กำลังเปิดทุกโปรแกรมตามลำดับ");
 });
 $("btn-stop-all").addEventListener("click", async () => {
-  if (taskRunning(state) && !(await confirmBox("ปิดโปรแกรมบน Jetson ไหม", "งานกำลังวิ่งอยู่ ถ้าไม่มี detector และ bridge หุ่นจะตามใครไม่ได้และหยุดนิ่ง", "ปิดทั้งหมด"))) return;
+  if (!(await confirmBox("ปิดโปรแกรมบน Jetson ทั้งหมดไหม",
+    "จะปิดครบทุกโปรแกรมบน Jetson รวมตัวตรวจจับ กล้องแขน และแขน หุ่นจะมองไม่เห็นและหยิบไม่ได้ จนกว่าจะกดเปิดโปรแกรมหุ่น ปุ่ม STOP สีแดงไม่ทำแบบนี้",
+    "ปิดทั้งหมด"))) return;
   const r = await post("/api/jetson/stop-all", {});
-  if (r && !r.error) toast("ปิด flow bridge และ detector แล้ว");
+  if (r && !r.error) toast("ปิดโปรแกรมบน Jetson แล้ว");
 });
 
 // ------------------------------------------------------------ the arm (Jetson tab)
@@ -1471,7 +1580,7 @@ function unhover(el) {
 // ------------------------------------------------------------ start
 
 updateStartButton();
-showTab(location.hash.slice(1) || "robot");
+showTab(location.hash.slice(1) || "operate");
 pollState();
 pollScan();
 pollBank();
