@@ -147,10 +147,14 @@ class ReId:
     def looks(self, bgr, boxes):
         if not len(boxes):
             return []
-        if self.backend == "histogram" or (self._engine is None and self.backend != "onnx"):
+        backend = getattr(self, "backend", "tensorrt")
+        if backend == "histogram":
             return clothing_histogram(bgr, boxes)
+        if self._engine is None and backend != "onnx":
+            # no plan left: an empty look, never a raise. The colour histogram travels on its own field.
+            return [None] * len(boxes)
         batch = crops(bgr, boxes)
-        if self.backend == "onnx":
+        if backend == "onnx":
             try:
                 return self._onnx_vectors(batch)
             except Exception as exc:  # noqa: BLE001 — a bad session must not drop the link
@@ -160,6 +164,9 @@ class ReId:
         try:
             return self._vectors(batch)
         except self._EngineError as exc:
+            # a stand-in built with __new__ has no plan path: one fallback, then None per box
+            if not hasattr(self, "path"):
+                return self._none_after_fallback(exc, bgr, boxes)
             self._recover(exc)
             got = self._again(bgr, boxes)
             if got is not None:
@@ -172,9 +179,23 @@ class ReId:
                 got = self._again(bgr, boxes)
                 if got is not None:
                     return got
-            self.backend = "histogram"
+            if self.backend == "histogram":
+                return clothing_histogram(bgr, boxes)
             self._engine = None
-            return clothing_histogram(bgr, boxes)
+            return [None] * len(boxes)
+
+    def _none_after_fallback(self, exc, bgr, boxes):
+        """The old contract: try the x0_25 file once, and otherwise hand back None per box."""
+        self._engine = self._load_fallback(exc)
+        if self._engine is not None:
+            try:
+                return self._vectors(crops(bgr, boxes))
+            except (self._EngineError, RuntimeError):
+                self._engine = None
+        if not self._gave_up:
+            print("re-id off for this process: %s" % exc, flush=True)
+            self._gave_up = True
+        return [None] * len(boxes)
 
     def _again(self, bgr, boxes):
         """Retry the crops on whatever _recover just selected. None when that also fails."""
