@@ -130,7 +130,10 @@ class PickPlace(Node):
         # (probe / shifts / carry at the side)
         self.declare_parameter("bag_method", "camera")
         self.declare_parameter("bag_cam_url", "http://localhost:8082/snap.jpg")    # front webcam (webcam_view.py)
-        self.declare_parameter("bag_xtion_url", "http://192.168.31.21:8081/stream")  # Xtion MJPEG on the base Pi
+        # Xtion MJPEG on the base Pi. BAG_XTION_URL overrides this. The LAN cable (10.0.0.1) answers in
+        # about a millisecond; the Wi-Fi address times out for ~5 s, twice, on every pick when Wi-Fi is down.
+        self.declare_parameter("bag_xtion_url", os.environ.get(
+            "BAG_XTION_URL", "http://10.0.0.1:8081/stream"))
         self.declare_parameter("bag_cam_tries", 4)        # camera grasp tries (a little further in / out each)
         # the HMC team's calibration of the fixed front webcam (robot frame, origin at the turning centre)
         self.declare_parameter("bag_front_cam_file", "~/hmc-follow/front_camera.json")
@@ -156,6 +159,13 @@ class PickPlace(Node):
         # kinematics) came out 1.1-1.4 cm further and 1.3-1.4 cm higher than asked in all 5 picks (wrist roll
         # ~185 deg, tips ~31 cm out), and the inner jaw pushed the bag before the close
         self.declare_parameter("bag_cam_close_bias", [-0.012, -0.014])
+        # rad/s of the fastest joint on the camera pick. Defaults are bag_camera.FREE/HELD/PUT/LIFT_SPEED,
+        # so leaving them unset does not change the motion.
+        self.declare_parameter("bag_cam_free_speed", 0.8)
+        self.declare_parameter("bag_cam_held_speed", 0.4)
+        self.declare_parameter("bag_cam_put_speed", 0.6)
+        self.declare_parameter("bag_cam_lift_speed", 0.25)
+        self.declare_parameter("bag_trial_dir", "~/hmc-follow/runs")  # one JSON per pick (bag_camera.pick)
         # test: both methods stop with the jaws OPEN at the close height and hold still (no close, no lift)
         self.declare_parameter("bag_hover_only", False)
         # Bag top unknown (PickBag grasp_pose z NaN): found by touch (probe_bag). Every value is a first guess,
