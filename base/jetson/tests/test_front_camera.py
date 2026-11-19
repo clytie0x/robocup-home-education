@@ -347,5 +347,23 @@ class Service(unittest.TestCase):
         self.assertEqual(taken, [])
 
 
+class FrameSize(unittest.TestCase):
+    def test_the_calibration_size_is_unchanged(self):
+        image = np.zeros((TRUE.height, TRUE.width, 3), np.uint8)
+        self.assertIs(fc.for_image(TRUE, image), TRUE)
+
+    def test_a_uniform_scale_doubles_fx_and_the_optical_centre(self):
+        scaled = fc.for_image(TRUE, np.zeros((TRUE.height * 2, TRUE.width * 2, 3), np.uint8))
+        self.assertAlmostEqual(scaled.fx, TRUE.fx * 2)
+        self.assertAlmostEqual(scaled.cx, (TRUE.cx + 0.5) * 2 - 0.5)
+        self.assertAlmostEqual(scaled.cy, (TRUE.cy + 0.5) * 2 - 0.5)
+
+    def test_a_16_by_9_frame_is_not_measured(self):
+        self.assertIsNone(fc.for_image(TRUE, np.zeros((720, 1280, 3), np.uint8)))
+        got = fc.measure_bag(TRUE, np.zeros((720, 1280, 3), np.uint8), [[1.0, 0.0]])
+        self.assertFalse(got["ok"])
+        self.assertIn("not %dx%d" % (TRUE.width, TRUE.height), got["why"])
+
+
 if __name__ == "__main__":
     unittest.main()
