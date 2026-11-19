@@ -33,7 +33,7 @@ R = lambda p: re.compile(p, re.I)  # noqa: E731
 # Whole-sentence sound-alikes of a lone "stop" that whisper produced on the real robot
 # ("Tap top.", "Ta-ta.", "Stab.") + natural ways to say stop. Only matched when that is ALL that was said.
 STOP_ALIKE = R(r"^(?:(?:please|robot|hey|okay|ok)\s+)*(?:stop+s?|stops? it|stopped|stopping|stab|stob|stup|top|tops|"
-               r"tap ?tops?|stap|stuff|ta[- ]?ta|tata|that'?s (?:all|it|enough)|that is (?:all|it|enough)|"
+               r"tap ?tops?|stap|stuff|ta[- ]?ta|tata|that'?s (?:all|enough)|that is (?:all|enough)|"
                r"enough|wait|hold on|stay|stay there|stay here|"
                r"finish(?:ed)?|finish (?:it|that|the task)|pause|pause (?:it|that)|end|end (?:it|that|the task)|the end)"
                r"(?:\s+(?:please|now|robot|here))*$")

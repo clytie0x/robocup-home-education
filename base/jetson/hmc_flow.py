@@ -22,7 +22,11 @@ and "okay"/"ok" only in a sentence of at most SHORT (3) words ("wait here", "ple
 ("don't", "never", ...) cancels only a word after it in the same clause, so "I don't know, stop" is stop.
 
 States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, the arm picks it):
-  ready      entry: say how to start. "follow me" -> following
+  ready      entry: say how to start. "follow me" -> following.
+             "carry the bag" (brain carry_bag, also in done and error with empty hands) -> bag first: follow_me,
+             wait (the Pi takes find_bag only in FOLLOW after wait), then pointing. Its pick does not go back:
+             done "I have the bag. Say follow me ..." holding it; "follow me" -> resume -> following carrying it;
+             there "stop" -> wait -> dropping_bag (hand it over), "go back" -> returning
   following  sent follow_me (Pi follow). Lost: say "Please come back." once, when /base/status "search"
              (base_bridge) ended without a lock, or after come_back_s (20 s) lost (each ask risks -150).
              "stop" / "wait" / "this is the car" / "we are here" (or "go back") -> wait (Pi wait),
@@ -34,6 +38,7 @@ States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, t
              "Please point at the bag again." and send find_bag again (MAX_BAG_TRIES in a row, then at_car);
              NOT_POINTED first says "Please step back two steps and point at the bag." (the camera sees
              the shoulder only from about 2.2 m);
+             bag_failed REFUSED "... not in IDLE" (the Pi never got follow): follow_me, wait, find_bag again, once.
              any other bag_failed (REFUSED, NO_LINK, CANCELLED) or no answer in bag_timeout -> at_car.
              "stop" -> wait (cancels the Pi's bag task) -> at_car. "follow me" -> following (Pi resume).
   at_car     standing at the car, no bag task: say "Please point at the bag, then say ready." (again after
@@ -119,7 +124,7 @@ WAIT_ANYWHERE = re.compile(r"\bwait\b")
 SHORT = 3  # words at most in a short command
 # Brain intents with the same meaning
 INTENT_KINDS = {"follow_me": "follow", "stop": "stop", "wait": "stop", "go_back": "back",
-                "resume": "resume", "carry_bag": "done"}
+                "resume": "resume", "carry_bag": "bag"}  # "bag": "done" except in ready/done/error (bag first)
 
 
 def _negated(low, start):
@@ -168,6 +173,8 @@ class HmcFlow:
         self.state = None
         self.deadline = None  # arm timeout of the current state
         self.carrying = False
+        self.idle_retried = False  # this bag search was already resent after an "IDLE" refusal from the Pi
+        self.bag_first = False  # this pick was asked for before any following: hold the bag afterwards, don't go back
         self.link_ok = None  # None until base_bridge says anything
         self.person_visible = False
         self.lost_since = None  # following: when the operator was lost (None = seen)
@@ -192,6 +199,7 @@ class HmcFlow:
         if state == READY:
             out.append(("say", self.start_text))
         elif state == FOLLOWING:
+            self.bag_first = False  # a bag-first pick ends in done, never through following
             self.lost_since = None if self.person_visible else now
             self.come_back_said = self.pi_searched = False
             out.append(("say", "I will follow you."))
@@ -215,6 +223,7 @@ class HmcFlow:
         elif state == DONE:
             out.append(("say", msg or "Here is your bag."))
         elif state == ERROR:
+            self.bag_first = False
             out += [self._cmd(self.error_pi_cmd),
                     ("say", (msg or "Sorry, something went wrong.") + " Say follow me to start again.")]
         return out
@@ -226,11 +235,21 @@ class HmcFlow:
 
     def _after_pick(self, now):
         self.carrying = True
+        if self.bag_first:  # picked before following: hold it and wait for "follow me" (the Pi stays waiting)
+            self.bag_first = False
+            return self._goto(DONE, now, "I have the bag. Say follow me and I will carry it for you.")
         return self._goto(RETURNING, now)
+
+    def _bag_first(self, now):
+        """'carry the bag' before following: the Pi takes bag only in FOLLOW after wait, so follow, wait, find_bag."""
+        if self.link_ok is False:
+            return [("say", "I cannot reach my wheels. Please check the base.")]
+        self.bag_first = True
+        return [self._cmd("follow_me"), self._cmd("wait")] + self._point(now)
 
     def _point(self, now, msg=""):
         """pointing afresh: from following or at_car (not a retry)."""
-        self.bag_tries, self.remeasured = 0, False
+        self.bag_tries, self.remeasured, self.idle_retried = 0, False, False
         return self._goto(POINTING, now, msg)
 
     def _at_start(self, now):
@@ -268,7 +287,13 @@ class HmcFlow:
     def _handle(self, kind, now):
         """Outputs for a task word, or None when the word means nothing in this state."""
         s = self.state
+        if kind == "bag":
+            if s in (READY, DONE, ERROR) and not self.carrying:
+                return self._bag_first(now)
+            kind = "done"
         if s in (READY, DONE, ERROR):
+            if kind == "follow" and self.carrying and s == DONE:  # holding a bag picked first: the Pi waits
+                return [self._cmd("resume")] + self._goto(FOLLOWING, now)
             if kind == "follow":
                 return self._start_following(now)
             if kind == "stop":
@@ -277,6 +302,10 @@ class HmcFlow:
                 return self._goto(RETURNING, now)
             return None
         if s == FOLLOWING:
+            if self.carrying and kind == "stop":  # carrying the bag picked first: hand it over here
+                return [self._cmd("wait")] + self._goto(DROPPING, now)
+            if self.carrying and kind == "back":
+                return self._goto(RETURNING, now)
             if kind in ("stop", "back"):
                 return [self._cmd("wait")] + self._point(now)
             if kind == "follow":
@@ -375,7 +404,7 @@ class HmcFlow:
         if name == "at_start" and s == RETURNING:
             return self._at_start(now)
         if name == "drop_done" and s == DROPPING:
-            self.carrying = False
+            self.carrying = self.bag_first = False
             return self._goto(DONE, now)
         if name == "drop_failed" and s == DROPPING:
             return self._goto(ERROR, now, "Sorry. " + arm_msg if arm_msg else "Sorry, I could not put the bag down.")
@@ -409,6 +438,11 @@ class HmcFlow:
             if self.use_arm:
                 return self._goto(PICKING, now)
             return [("say", "I would pick up the bag now.")] + self._after_pick(now)
+        if code == "REFUSED" and "IDLE" in text and not self.idle_retried:
+            # the Pi never got follow (spoken before its run started, or a new run): bag is taken only in FOLLOW
+            # after wait, so send those and look again, once per search
+            self.idle_retried = True
+            return [self._cmd("follow_me"), self._cmd("wait"), self._cmd("find_bag")]
         first = [("say", STEP_BACK_TEXT)] if code == "NOT_POINTED" else []  # too close for the camera to see it
         if code in RETRY_CODES and self.bag_tries < MAX_BAG_TRIES:
             self.bag_tries += 1

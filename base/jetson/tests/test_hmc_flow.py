@@ -948,3 +948,112 @@ class RosTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BagFirstTest(unittest.TestCase):
+    """'carry the bag' before 'follow me' (2026-11-19: commands in any order)."""
+
+    def setUp(self):
+        self.f = HmcFlow(use_arm=True)
+        self.f.start(0.0)
+        self.f.on_event("base_link_ok", 0.1)
+
+    def carry(self, now=1.0):
+        return self.f.on_intent({"action": "carry_bag"}, now)
+
+    def test_carry_the_bag_in_ready_points_after_follow_and_wait(self):
+        out = self.carry()
+        self.assertEqual(actions(out), ["follow_me", "wait", "find_bag"])
+        self.assertEqual(self.f.state, POINTING)
+        self.assertIn("Please point at the bag.", says(out))
+
+    def test_the_pick_holds_the_bag_instead_of_going_back(self):
+        self.carry()
+        self.f.on_event(REACHED, 2.0)
+        self.assertEqual(self.f.state, PICKING)
+        out = self.f.on_event("grab_success", 3.0)
+        self.assertEqual(self.f.state, DONE)
+        self.assertNotIn("go_back", actions(out))
+        self.assertTrue(any("I have the bag" in t for t in says(out)))
+
+    def test_then_follow_me_resumes_and_stop_hands_the_bag_over(self):
+        self.carry()
+        self.f.on_event(REACHED, 2.0)
+        self.f.on_event("grab_success", 3.0)
+        out = self.f.on_intent({"action": "follow_me"}, 4.0)
+        self.assertEqual(actions(out), ["resume"])
+        self.assertEqual(self.f.state, FOLLOWING)
+        out = self.f.on_intent({"action": "stop"}, 5.0)
+        self.assertEqual(actions(out), ["wait", "drop_bag"])
+        self.assertEqual(self.f.state, DROPPING)
+        self.f.on_event("drop_done", 6.0)
+        self.assertEqual(self.f.state, DONE)
+        self.assertFalse(self.f.carrying)
+
+    def test_follow_first_still_goes_back_after_the_pick(self):
+        self.f.on_intent({"action": "follow_me"}, 1.0)
+        self.f.on_intent({"action": "stop"}, 2.0)
+        self.f.on_event(REACHED, 3.0)
+        out = self.f.on_event("grab_success", 4.0)
+        self.assertEqual(self.f.state, RETURNING)
+        self.assertIn("go_back", actions(out))
+
+    def test_a_failed_bag_first_then_follow_me_is_a_normal_run(self):
+        self.carry()
+        for t in range(4):
+            self.f.on_event("bag_failed|NOT_POINTED|no steady pointing in 20 s", 2.0 + t)
+        self.assertEqual(self.f.state, AT_CAR)
+        self.f.on_intent({"action": "follow_me"}, 10.0)
+        self.f.on_intent({"action": "stop"}, 11.0)
+        self.f.on_event(REACHED, 12.0)
+        self.f.on_event("grab_success", 13.0)
+        self.assertEqual(self.f.state, RETURNING)
+
+    def test_carry_the_bag_while_following_is_still_ignored(self):
+        self.f.on_intent({"action": "follow_me"}, 1.0)
+        self.assertEqual(actions(self.carry(2.0)), [])
+        self.assertEqual(self.f.state, FOLLOWING)
+
+    def test_no_wheels_no_bag_first(self):
+        self.f.on_event("base_link_lost", 0.5)
+        out = self.carry()
+        self.assertEqual(actions(out), [])
+        self.assertEqual(self.f.state, READY)
+
+
+class IdleRefusalTest(unittest.TestCase):
+    """The Pi refuses bag in IDLE (2026-11-19 16:19: 'follow me' was said before the Pi's run started)."""
+    IDLE = "bag_failed|REFUSED|bag: only while waiting at the car (FOLLOW after wait), not in IDLE"
+
+    def setUp(self):
+        self.f = HmcFlow(use_arm=True)
+        self.f.start(0.0)
+        self.f.on_event("base_link_ok", 0.1)
+        self.f.on_intent({"action": "follow_me"}, 1.0)
+        self.f.on_intent({"action": "stop"}, 2.0)
+        self.assertEqual(self.f.state, POINTING)
+
+    def test_an_idle_refusal_sends_follow_wait_and_the_search_again(self):
+        out = self.f.on_event(self.IDLE, 3.0)
+        self.assertEqual(actions(out), ["follow_me", "wait", "find_bag"])
+        self.assertEqual(self.f.state, POINTING)
+        self.f.on_event(REACHED, 4.0)
+        self.assertEqual(self.f.state, PICKING)
+
+    def test_a_second_idle_refusal_goes_to_at_car(self):
+        self.f.on_event(self.IDLE, 3.0)
+        out = self.f.on_event(self.IDLE, 4.0)
+        self.assertEqual(self.f.state, AT_CAR)
+        self.assertNotIn("follow_me", actions(out))
+
+    def test_a_fresh_search_may_retry_again(self):
+        self.f.on_event(self.IDLE, 3.0)
+        self.f.on_event(self.IDLE, 4.0)
+        self.f.on_intent({"action": "carry_bag"}, 5.0)  # in at_car: ready -> pointing afresh
+        self.assertEqual(self.f.state, POINTING)
+        out = self.f.on_event(self.IDLE, 6.0)
+        self.assertEqual(actions(out), ["follow_me", "wait", "find_bag"])
+
+    def test_another_refusal_still_goes_to_at_car(self):
+        self.f.on_event("bag_failed|REFUSED|bag: a bag task is running", 3.0)
+        self.assertEqual(self.f.state, AT_CAR)
