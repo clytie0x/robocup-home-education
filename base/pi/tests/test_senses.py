@@ -1047,6 +1047,41 @@ class Lighting(unittest.TestCase):
         read(s, 2.2, scan_of(person(*near)), Answer(2.2, [lit(*near, OTHER, 85.0)]))
         self.assertFalse(s.locked)
 
+    def test_a_soft_light_can_still_enrol_and_a_hard_one_says_the_numbers(self):
+        at = (1.5, 0.0)
+        fresh = learned_at(80.0)
+        fresh.tracker = fresh._new_tracker()
+        # 200 against a learned 80 is 2.5 times: soft, so enrolment locks. 400 (5 times) is refused, with the numbers.
+        point = fresh.enrol(2.2, scan_of(person(*at)), Answer(2.2, [lit(*at, OPERATOR, 200.0)]))
+        self.assertNotIsInstance(point, str, point)
+        hard = fresh.enrol(2.3, scan_of(person(*at)), Answer(2.3, [lit(*at, OPERATOR, 400.0)]))
+        self.assertIn("box 400", hard)
+        self.assertIn("learned", hard)
+
+
+class LidarEnrol(unittest.TestCase):
+    def test_no_camera_box_locks_the_leg_in_front(self):
+        s = RealSenses(P)
+        scan = scan_of(person(1.5, 0.0))
+        answer = Answer(0.0, [], empty="best person score 0.20 is under 0.40")
+        got = s.enrol(0.0, scan, answer)
+        self.assertNotIsInstance(got, str, got)
+        self.assertTrue(s.locked)
+        self.assertIsNone(got[1])
+        self.assertIn("camera saw 0", s.enrol_how)
+
+    def test_nobody_in_view_stays_exact_when_the_lidar_is_empty_too(self):
+        s = RealSenses(P)
+        self.assertEqual(s.enrol(0.0, scan_of(), Answer(0.0, [])), "nobody in view")
+        why = s.enrol(0.0, scan_of(), Answer(0.0, [], empty="the network returned no rows"))
+        self.assertEqual(why, "nobody in view: the network returned no rows")
+
+    def test_camera_people_with_no_lidar_match_name_the_count(self):
+        s = RealSenses(P)
+        why = s.enrol(0.0, scan_of(), Answer(0.0, [seen(1.5, 0.0, OPERATOR)]))
+        self.assertIn("camera saw 1", why)
+        self.assertTrue(why.startswith("nobody in view"))
+
 
 class Revealed(unittest.TestCase):
     """_was_there: an id born next to a still operator counts as someone coming apart only where the previous scan

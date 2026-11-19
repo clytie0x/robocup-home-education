@@ -6,11 +6,13 @@ arm until the bag is in the middle of the image" step is gone. The camera's pinh
 team's calibration (front_camera.json, robot frame with its origin at the turning centre).
 
   1. where (before EVERY try: a miss or a drop may have pushed the bag): the arm goes to LOOK if it would be
-     in the picture, then the bag's centre comes from the image (locate: the front wall's rim, bag_cam_rim_h
-     above the floor; its foot on the floor when that is in view). The goal's x, y only say roughly where:
-     more than GOAL_TOL apart = an error. A bag whose rim is not about bag_cam_width wide (fallen over) = an
-     error. No bag in the picture: the goal on the first try, an error later. Orientation: the goal's yaw =
-     the handles' line; no yaw = the bag faces the robot (handles parallel to the robot's y axis).
+     in the picture, then the bag's centre comes from the image (locate). Two edge estimates, the rim at
+     bag_cam_rim_h and the foot on the floor, are reconciled (reconcile_edges). The camera centre is used
+     when its confidence is at least CONF_MIN; otherwise the goal's x, y are used. How far the camera is
+     from the goal is logged, never a failure (the console's fixed 0.36 m was about 11 cm short of the bag).
+     A bag that is not standing, or whose rim is not about bag_cam_width wide, is still an error. No bag in
+     the picture: the goal on the first try, an error later. Orientation: the goal's yaw = the handles'
+     line; no yaw = the bag faces the robot (handles parallel to the robot's y axis).
   2. what: the bag's FRONT wall (the one nearer the arm), bag_cam_half_depth in front of the centre. The jaws
      (pitched -60 deg) close across that wall near its rim: finger tips bag_cam_close_h above the floor (the
      paper rim, not the handle arcs: a handle has rope only at its very top in the middle). One jaw moves, so
@@ -36,6 +38,7 @@ import urllib.request
 import numpy as np
 
 from . import bag_vision as bv
+from . import pick_trial as pt
 from .ik import ARM, FIXED_INNER_X, JAW_G_MAX, TIP_Y, jaw_gap
 from .task_rules import Failed
 
@@ -44,7 +47,12 @@ GAP_MID = FIXED_INNER_X - jaw_gap(JAW_G_MAX) / 2   # gripper-frame x of the midd
 # (extra reach along the bearing m, pitch deg), best first: the open gap is 7.5 cm, so +-1.5 cm still keeps a
 # wall that is where it should be inside the jaws
 TRIES = ((0.0, -60), (0.015, -60), (-0.015, -60), (0.03, -50))
-GOAL_TOL = 0.16                   # m: the image wins over the goal's x, y; further apart than this = an error
+# The two edge estimates (reconcile_edges). They agree at or under EDGE_AGREE (their mean). Further apart,
+# the foot wins: it meets the known floor, the rim uses an assumed height. Confidence is 0 at EDGE_LOST.
+# The camera centre is used only at confidence >= CONF_MIN; otherwise the request's x, y are used.
+EDGE_AGREE = 0.04
+EDGE_LOST = 0.12
+CONF_MIN = 0.55
 # arm pose for looking: folded REST pose stays completely out of the front camera's picture (0 pts in view;
 # READY puts 55 pts in view), so the arm never lifts high just to look at the bag
 LOOK = {"shoulder_pan": 0.0, "shoulder_lift": 0.04, "elbow_flex": -0.04, "wrist_flex": 0.0, "wrist_roll": 0.0}
@@ -144,18 +152,101 @@ def _at_height(cam, u, v, z):
     return cam.pos + s * d if s > 0 else None
 
 
+def rim_span(tops, rim_row, blob_top, blob_bottom, band=None):
+    """(left column, right column) of the rim, or None.
+
+    The widest row of a standing bag is often the foot. Projecting the blob's x0/x1 at rim height then
+    reads 47-56 cm for an 18 cm bag. The rim is the columns whose top pixel is within `band` of the
+    median top row (band defaults to max(6 px, 12 % of the blob height)). Fewer than two such columns:
+    the width is unknown, and the fallen-bag check does not use the blob width.
+    """
+    if tops is None or len(tops) < 2:
+        return None
+    height = abs(float(blob_bottom) - float(blob_top))
+    band = max(6.0, 0.12 * height) if band is None else float(band)
+    keep = tops[np.abs(tops[:, 1] - float(rim_row)) <= band]
+    if len(keep) < 2:
+        return None
+    return float(keep[:, 0].min()), float(keep[:, 0].max())
+
+
+def reconcile_edges(centre_top, centre_bottom, agree=EDGE_AGREE, lost=EDGE_LOST):
+    """The bag centre from the rim estimate and the foot estimate.
+
+    centre_top / centre_bottom are (forward, left) metres, or None when that edge was not in the picture.
+
+    method:
+      neither: no centre, confidence 0.
+      foot only: the foot, confidence 0.80 (the floor height is known).
+      rim only: the rim, confidence 0.70 (usual: the foot is out of the frame; the rim height is assumed,
+                and 0.70 stays above CONF_MIN so a clear rim is still used).
+      both, spread <= agree: the mean. Confidence 0.98 - 0.20 * (spread / agree).
+      both, spread > agree: the foot. Confidence 0.75 * max(0, 1 - (spread - agree) / (lost - agree)),
+                so 0 once the estimates are `lost` metres apart (8 cm is already under CONF_MIN).
+
+    At the 5 cm disagreement from the 19 Nov audit the foot is used and the confidence stays above the
+    gate. spread is the distance between the two estimates (0 with only one).
+    """
+    top = None if centre_top is None else (float(centre_top[0]), float(centre_top[1]))
+    bot = None if centre_bottom is None else (float(centre_bottom[0]), float(centre_bottom[1]))
+    if top is None and bot is None:
+        return {"centre": None, "method": "none", "spread": None, "confidence": 0.0}
+    if top is None:
+        return {"centre": bot, "method": "foot", "spread": 0.0, "confidence": 0.80}
+    if bot is None:
+        return {"centre": top, "method": "rim", "spread": 0.0, "confidence": 0.70}
+    spread = math.hypot(top[0] - bot[0], top[1] - bot[1])
+    if spread <= agree:
+        ratio = (spread / agree) if agree else 0.0
+        return {"centre": ((top[0] + bot[0]) / 2.0, (top[1] + bot[1]) / 2.0), "method": "mean",
+                "spread": spread, "confidence": 0.98 - 0.20 * ratio}
+    span = lost - agree
+    fade = 0.0 if span <= 0 else max(0.0, 1.0 - (spread - agree) / span)
+    return {"centre": bot, "method": "foot", "spread": spread, "confidence": 0.75 * fade}
+
+
+def choose_grasp_xy(camera_xy, confidence, request_xy, min_conf=CONF_MIN):
+    """(x, y) to grasp, and "camera" or "request".
+
+    The camera wins only when it has a centre and confidence >= min_conf. Otherwise the request's x, y:
+    the arm API still accepts an explicit goal, and a low-confidence picture must not move the grasp.
+    """
+    request = (float(request_xy[0]), float(request_xy[1]))
+    if camera_xy is not None and confidence >= min_conf:
+        return (float(camera_xy[0]), float(camera_xy[1])), "camera"
+    return request, "request"
+
+
+def _num(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _requested_pose(obj):
+    """The goal the caller sent: x, y, yaw (None when the caller did not give one), height."""
+    size = getattr(obj, "size", None)
+    height = _num(size[2]) if size is not None and len(size) > 2 else None
+    yaw = _num(getattr(obj, "yaw", None)) if getattr(obj, "yaw_given", True) else None
+    return {"x": _num(getattr(obj, "x", None)), "y": _num(getattr(obj, "y", None)), "yaw": yaw, "height": height}
+
+
 def locate(cam, b, pan, half_depth, top_h, foot=None, lying_h=0.12):
     """The bag's centre from a front-camera blob (bag_vision.find_bag), the bag standing and facing the arm.
-    pan: the arm's pan axis (x, y) in the camera's robot frame. Two ways:
+    pan: the arm's pan axis (x, y) in the camera's robot frame. Two ways, then reconcile_edges:
       bottom: foot = image row of the front wall's foot on the floor (bag_vision.foot_y; z = 0, known):
-              centre half_depth beyond it. Used when the foot is in the picture (not cut off by the frame).
+              centre half_depth beyond it.
       top:    the blob's top edge (median over its columns: the handles' arcs are thin) is the front wall's
               rim, top_h above the floor (the camera looks steeply down on the front wall; its rim is the
-              highest bag-coloured line): centre half_depth beyond it. Used when the foot is out of the
-              picture, which is the usual case at pick distances (less exact: top_h is per bag).
-    With the foot in view it also checks the bag stands: the top edge seen right above the foot must be
-    higher than lying_h. Returns dict(centre (forward, left) from the pan axis, from, standing True / False /
-    None = cannot tell, top_seen_h, centre_top, centre_bottom) or None when no ray hits."""
+              highest bag-coloured line): centre half_depth beyond it. The usual case at pick distances,
+              when the foot is out of the picture (less exact: top_h is per bag).
+    The rim width is rim_span of that top edge, not the blob's widest row. With the foot in view it also
+    checks the bag stands: the top edge seen right above the foot must be higher than lying_h. Returns
+    dict(centre (forward, left) from the pan axis, from = the reconcile method, confidence, spread,
+    standing True / False / None = cannot tell, top_seen_h, centre_top, centre_bottom, width) or None
+    when no ray hits."""
     pan = np.asarray(pan, float)
     # every column's top (the gripper-hidden filter of find_bag drops most of them here: the bag's red-orange
     # face looks like the gripper's orange), across the middle of the blob's width
@@ -166,9 +257,11 @@ def locate(cam, b, pan, half_depth, top_h, foot=None, lying_h=0.12):
     if rim is not None:
         rel = rim[:2] - pan
         out["centre_top"] = rel + half_depth * rel / np.linalg.norm(rel)
-        a, c = _at_height(cam, b["x0"], vt, top_h), _at_height(cam, b["x1"], vt, top_h)
-        if a is not None and c is not None:
-            out["width"] = float(np.linalg.norm(a[:2] - c[:2]))     # m across the rim (log; lying check)
+        span = rim_span(t, vt, float(np.min(t[:, 1])), float(b.get("y1", np.max(t[:, 1]))))
+        if span is not None:
+            a, c = _at_height(cam, span[0], vt, top_h), _at_height(cam, span[1], vt, top_h)
+            if a is not None and c is not None:
+                out["width"] = float(np.linalg.norm(a[:2] - c[:2]))     # m across the rim (log; lying check)
     if foot is not None:
         foot = _at_height(cam, (b["x0"] + b["x1"]) / 2, foot, 0.0)
         if foot is not None:
@@ -180,11 +273,14 @@ def locate(cam, b, pan, half_depth, top_h, foot=None, lying_h=0.12):
                 s = (rel @ n - (cam.pos[:2] - pan) @ n) / (d[:2] @ n)
                 out["top_seen_h"] = float(cam.pos[2] + s * d[2])
                 out["standing"] = out["top_seen_h"] > lying_h
-    for k in ("centre_bottom", "centre_top"):
-        if k in out:
-            out["centre"], out["from"] = tuple(float(v) for v in out[k]), k.split("_")[1]
-            return out
-    return None
+    edges = reconcile_edges(out.get("centre_top"), out.get("centre_bottom"))
+    if edges["centre"] is None:
+        return None
+    out["centre"] = edges["centre"]
+    out["from"] = edges["method"]
+    out["spread"] = edges["spread"]
+    out["confidence"] = edges["confidence"]
+    return out
 
 
 # ---------------------------------------------------------------------- the pick
@@ -197,6 +293,16 @@ class CameraBag:
     # ------------------------------------------------------------------ helpers
     def p(self, name):
         return self.n.get_parameter(name).value
+
+    def speed(self, kind):
+        """rad/s of the fastest joint. The old constants, unless bag_cam_*_speed is set (0 or missing = the constant)."""
+        name, default = {"free": ("bag_cam_free_speed", FREE_SPEED), "held": ("bag_cam_held_speed", HELD_SPEED),
+                         "put": ("bag_cam_put_speed", PUT_SPEED), "lift": ("bag_cam_lift_speed", LIFT_SPEED)}[kind]
+        try:
+            value = float(self.p(name))
+        except Exception:  # noqa: BLE001 (a node without the parameter keeps the old speed)
+            return default
+        return value if value > 0 else default
 
     def web(self):
         """A frame of the fixed front camera, or None."""
@@ -268,10 +374,12 @@ class CameraBag:
             return path
         return None
 
-    def tip(self, r, tz, pitch, roll, what, pull_in=0.0, speed=FREE_SPEED, sim=None):
+    def tip(self, r, tz, pitch, roll, what, pull_in=0.0, speed=None, sim=None):
         """Finger tips r m out along the bag's bearing self.theta, tz high (base frame), the gap middle on the
         line; if out of reach, up to pull_in m closer (same bearing). sim: a joint dict to move on paper only
-        (dry run of a sequence: updated in place, the arm does not move)."""
+        (dry run of a sequence: updated in place, the arm does not move). speed None = speed("free")."""
+        if speed is None:
+            speed = self.speed("free")
         c, s = math.cos(math.radians(pitch)), math.sin(math.radians(pitch))
         for d in np.arange(0.0, pull_in + 1e-6, 0.01):
             ro = r - d - TIP * c
@@ -391,7 +499,7 @@ class CameraBag:
         if cam is not None and self.n.joints and self.in_view(cam, self.n.joints):
             self.n.moveit_to(LOOK, "ยกแขนพ้นภาพกล้องหน้า (ดูถุง)")
             time.sleep(0.5)
-        im = self.web()
+        im = self._keep_frame("look", self.web())
         if im is None:
             self.n.say("ไม่มีภาพจากกล้องหน้า (webcam_view.py พอร์ต 8082)")
             return None, None
@@ -409,12 +517,13 @@ class CameraBag:
 
     def where(self, obj, first=True):
         """Look at the bag (front camera: the 1st try and after every miss or drop) -> dict: centre (user f, l),
-        wall point, normal, seen (blob), from. The goal's x, y only say roughly where: the image wins, and an
-        image more than GOAL_TOL from the goal is an error. No bag in the image on the first look: the goal; on
-        a later look: an error (the bag is gone or hidden). A bag that does not stand facing the arm: an error."""
+        wall point, normal, seen (blob), from. A confident camera centre (choose_grasp_xy) replaces the goal's
+        x, y; a low confidence, or no bag on the first look, keeps the goal. No bag on a later look: an error
+        (the bag is gone or hidden). A bag that does not stand, or whose rim width is far from bag_cam_width:
+        an error. Distance from the goal is logged and is not an error."""
         f, l = self.kin.to_user(np.array([obj.x, obj.y]))
         line = (obj.yaw - self.kin.heading0) if getattr(obj, "yaw_given", True) else math.pi / 2
-        out = {"goal": (f, l), "from": "goal", "line": line, "seen": None}
+        out = {"goal": (f, l), "from": "goal", "line": line, "seen": None, "confidence": 0.0}
         cam = None
         try:
             cam = FrontCamera.load(str(self.p("bag_front_cam_file")))
@@ -423,24 +532,33 @@ class CameraBag:
         b, loc = self.look(cam)
         out["seen"] = b
         if loc is None:
+            self._note_measure(None, (f, l), "request", 0.0, None)
             if not first:
                 raise Failed("ดูกล้องหน้าใหม่แล้วไม่เห็นถุง (ถุงหลุดไปไหน หรือมีอะไรบัง): หยุด", "MISSED")
             self.n.say("กล้องหน้าหาถุงไม่ได้: ใช้ตำแหน่งจากคำสั่งอย่างเดียว")
         else:
             c = loc["centre"]
+            conf = float(loc.get("confidence") or 0.0)
             off = math.hypot(c[0] - f, c[1] - l)
             width, want = loc.get("width"), float(self.p("bag_cam_width"))
+            spread = loc.get("spread")
+            spread_s = float("nan") if spread is None else spread
             self.n.get_logger().info(
-                f"front camera bag: centre fwd {c[0]:.3f} left {c[1]:+.3f} (from the {loc['from']}; goal fwd {f:.3f} "
-                f"left {l:+.3f}, {off * 100:.1f} cm apart); rim width {width if width else float('nan'):.3f} m, "
+                f"front camera bag: centre fwd {c[0]:.3f} left {c[1]:+.3f} (from the {loc['from']}, "
+                f"spread {spread_s:.3f} m, confidence {conf:.2f}; goal fwd {f:.3f} left {l:+.3f}, "
+                f"{off * 100:.1f} cm apart); rim width {width if width else float('nan'):.3f} m, "
                 f"standing {loc['standing']} (top seen {loc.get('top_seen_h', float('nan')):.2f} m)")
             if loc["standing"] is False or (width is not None and not 0.55 * want < width < 2.2 * want):
+                self._note_measure(loc, (f, l), "request", conf, off)
                 raise Failed(f"ถุงล้มหรือไม่ได้ตั้งหันหน้าเข้าหุ่น (กล้องเห็นขอบปากถุงกว้าง {(width or 0) * 100:.0f} "
                              f"ซม. ควรราว {want * 100:.0f}): ตั้งถุงใหม่แล้วสั่งอีกครั้ง", "FAILED")
-            if off > GOAL_TOL:
-                raise Failed(f"กล้องหน้าเห็นถุงห่างจากตำแหน่งที่สั่ง {off * 100:.0f} ซม. (เกิน "
-                             f"{GOAL_TOL * 100:.0f}): เช็กตำแหน่งที่ส่งมา", "FAILED")
-            f, l, out["from"] = c[0], c[1], "image " + loc["from"]
+            xy, source = choose_grasp_xy(c, conf, (f, l))
+            if source == "camera":
+                f, l, out["from"] = xy[0], xy[1], "image " + loc["from"]
+            else:
+                self.n.say(f"กล้องหน้าไม่มั่นใจพอ ({conf:.2f}): ใช้ตำแหน่งจากคำสั่ง")
+            out["confidence"] = conf
+            self._note_measure(loc, (f, l), source, conf, off)
         wall, normal = front_wall((f, l), line, float(self.p("bag_cam_half_depth")))
         out.update(centre=(f, l), wall=wall, normal=normal)
         return out
@@ -453,8 +571,117 @@ class CameraBag:
             h = max(0.05, top - 0.03)
         return h
 
+    # ------------------------------------------------------------------ one JSON file per trial
+    def _begin_trial(self, obj):
+        self._trial_n = getattr(self, "_trial_n", 0) + 1
+        now = time.time()
+        self._clock = pt.PhaseClock()
+        self._trial = {"id": pt.new_trial_id(now, os.getpid(), self._trial_n), "ict": pt.ict_timestamp(now),
+                       "requested": _requested_pose(obj), "measured": None, "confidences": {}, "frames": [],
+                       "success": False, "failure": None, "open": True}
+
+    def _phase(self, name):
+        clock = getattr(self, "_clock", None)
+        if clock is not None:
+            clock.phase(name)
+
+    def _note_measure(self, loc, xy, source, confidence, offset):
+        trial = getattr(self, "_trial", None)
+        if not trial:
+            return
+
+        def pair(key):
+            value = None if loc is None else loc.get(key)
+            if value is None:
+                return None
+            return [float(value[0]), float(value[1])]
+
+        trial["measured"] = {
+            "centre": None if loc is None else [float(loc["centre"][0]), float(loc["centre"][1])],
+            "centre_top": pair("centre_top"), "centre_bottom": pair("centre_bottom"),
+            "method": None if loc is None else loc.get("from"),
+            "spread": None if loc is None or loc.get("spread") is None else float(loc["spread"]),
+            "confidence": float(confidence), "source": source,
+            "used": [float(xy[0]), float(xy[1])],
+            "offset_m": None if offset is None else float(offset),
+            "width": None if loc is None or loc.get("width") is None else float(loc["width"]),
+            "standing": None if loc is None else loc.get("standing"),
+        }
+        trial["confidences"]["pose"] = float(confidence)
+
+    def _keep_frame(self, kind, image):
+        """Save a JPEG next to the trial JSON and remember its file name. The image is returned either way."""
+        trial = getattr(self, "_trial", None)
+        if trial is None or image is None:
+            return image
+        try:
+            import cv2
+            directory = os.path.expanduser(str(self.p("bag_trial_dir")))
+            os.makedirs(directory, exist_ok=True)
+            stem = "%s_%s" % (trial["id"], kind)
+            n = sum(1 for name in trial["frames"] if name.startswith(stem))
+            filename = ("%s.jpg" % stem) if n == 0 else ("%s%d.jpg" % (stem, n + 1))
+            if cv2.imwrite(os.path.join(directory, filename), image):
+                trial["frames"].append(filename)
+        except Exception:  # noqa: BLE001 (a frame that cannot be saved must not fail the pick)
+            pass
+        return image
+
+    def _trial_failed(self, exc):
+        trial = getattr(self, "_trial", None)
+        if trial:
+            trial["success"] = False
+            trial["failure"] = "%s: %s" % (getattr(exc, "code", "ERROR"), exc)
+        self._finish_trial()
+
+    def _trial_ok(self):
+        trial = getattr(self, "_trial", None)
+        if trial:
+            trial["success"] = True
+            trial["failure"] = None
+        self._finish_trial()
+
+    def _finish_trial(self):
+        trial = getattr(self, "_trial", None)
+        if not trial or not trial.get("open"):
+            return
+        trial["open"] = False
+        clock = getattr(self, "_clock", None)
+        if clock is not None:
+            clock.close()
+        try:
+            params = {}
+            try:
+                with open(os.path.expanduser(str(self.p("bag_front_cam_file"))), encoding="utf-8") as f:
+                    params = json.load(f)
+            except (OSError, ValueError, TypeError):
+                params = {}
+            record = pt.build_trial(
+                trial["id"], trial["ict"], pt.read_commit(), pt.camera_params_hash(params),
+                trial["requested"], trial["measured"], clock.phases if clock else {}, trial["confidences"],
+                trial["success"], trial["failure"], trial["frames"])
+            path = pt.write_trial(record, os.path.expanduser(str(self.p("bag_trial_dir"))))
+            self.n.get_logger().info("pick trial %s" % path)
+        except Exception as exc:  # noqa: BLE001 (the pick result stands even when the trial file cannot be written)
+            try:
+                self.n.get_logger().warning("pick trial not written: %s" % exc)
+            except Exception:  # noqa: BLE001
+                pass
+
     # ------------------------------------------------------------------ pick
     def pick(self, obj):
+        """obj: Box from the PickBag goal (x, y = roughly the bag's centre). Every try looks at the bag again.
+        One JSON trial is written under bag_trial_dir (a disk error does not fail the pick)."""
+        self._begin_trial(obj)
+        try:
+            text = self._pick_impl(obj)
+        except Exception as exc:
+            self._trial_failed(exc)
+            raise
+        self._trial_ok()
+        return text
+
+    def _pick_impl(self, obj):
         """obj: Box from the PickBag goal (x, y = roughly the bag's centre). Every try looks at the bag again
         (the last one may have pushed it), plans the grasp there, closes, lifts, checks; a miss or a drop:
         open, look again, next try. Returns the result text (holding)."""
@@ -468,6 +695,7 @@ class CameraBag:
         w = None
         for i, (dt, pitch) in enumerate(tries):
             if need_look:
+                self._phase("look")
                 self.n.progress(1, 4, "look", f"ลองที่ {i + 1}/{len(tries)}: ดูถุงจากกล้องหน้า...")
                 w = self.where(obj, first=(i == 0))
                 need_look = False
@@ -495,6 +723,7 @@ class CameraBag:
                     self.n.say(f"ลองที่ {i + 1}: {exc} — ข้าม")
                     continue
                 raise
+            self._phase("grasp")
             self.n.progress(2, 4, "grasp", f"ลองที่ {i + 1}/{len(tries)}: ลงจับผนังหน้าถุง (ทิศ "
                             f"{math.degrees(self.theta):+.0f}°, ปลายก้าม {r * 100:.1f} ซม., หมุนก้าม {roll:+.0f}°)")
             self.n.get_logger().info(f"camera try {i + 1}: tips {r:.3f} m out, pitch {pitch}, roll {roll:+.1f} deg "
@@ -504,7 +733,7 @@ class CameraBag:
             try:
                 self.above(r, cz, pitch, roll)
                 time.sleep(0.3)
-                before = self.xtion()
+                before = self._keep_frame("xtion_before", self.xtion())
                 for dz in (0.08, 0.06, 0.04, 0.02, 0.0):
                     self.tip(r, cz + dz, pitch, roll, "ลงไปที่ถุง")
             except Failed as exc:
@@ -520,13 +749,14 @@ class CameraBag:
             self.n.grip_reading = (float(res.position), float(res.effort))
             self.n.get_logger().info(f"camera grip {i + 1}: position {res.position:.3f} rad, "
                                      f"load {res.effort:.1f} %, stalled {res.stalled}")
+            self._phase("lift")
             self.n.progress(3, 4, "lift", "ยกตรงขึ้นช้าๆ แล้วเช็กว่าก้นถุงพ้นพื้น...")
             # straight up at the same reach and tilt, slowly: on 2026-11-18 (video) the paper wall slipped out
             # when the old raise swung out to HOLD_R and tilted the wrist right after a 10 cm lift
             lifted_to = 0.0
             for dz in STRAIGHT_UP:
                 try:
-                    self.tip(r, cz + dz, pitch, roll, "ยกถุงตรงขึ้น", pull_in=0.03, speed=LIFT_SPEED)
+                    self.tip(r, cz + dz, pitch, roll, "ยกถุงตรงขึ้น", pull_in=0.03, speed=self.speed("lift"))
                     lifted_to = dz
                 except Failed:
                     break
@@ -535,7 +765,7 @@ class CameraBag:
             # The front camera only sees the top edge, which also goes up when the jaws just stretch the wall
             # up while the bag stays on the floor (video, 2026-11-18: 5 false "lifted" of 37-82 px), so it is
             # not used for this check any more.
-            after = self.xtion()
+            after = self._keep_frame("xtion_after", self.xtion())
             share, cols = bv.lifted(before, after) if before is not None and after is not None else (0.0, 0)
             self.n.get_logger().info(f"xtion lift check {i + 1}: lifted {lifted_to * 100:.0f} cm, floor under "
                                      f"the bag {share:.2f} ({cols} columns)")
@@ -551,13 +781,14 @@ class CameraBag:
             held = {"mode": "camera", "camera": True, "theta": self.theta, "roll": roll, "pitch": pitch, "r": r,
                     "hold_r": r, "verified": verified, "close_z": cz, "object": (obj.x, obj.y, obj.yaw, obj.size)}
             self.n.holding = held                # from here on the arm never folds or forgets it by itself
+            self._phase("raise")
             self.n.progress(4, 4, "raise", "ยกถุงขึ้นสูง...")
             top = cz + lifted_to
             for pt, tz in UP:                    # tilt up in small steps at the SAME reach (no swing out)
                 if tz <= top + 1e-6:
                     continue
                 try:
-                    self.tip(r, tz, pt, roll, "ยกถุงขึ้นสูง", pull_in=0.06, speed=HELD_SPEED)
+                    self.tip(r, tz, pt, roll, "ยกถุงขึ้นสูง", pull_in=0.06, speed=self.speed("held"))
                     top, held["hold"] = tz, (pt, tz)
                 except Failed:
                     self.n.say(f"ยกได้สูงสุดแค่ปลายก้าม {top - self.n.table_z:.2f} ม. จากพื้นที่ทิศนี้")
@@ -574,6 +805,7 @@ class CameraBag:
                 continue
             verified = held["verified"] = verified or bool(gone["lifted"])
             # Swing the held bag out to the side so it does not hang in front of the LiDAR (x ~0.37 m) while driving
+            self._phase("carry")
             hold_pt, hold_tz = held.get("hold", (0, top))
             for side_sign in (1.0, -1.0):
                 target_th = side_sign * CARRY_THETA
@@ -584,7 +816,7 @@ class CameraBag:
                     try:
                         self.theta = start_th + (target_th - start_th) * k / steps
                         self.tip(r, hold_tz, hold_pt, roll, "เก็บถุงไว้ด้านข้าง (หลบ LiDAR)", pull_in=0.06,
-                                 speed=HELD_SPEED)
+                                 speed=self.speed("held"))
                         held["theta"] = self.theta
                     except Failed:
                         moved_ok = False
@@ -614,16 +846,17 @@ class CameraBag:
         start = self.theta
         for k in range(1, steps + 1):            # turn at the hold height, a little at a time (the bag swings)
             self.theta = start + (new - start) * k / steps
-            self.tip(held.get("hold_r", HOLD_R), tz, pt, roll, "หันถุงไปทางจุดวาง", pull_in=0.06, speed=PUT_SPEED)
+            self.tip(held.get("hold_r", HOLD_R), tz, pt, roll, "หันถุงไปทางจุดวาง", pull_in=0.06,
+                     speed=self.speed("put"))
         self.n.progress(2, 3, "lower", "วางลง...")
         for p2, z2 in DOWN:
             if z2 < tz or p2 < pt:
                 self.tip(held.get("hold_r", HOLD_R) if p2 >= 0 else r, z2, p2, roll, "วางถุงลง", pull_in=0.06,
-                         speed=PUT_SPEED)
+                         speed=self.speed("put"))
         placed_r = r
         for cand_r in (r, held.get("r", r), r + 0.03, r + 0.06):
             try:
-                self.tip(cand_r, put_z, -60, roll, "วางถุงลงพื้น", pull_in=0.05, speed=HELD_SPEED)
+                self.tip(cand_r, put_z, -60, roll, "วางถุงลงพื้น", pull_in=0.05, speed=self.speed("held"))
                 placed_r = cand_r
                 break
             except Failed as exc:
