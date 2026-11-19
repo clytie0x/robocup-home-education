@@ -46,6 +46,23 @@ def nms(boxes, scores, iou=IOU):
     return keep
 
 
+def empty_reason(output, conf=CONF):
+    """Why decode kept no person, for the log. The low Xtion often returns no box while the LiDAR still has legs."""
+    out = output[0]
+    if out.size == 0 or (out.ndim == 2 and min(out.shape) == 0):
+        return "the network returned no rows"
+    if out.shape[0] == 84:  # Ultralytics (84, N)
+        score = out[4].astype(np.float32) if out.shape[1] else np.zeros(0, np.float32)
+    else:
+        score = (out[:, 4] * out[:, 5]).astype(np.float32) if out.shape[0] else np.zeros(0, np.float32)
+    if score.size == 0:
+        return "the network returned no rows"
+    best = float(score.max())
+    if best < conf:
+        return "best person score %.2f is under %.2f" % (best, conf)
+    return "every person box was clipped away"
+
+
 def decode(output, scale, frame_w, frame_h, conf=CONF, cls=PERSON):
     """Raw engine output -> [(x1, y1, x2, y2, conf)] for one class (people by default), in frame pixels."""
     out = output[0]
@@ -83,13 +100,44 @@ class Detector:
         self._engine = Engine(engine_path)
         _, _, self._h, self._w = self._engine.input_shape
         self._yolox = self._engine.output_shape[-1] == 85
+        self.empty = None  # why the last detect returned no people; None when it returned some
+        self._said = None
+
+    def _note(self, text):
+        self.empty = text
+        if text != self._said:
+            print("detector: 0 people: %s" % text, flush=True)
+            self._said = text
+
+    def _execute(self, bgr):
+        try:
+            x, scale = letterbox(bgr, self._h, self._w, self._yolox)
+            return self._engine.run(x)[0], scale
+        except RuntimeError as exc:
+            self._note("TensorRT execute failed: %s" % exc)
+            return None, None
 
     def detect(self, bgr):
-        x, scale = letterbox(bgr, self._h, self._w, self._yolox)
-        return decode(self._engine.run(x)[0], scale, bgr.shape[1], bgr.shape[0])
+        out, scale = self._execute(bgr)
+        if out is None:
+            return []
+        boxes = decode(out, scale, bgr.shape[1], bgr.shape[0])
+        if boxes:
+            self.empty = None
+        else:
+            mean = float(bgr.mean()) if getattr(bgr, "size", 0) else 0.0
+            self._note("%s; frame mean %.0f" % (empty_reason(out), mean))
+        return boxes
 
     def detect_all(self, bgr):
         """People and bags from one engine run: ([(x1, y1, x2, y2, conf)], [(x1, y1, x2, y2, conf, name)])."""
-        x, scale = letterbox(bgr, self._h, self._w, self._yolox)
-        out = self._engine.run(x)[0]
-        return decode(out, scale, bgr.shape[1], bgr.shape[0]), decode_objects(out, scale, bgr.shape[1], bgr.shape[0])
+        out, scale = self._execute(bgr)
+        if out is None:
+            return [], []
+        people = decode(out, scale, bgr.shape[1], bgr.shape[0])
+        if people:
+            self.empty = None
+        else:
+            mean = float(bgr.mean()) if getattr(bgr, "size", 0) else 0.0
+            self._note("%s; frame mean %.0f" % (empty_reason(out), mean))
+        return people, decode_objects(out, scale, bgr.shape[1], bgr.shape[0])
