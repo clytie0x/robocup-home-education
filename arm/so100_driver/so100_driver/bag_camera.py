@@ -16,8 +16,9 @@ team's calibration (front_camera.json, robot frame with its origin at the turnin
      otherwise bag_cam_rim_h. Orientation: the goal's yaw = the handles' line; no yaw = the bag faces the
      robot (handles parallel to the robot's y axis).
   2. what: the bag's FRONT wall (the one nearer the arm), bag_cam_half_depth in front of the centre. The jaws
-     (pitched -60 deg) close across that wall near its rim: finger tips bag_cam_close_h above the floor (the
-     paper rim, not the handle arcs: a handle has rope only at its very top in the middle). One jaw moves, so
+     (pitched -60 deg) close across that wall. When the tuned model gives a handle centroid, the grasp
+     aims there; otherwise the paper rim (a handle has rope only at its very top). Finger tips are
+     bag_cam_close_h above the floor. One jaw moves, so
      the middle of the open gap (gripper x GAP_MID), not the tool axis, is put on the wall. The wrist roll
      lines the closing axis up with the wall's normal (Kinematics.roll_for), not a guessed sign.
      A wall further than REACH_WALL from the pan axis fails at once: move the robot closer.
@@ -417,28 +418,36 @@ def locate(cam, b, pan, half_depth, top_h, foot=None, lying_h=0.12):
     pan: the arm's pan axis (x, y) in the camera's robot frame. Two ways, then reconcile_edges:
       bottom: foot = image row of the front wall's foot on the floor (bag_vision.foot_y; z = 0, known):
               centre half_depth beyond it.
-      top:    the blob's top edge (median over its columns: the handles' arcs are thin) is the front wall's
-              rim, top_h above the floor (the camera looks steeply down on the front wall; its rim is the
-              highest bag-coloured line): centre half_depth beyond it. The usual case at pick distances,
-              when the foot is out of the picture (less exact: top_h is per bag).
-    The rim width is rim_span of that top edge, not the blob's widest row. With the foot in view it also
-    checks the bag stands: the top edge seen right above the foot must be higher than lying_h. Returns
-    dict(centre (forward, left) from the pan axis, from = the reconcile method, confidence, spread,
-    standing True / False / None = cannot tell, top_seen_h, centre_top, centre_bottom, width) or None
-    when no ray hits."""
+      top:    the blob's top edge (median over its columns) is the front wall's rim, top_h above the floor
+              (the camera looks steeply down on the front wall): centre half_depth beyond it. The usual case
+              at pick distances, when the foot is out of the picture (less exact: top_h is per bag).
+    When the blob has a handle centroid (the tuned model), that pixel is the aim and the centre is taken
+    from it. Otherwise the rim. The rim width is rim_span of the top edge, not the blob's widest row, and
+    the standing check stays on the rim. Returns dict(centre (forward, left) from the pan axis, from, aim
+    "handle" or "rim", confidence, spread, standing True / False / None, top_seen_h, centre_top,
+    centre_bottom, width) or None when no ray hits."""
     pan = np.asarray(pan, float)
-    # every column's top (the gripper-hidden filter of find_bag drops most of them here: the bag's red-orange
-    # face looks like the gripper's orange), across the middle of the blob's width
+    # every column's top (a gripper in front of the rim still hides those columns), across the middle
     t = b.get("all_tops", b["tops"])
-    ut, vt = (b["x0"] + b["x1"]) / 2, float(np.median(t[:, 1]))
-    out = {"standing": None}
-    rim = _at_height(cam, ut, vt, top_h)
-    if rim is not None:
-        rel = rim[:2] - pan
+    rim_u, rim_v = (b["x0"] + b["x1"]) / 2, float(np.median(t[:, 1]))
+    handle = b.get("handle") if isinstance(b.get("handle"), dict) else None
+    hx = _num(None if handle is None else handle.get("cx"))
+    hy = _num(None if handle is None else handle.get("cy"))
+    ut, vt, aim = (hx, hy, "handle") if hx is not None and hy is not None else (rim_u, rim_v, "rim")
+    out = {"standing": None, "aim": aim}
+    point = _at_height(cam, ut, vt, top_h)
+    if point is None and aim == "handle":
+        ut, vt, aim = rim_u, rim_v, "rim"
+        out["aim"] = aim
+        point = _at_height(cam, ut, vt, top_h)
+    if point is not None:
+        rel = point[:2] - pan
         out["centre_top"] = rel + half_depth * rel / np.linalg.norm(rel)
-        span = rim_span(t, vt, float(np.min(t[:, 1])), float(b.get("y1", np.max(t[:, 1]))))
+        if aim == "handle":
+            out["centre_handle"] = out["centre_top"]
+        span = rim_span(t, rim_v, float(np.min(t[:, 1])), float(b.get("y1", np.max(t[:, 1]))))
         if span is not None:
-            a, c = _at_height(cam, span[0], vt, top_h), _at_height(cam, span[1], vt, top_h)
+            a, c = _at_height(cam, span[0], rim_v, top_h), _at_height(cam, span[1], rim_v, top_h)
             if a is not None and c is not None:
                 out["width"] = float(np.linalg.norm(a[:2] - c[:2]))     # m across the rim (log; lying check)
     if foot is not None:
@@ -447,12 +456,16 @@ def locate(cam, b, pan, half_depth, top_h, foot=None, lying_h=0.12):
             rel = foot[:2] - pan
             n = rel / np.linalg.norm(rel)
             out["centre_bottom"] = rel + half_depth * n
-            d = cam.ray(ut, vt)
+            d = cam.ray(rim_u, rim_v)
             if abs(d[:2] @ n) > 1e-6:
                 s = (rel @ n - (cam.pos[:2] - pan) @ n) / (d[:2] @ n)
                 out["top_seen_h"] = float(cam.pos[2] + s * d[2])
                 out["standing"] = out["top_seen_h"] > lying_h
-    edges = reconcile_edges(out.get("centre_top"), out.get("centre_bottom"))
+    edges = reconcile_edges(out.get("centre_top") if out.get("aim") != "handle" else None, out.get("centre_bottom"))
+    # A handle aim keeps the handle point. The foot is still used when there is no handle (the rim).
+    if out.get("aim") == "handle" and out.get("centre_handle") is not None:
+        edges = {"centre": out["centre_handle"], "method": "handle", "spread": edges["spread"],
+                 "confidence": max(edges["confidence"], 0.70)}
     if edges["centre"] is None:
         return None
     out["centre"] = edges["centre"]
@@ -497,10 +510,29 @@ class CameraBag:
             time.sleep(0.3)
         return None
 
+    def vision_model(self):
+        """(model, tuned engine path) for find_bag. A missing or empty tuned file is coco, logged once."""
+        try:
+            model = str(self.p("bag_model") or "coco")
+        except Exception:  # noqa: BLE001 (a node without the parameter stays on coco)
+            model = "coco"
+        try:
+            engine = str(self.p("bag_tuned_engine") or "")
+        except Exception:  # noqa: BLE001
+            engine = ""
+        chosen, path, reason = bv.resolve_bag_model(model, engine or None)
+        if reason and reason != getattr(self, "_model_reason", None):
+            self._model_reason = reason
+            self.n.get_logger().warning(reason)
+        return chosen, path
+
     def seen(self):
         """The bag in the front camera now (bag_vision.find_bag), or None (no frame / not seen)."""
         im = self.web()
-        return None if im is None else bv.find_bag(im)
+        if im is None:
+            return None
+        model, path = self.vision_model()
+        return bv.find_bag(im, model=model, tuned_engine=path)
 
     def xtion(self):
         import cv2
@@ -872,7 +904,8 @@ class CameraBag:
         if im is None:
             self.n.say("ไม่มีภาพจากกล้องหน้า (webcam_view.py พอร์ต 8082)")
             return None, None
-        b = bv.find_bag(im)
+        model, path = self.vision_model()
+        b = bv.find_bag(im, model=model, tuned_engine=path)
         if b is None or cam is None:
             return b, None
         cam = cam.for_image(im)
@@ -955,7 +988,8 @@ class CameraBag:
                     f"spread {spread_s:.3f} m, confidence {decision['confidence']:.2f}; goal fwd {goal[0]:.3f} "
                     f"left {goal[1]:+.3f}, {apart:.1f} cm apart); rim width {width if width else float('nan'):.3f} m, "
                     f"standing {loc['standing']} (top seen {loc.get('top_seen_h', float('nan')):.2f} m, "
-                    f"rim height {top_h:.2f} m from {rim_from}); source {decision['source']}"
+                    f"rim height {top_h:.2f} m from {rim_from}); source {decision['source']}; "
+                    f"aim {loc.get('aim', 'rim')}"
                     + (" after a second look" if decision["relook"] else ""))
             f, l = decision["xy"]
             if decision["source"] == "camera":
