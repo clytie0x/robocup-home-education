@@ -58,7 +58,7 @@ from so100_interfaces.action import Home, Pick, PickBag, Place, Rest
 from so100_interfaces.action import PickPlace as PickPlaceAction
 from so100_interfaces.msg import ArmState
 
-from .bag_camera import CameraBag
+from .bag_camera import GAP_MID, CameraBag
 from .calib import Calibration
 from .ik import ARM, GRASP_Y, TIP_Y, Box, GraspPlanner, Kinematics, PlanError, bag_shifts, deck_box
 from .task_rules import (PICK_PLACE, PROBE_JOINTS, Failed, api_code, descent_loads, gripper_load, held_by_weight,
@@ -121,12 +121,39 @@ class PickPlace(Node):
         self.declare_parameter("bag_miss_below", 0.06)    # rad: bag jaws closing below this = missed, 0 = no check
         self.declare_parameter("bag_tries", 3)            # grasp tries, shifted across the part after a miss
         self.declare_parameter("bag_try_step", 0.05)      # m between tries
-        # /arm/pick_bag method: 'camera' = forearm webcam + Xtion (bag_camera.py, tested 2026-11-15),
-        # 'planner' = the planned grasp at the goal's position (probe / shifts / carry at the side)
+        # /arm/pick_bag method: 'camera' = the bag's front wall at its rim, checked with the fixed front webcam
+        # (bag_camera.py; forearm camera until 2026-11-18), 'planner' = the planned grasp at the goal's position
+        # (probe / shifts / carry at the side)
         self.declare_parameter("bag_method", "camera")
-        self.declare_parameter("bag_cam_url", "http://localhost:8082/snap.jpg")    # forearm webcam (webcam_view.py)
+        self.declare_parameter("bag_cam_url", "http://localhost:8082/snap.jpg")    # front webcam (webcam_view.py)
         self.declare_parameter("bag_xtion_url", "http://192.168.31.21:8081/stream")  # Xtion MJPEG on the base Pi
-        self.declare_parameter("bag_cam_tries", 4)        # camera grasp tries (each looks at the bag again)
+        self.declare_parameter("bag_cam_tries", 4)        # camera grasp tries (a little further in / out each)
+        # the HMC team's calibration of the fixed front webcam (robot frame, origin at the turning centre)
+        self.declare_parameter("bag_front_cam_file", "~/hmc-follow/front_camera.json")
+        # the arm's pan axis in that frame: LiDAR 0.175 m ahead of the turning centre (slam_bridge.LASER_X)
+        # + the pan axis from the LiDAR (bag_robot_pan)
+        self.declare_parameter("bag_front_cam_pan", [0.187, 0.0145])
+        # the arm's pan axis in the robot frame bag_arm sends goals in (origin under the LiDAR; HMC Mount.pan_xy):
+        # only for the log lines in that frame
+        self.declare_parameter("bag_robot_pan", [0.012, 0.0145])
+        self.declare_parameter("bag_cam_close_h", 0.19)   # m above the floor: finger tips at the close (paper rim
+        #                                                   27 cm on the test bag: about 8 cm of wall in the jaws;
+        #                                                   0.25 and 0.22 slipped out in the lift, 2026-11-18)
+        self.declare_parameter("bag_cam_half_depth", 0.055)   # m: bag centre -> its front wall (test bag 11 cm deep)
+        # front camera bag finding (bag_camera.locate): the front wall's rim height above the floor (test bag
+        # 27 cm) and the rim width the image must show for a standing bag (test bag: 0.178 m measured from two
+        # pictures at 11 and 21 cm from the deck, 2026-11-18)
+        self.declare_parameter("bag_cam_rim_h", 0.27)
+        self.declare_parameter("bag_cam_width", 0.18)
+        # the closing axis must line up with the wall's normal at least this well (cos; the good pick of
+        # 2026-11-18 had 0.89 at pitch -60, the miss at pitch -50 had 0.78)
+        self.declare_parameter("bag_cam_min_align", 0.85)
+        # (forward, up) m added to the close pose asked of the arm: on 2026-11-18 the gap middle (forward
+        # kinematics) came out 1.1-1.4 cm further and 1.3-1.4 cm higher than asked in all 5 picks (wrist roll
+        # ~185 deg, tips ~31 cm out), and the inner jaw pushed the bag before the close
+        self.declare_parameter("bag_cam_close_bias", [-0.012, -0.014])
+        # test: both methods stop with the jaws OPEN at the close height and hold still (no close, no lift)
+        self.declare_parameter("bag_hover_only", False)
         # Bag top unknown (PickBag grasp_pose z NaN): found by touch (probe_bag). Every value is a first guess,
         # to be measured on the robot from the 'probe k/n' log lines of one real run.
         self.declare_parameter("bag_probe_top", 0.40)     # m above the floor the closed tips start (or the highest
@@ -269,6 +296,40 @@ class PickPlace(Node):
     def say(self, text):
         self.check = text
         self.get_logger().info(text)
+
+    def gap_point(self, q, local_y=TIP_Y):
+        """Middle of the fully open jaw gap (one jaw moves: not the tool axis) at the finger tips (or local_y)
+        of pose q -> (forward, left, height above the floor) from the pan axis, in m."""
+        p = self.kin.gripper_point(q, (GAP_MID, local_y, 0.0))
+        f, l = self.kin.to_user(p)
+        return f, l, float(p[2] - self.table_z)
+
+    def grasp_report(self, tag, want=None, planned=None):
+        """Log where the open gap really is (forward kinematics of the measured joints) against what was asked
+        (want: gap middle at the tips, (forward, left, height) from the pan axis; planned: the planned joint pose),
+        in the arm's user frame and in bag_arm's robot frame (origin under the LiDAR). Returns a short text."""
+        q = {j: float(self.joints.get(j, 0.0)) for j in ARM}
+        f, l, h = self.gap_point(q)
+        rx, ry = (float(v) for v in self.get_parameter("bag_robot_pan").value)
+        g = self.kin.frames(q)["gripper"]
+        ax = self.kin.to_user(self.kin.pan_point + g[:2, 0])     # closing axis, horizontal part
+        close_yaw = math.degrees(math.atan2(ax[1], ax[0]))
+        close_tilt = math.degrees(math.asin(max(-1.0, min(1.0, float(g[2, 0])))))
+        tool_pitch = math.degrees(math.asin(max(-1.0, min(1.0, float(-g[2, 1])))))
+        lines = [f"{tag}: gap middle at the tips fwd {f:.3f} left {l:+.3f} h {h:.3f} (robot x {rx + f:.3f} "
+                 f"y {ry + l:+.3f}); closing axis yaw {close_yaw:+.0f} deg (robot frame, 0 = ahead), tilt "
+                 f"{close_tilt:+.0f} deg; tool pitch {tool_pitch:+.0f} deg; wrist_roll "
+                 f"{math.degrees(q['wrist_roll']):+.0f} deg"]
+        short = f"ช่องก้ามจริง x {rx + f:.3f} y {ry + l:+.3f} สูง {h:.3f} ม."
+        for name, w in (("asked", want), ("planned", self.gap_point(planned) if planned else None)):
+            if w is not None:
+                d = np.subtract((f, l, h), w) * 100
+                lines.append(f"  {name} fwd {w[0]:.3f} left {w[1]:+.3f} h {w[2]:.3f} -> real - {name} "
+                             f"fwd {d[0]:+.1f} left {d[1]:+.1f} up {d[2]:+.1f} cm")
+                short += f", คลาดจากที่สั่ง หน้า {d[0]:+.1f} ซ้าย {d[1]:+.1f} สูง {d[2]:+.1f} ซม."
+        for s in lines:
+            self.get_logger().info(s)
+        return short
         self.publish_status()
 
     def publish_status(self):
@@ -1037,6 +1098,19 @@ class PickPlace(Node):
             free = self.weight_loads("empty jaws above the bag (from below)")
         self.progress(3, n, "approach", "ลงไปที่ของ...")
         self.line(s["approach"], "ลงไปที่ของ")
+        if "hang" in plan:               # a bag: where the open gap really is, before closing
+            c = plan["grasp_centre"]
+            cd = plan["close_dir"]
+            cu = self.kin.to_user(self.kin.pan_point + np.asarray(cd[:2], float))
+            self.get_logger().info(
+                f"bag plan: object centre arm ({c[0]:.3f}, {c[1]:.3f}, {c[2]:.3f}), {plan['mode']}, jaws close along "
+                f"yaw {math.degrees(math.atan2(cu[1], cu[0])):+.0f} deg (robot frame, 0 = ahead), opening "
+                f"{plan['gap'] * 100:.1f} cm")
+            time.sleep(0.3)              # joint_states of the settled arm
+            report = self.grasp_report("planner at the close", planned=s["approach"][-1])
+            if bool(self.get_parameter("bag_hover_only").value):
+                self.hold_still = "ทดสอบ bag_hover_only: ค้างไว้ให้วัด"
+                raise Failed(f"bag_hover_only: หยุดค้าง อ้าก้ามไว้ที่ระดับหนีบ ({report})", "STOPPED")
         self.progress(4, n, "grasp", "หนีบ...")
         r = self.gripper(0.0, "หนีบ")
         miss = plan.get("miss_below", 0.05)
@@ -1161,11 +1235,14 @@ class PickPlace(Node):
         if not (0.0 < thick <= 0.065 and 0.0 < length <= 0.4):
             raise Failed("thickness ต้อง 0-0.065 ม. และ length 0-0.4 ม.", "TOO_WIDE" if thick > 0.065 else "FAILED")
         q = ps.pose.orientation
-        if abs(q.x) + abs(q.y) + abs(q.z) + abs(q.w) < 1e-9:      # unknown: runs across the arm's view
+        given = abs(q.x) + abs(q.y) + abs(q.z) + abs(q.w) >= 1e-9
+        if not given:                                              # unknown: runs across the arm's view
             yaw = math.atan2(y - self.kin.pan_point[1], x - self.kin.pan_point[0]) + math.pi / 2
         else:
             yaw = q_yaw(q)
-        return Box(x, y, yaw, (length, thick, h))
+        box = Box(x, y, yaw, (length, thick, h))
+        box.yaw_given = given        # the camera method then assumes the bag faces the robot
+        return box
 
     def to_box(self, pose, size=None):
         """PoseStamped (any TF frame) -> Box in the arm base frame."""

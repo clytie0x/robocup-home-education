@@ -1,5 +1,6 @@
-"""Image helpers for the camera bag pick (bag_camera.py): find the bag in the forearm-camera view, read the
-direction of its top ridge, and check in the Xtion view whether the bag is off the floor."""
+"""Image helpers for the camera bag pick (bag_camera.py): find the bag in the webcam view (fixed front camera
+since 2026-11-18; the forearm camera before), read the direction of its top ridge, and check whether the bag is
+off the floor (fixed camera: fixed_lifted; Xtion: lifted)."""
 import math
 
 import cv2
@@ -24,7 +25,8 @@ def gripper_x(orange):
 
 
 def find_bag(im):
-    """Bag blob in the arm-camera view: dict(cx, top_pts, area) or None."""
+    """Bag blob: dict(cx, x0, x1, tops (columns the gripper does not hide), all_tops, y0, y1, h, area, grip_x)
+    or None."""
     bag, orange = masks(im)
     n, lab, st, _ = cv2.connectedComponentsWithStats(bag)
     if n < 2:
@@ -34,11 +36,15 @@ def find_bag(im):
         return None
     m = lab == i
     cols = np.where(m.any(0))[0]
+    rows = np.where(m.any(1))[0]
     tops = np.array([[c, np.nonzero(m[:, c])[0].min()] for c in cols], float)
+    all_tops = tops.copy()        # every column (the fixed camera with the arm out of view: bag_camera.locate)
     # drop columns where the top is hidden by the gripper (orange right above it)
     keep = [not orange[max(0, int(y) - 12):int(y) + 1, int(x)].any() for x, y in tops]
     tops = tops[np.array(keep, bool)] if any(keep) else tops
     return {"cx": float(np.mean(cols)), "x0": float(cols.min()), "x1": float(cols.max()), "tops": tops,
+            "all_tops": all_tops,
+            "y0": float(rows.min()), "y1": float(rows.max()), "h": int(m.shape[0]),
             "area": int(st[i, 4]), "grip_x": gripper_x(orange)}
 
 
@@ -86,6 +92,73 @@ def lifted(before, after):
     if cols.sum() < 8:
         return floor_lifted(before, after)
     return float(floor_mask(after)[:, cols].mean()), int(cols.sum())
+
+
+def cam_lifted(b0, b1, grow=1.25, shift=30.0):
+    """Arm-camera lift check: the bag seen from the same arm pose before the grasp (b0) and after lifting
+    10 cm (b1). A lifted bag comes 10 cm nearer the camera: bigger and moved in the image. Returns a dict with
+    lifted True / False / None (cannot tell) and the numbers, for the log."""
+    if b0 is None:
+        return {"lifted": None, "why": "no bag before"}
+    if b1 is None:
+        return {"lifted": False, "why": "no bag after"}
+    ratio = b1["area"] / max(b0["area"], 1)
+    c0 = ((b0["x0"] + b0["x1"]) / 2, float(b0["tops"][:, 1].min()))
+    c1 = ((b1["x0"] + b1["x1"]) / 2, float(b1["tops"][:, 1].min()))
+    move = float(np.hypot(c1[0] - c0[0], c1[1] - c0[1]))
+    return {"lifted": bool(ratio > grow or move > shift), "area_ratio": round(ratio, 2), "move_px": round(move, 1)}
+
+
+def fixed_lifted(b0, b1, min_up=12.0, min_cols=15):
+    """Fixed front camera lift check: the bag before (b0) and after (b1) a lift, the arm at the same pose in both
+    frames. A lifted bag moves UP in the image (a 10 cm lift is ~40 px at the pick distance, model of
+    front_camera.json). Compared: the top edge over the columns seen in both, and the bottom row when it is not
+    cut off by the frame. Returns dict(lifted True / False / None = cannot tell, numbers for the log)."""
+    if b0 is None:
+        return {"lifted": None, "why": "no bag before"}
+    if b1 is None:
+        return {"lifted": None, "why": "no bag after (hidden by the arm?)"}
+    t0 = {int(x): y for x, y in b0["tops"]}
+    t1 = {int(x): y for x, y in b1["tops"]}
+    common = sorted(set(t0) & set(t1))
+    out = {"cols": len(common)}
+    ups = []
+    if len(common) >= min_cols:
+        out["top_up_px"] = round(float(np.median([t0[c] - t1[c] for c in common])), 1)
+        ups.append(out["top_up_px"])
+    if b0["y1"] < b0["h"] - 3 and b1["y1"] < b1["h"] - 3:      # bottom edge in view in both frames
+        out["bottom_up_px"] = round(b0["y1"] - b1["y1"], 1)
+        ups.append(out["bottom_up_px"])
+    if not ups:
+        out.update(lifted=None, why="nothing to compare")
+        return out
+    out["lifted"] = bool(max(ups) > min_up)
+    return out
+
+
+def foot_y(im, b, run=6):
+    """Image row of the bag's foot on the floor in the fixed front camera: below the bag blob, the first row
+    where the cyan floor shows again (the test bag's lower part is white with dots, not in the bag mask, so
+    the blob's own bottom is not the foot). Median over the blob's middle columns; None when the floor below
+    is out of the picture (the bag too near) in most of them."""
+    hsv = cv2.cvtColor(im, cv2.COLOR_BGR2HSV)
+    H, S, V = hsv[..., 0].astype(int), hsv[..., 1].astype(int), hsv[..., 2].astype(int)
+    floor = (H >= 75) & (H <= 105) & (S > 25) & (V > 80)
+    x0, x1 = int(b["x0"]), int(b["x1"])
+    cols = range(x0 + (x1 - x0) // 4, x1 - (x1 - x0) // 4 + 1, 2)
+    rows = []
+    for c in cols:
+        f = floor[int(b["y1"]):, c]
+        hit = None
+        for r in range(0, len(f) - run + 1):        # first run of floor rows (not a fleck)
+            if f[r:r + run].all():
+                hit = int(b["y1"]) + r
+                break
+        rows.append(hit)
+    found = [r for r in rows if r is not None]
+    if len(found) < max(3, len(rows) // 2):
+        return None
+    return float(np.median(found))
 
 
 def edge_y(b, half=40):
