@@ -10,6 +10,7 @@ Run on the Jetson with the arm stack up (domain 42, mount:=robot). Writes bp_*.j
 """
 import json
 import math
+import os
 import sys
 import time
 import urllib.request
@@ -23,7 +24,7 @@ import gcam
 from so100_driver.console_gate import require as console_gate
 from so100_driver.ik import ARM, GraspPlanner, Kinematics, deck_box
 
-XTION = "http://192.168.31.21:8081/stream"
+XTION = os.environ.get("BAG_XTION_URL", "http://10.0.0.1:8081/stream")
 VIEW = (0.18, 0.09, -50)            # viewing pose: fwd, z, pitch (left varies)
 REACH = {"across": 0.275, "away": 0.27, "diag": 0.27}   # gripper origin fwd for the grasp (pitch -60)
 DOWN = [0.11, 0.09, 0.07, 0.05, 0.03]                    # origin z steps; close at the last

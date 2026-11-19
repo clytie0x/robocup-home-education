@@ -29,7 +29,7 @@ FLOOR, DECK_Z = -0.31, -0.068
 DECK = (0.18, 0.22, 0.18, 0.22)
 SPEED = 0.6          # rad/s of the fastest joint
 WEB = "http://localhost:8082/snap.jpg"
-XTION = "http://192.168.31.21:8081/stream"
+XTION = os.environ.get("BAG_XTION_URL", "http://10.0.0.1:8081/stream")
 
 
 def grab_xtion():

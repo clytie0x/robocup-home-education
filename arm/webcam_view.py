@@ -1,33 +1,94 @@
-"""Live view of the arm's webcam in a browser: http://<jetson>:8082/  (also /snap.jpg = one frame)."""
+"""Live view of the arm's webcam in a browser: http://<jetson>:8082/  (also /snap.jpg = one frame).
+
+One process owns the camera. A second start exits with the holder's pid instead of fighting for
+/dev/video0 (OpenCV then prints "can't open camera by index" in a loop: 768 times over 17 restarts
+on 19 Nov). A failed open waits 0, 0.5, 1, 2, then 4 s, and after that 5 s between tries.
+"""
+import fcntl
 import os
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import cv2
-
 # the console gate without a sourced workspace (the agent runs "cd ~/so100_ws && python3 webcam_view.py")
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(_here, "src", "so100_driver"), os.path.join(_here, "so100_driver")]
-from so100_driver.console_gate import require as console_gate  # noqa: E402
 
+OPEN_DELAYS = (0, 0.5, 1, 2, 4)
+RETRY_WAIT = 5.0
 latest = {"jpg": None}
 
 
-def grab():
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    while True:
-        ok, f = cap.read()
-        if not ok:
-            latest["jpg"] = None          # camera gone: do not keep showing the last frame
-            time.sleep(0.5)
+def lock_path(index=0, directory=None):
+    directory = directory or os.environ.get("HMC_LOCK_DIR", "/tmp")
+    return os.path.join(directory, "hmc-webcam-video%s.lock" % index)
+
+
+def claim_camera(index=0, directory=None):
+    """Exclusive lock for this webcam. Returns the open file (keep it). SystemExit if another process holds it."""
+    path = lock_path(index, directory)
+    fd = open(path, "a+")
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fd.seek(0)
+        holder = fd.read().strip() or "unknown"
+        fd.close()
+        raise SystemExit("webcam already open (video%s, pid %s); not starting a second one" % (index, holder))
+    fd.seek(0)
+    fd.truncate()
+    fd.write("%s\n" % os.getpid())
+    fd.flush()
+    return fd
+
+
+def _open_v4l2(index):
+    """V4L2 first (one device, no backend probe). The default backend if V4L2 does not open."""
+    import cv2
+    cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+    if cap is not None and cap.isOpened():
+        return cap
+    if cap is not None:
+        cap.release()
+    return cv2.VideoCapture(index)
+
+
+def open_capture(index=0, open_fn=None, sleep=None, delays=OPEN_DELAYS):
+    """Open the webcam, retrying with backoff. open_fn(index) -> a capture. None when every try fails."""
+    open_fn = _open_v4l2 if open_fn is None else open_fn
+    sleep = time.sleep if sleep is None else sleep
+    for delay in delays:
+        if delay:
+            sleep(delay)
+        cap = open_fn(index)
+        opened = cap is not None and (not hasattr(cap, "isOpened") or cap.isOpened())
+        if opened:
+            return cap
+        if cap is not None and hasattr(cap, "release"):
             cap.release()
-            cap = cv2.VideoCapture(0)
+    return None
+
+
+def grab(index=0, sleep=None):
+    import cv2
+    sleep = time.sleep if sleep is None else sleep
+    while True:
+        cap = open_capture(index, sleep=sleep)
+        if cap is None:
+            latest["jpg"] = None
+            sleep(RETRY_WAIT)
             continue
-        latest["jpg"] = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                latest["jpg"] = None  # camera gone: do not keep showing the last frame
+                cap.release()
+                sleep(RETRY_WAIT)
+                break
+            latest["jpg"] = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
 
 
 PAGE = b"""<!doctype html><html><head><meta charset="utf-8"><title>Arm webcam</title>
@@ -70,6 +131,16 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(PAGE)
 
 
-console_gate("webcam_view")  # /dev/video0 has one owner: the agent's webcam program
-threading.Thread(target=grab, daemon=True).start()
-ThreadingHTTPServer(("0.0.0.0", 8082), H).serve_forever()
+def main():
+    from so100_driver.console_gate import require as console_gate
+    lock = claim_camera(0)  # kept open while we serve; the kernel drops it when this process exits
+    try:
+        console_gate("webcam_view")  # /dev/video0 has one owner: the agent's webcam program
+        threading.Thread(target=grab, daemon=True).start()
+        ThreadingHTTPServer(("0.0.0.0", 8082), H).serve_forever()
+    finally:
+        lock.close()
+
+
+if __name__ == "__main__":
+    main()

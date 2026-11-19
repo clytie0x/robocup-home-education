@@ -59,7 +59,10 @@ def seen_in(jpeg, detector, reid, pose=None, gate=None, normalise="none"):
     raw, bgr = bgr, light.normalise(bgr, normalise)
     boxes, objects = detector.detect_all(bgr) if hasattr(detector, "detect_all") else (detector.detect(bgr), [])
     looks = reid.looks(bgr, [b[:4] for b in boxes])
-    people = [{"box": [float(v) for v in b[:4]], "conf": float(b[4]), "look": list(look)} for b, look in zip(boxes, looks)]
+    # An empty look is [] (never JSON null: the Pi does tuple(look)). The Pi treats [] as no look,
+    # so a failed re-id is not enrolled. A real vector is a list of floats.
+    people = [{"box": [float(v) for v in b[:4]], "conf": float(b[4]),
+               "look": [float(v) for v in look] if look else []} for b, look in zip(boxes, looks)]
     if pose is not None:
         attach_keypoints(people, pose.poses(bgr))
     seen = {"people": people,
@@ -157,7 +160,8 @@ def real_people(detector_path=DETECTOR, reid_path=REID, pose_path=POSE, normalis
     reid_p = _pick_engine(reid_path, REID_FALLBACK)
     pose_p = _pick_engine(pose_path, POSE_FALLBACK)
     print(f"engines: det={det_p} reid={reid_p} pose={pose_p}", flush=True)
-    detector, reid = Detector(det_p), ReId(reid_p)
+    reid_fallback = REID_FALLBACK if reid_p != REID_FALLBACK else None
+    detector, reid = Detector(det_p), ReId(reid_p, reid_fallback)
     pose_engine = Pose(pose_p) if pose_p and os.path.exists(pose_p) else None
     if pose_engine is None:
         print("no pose engine at", pose_path, "- answers carry no keypoints", flush=True)
@@ -254,8 +258,15 @@ class Server:
                     jpeg = _read_exactly(conn, header["jpeg"], self._stop, self._idle)
                     self._frames += 1
                     pose = header.get("pose") is True or (self._pose_every > 0 and self._frames % self._pose_every == 0)
-                    with self._detect_lock:  # pose passed only when wanted, so detect callables without it still work
-                        found = self._detect(jpeg, header["width"], header["height"], **({"pose": True} if pose else {}))
+                    try:
+                        with self._detect_lock:  # pose passed only when wanted, so detect callables without it still work
+                            found = self._detect(jpeg, header["width"], header["height"],
+                                                 **({"pose": True} if pose else {}))
+                    except RuntimeError as exc:
+                        # A TensorRT execute failure used to drop the socket; the Pi reconnected and it failed
+                        # again (65 times on 19 Nov). One empty answer keeps the link, like a broken JPEG.
+                        print("detect failed, answering nobody: %s" % exc, flush=True)
+                        found = {"people": [], "objects": []}
                     reply = {"seq": header["seq"], "t": header["t"]}
                     reply.update(found if isinstance(found, dict) else {"people": found})
                     reply = json.dumps(reply).encode("utf-8")

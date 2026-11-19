@@ -52,6 +52,16 @@ class AgentTest(unittest.TestCase):
             self.outside.wait()
         self.tmp.cleanup()
 
+    def test_a_second_agent_is_refused(self):
+        first = agent.claim_instance(8090, self.tmp.name)
+        try:
+            with self.assertRaises(SystemExit) as caught:
+                agent.claim_instance(8090, self.tmp.name)
+            self.assertIn("already running on port 8090", str(caught.exception))
+            self.assertIn(str(os.getpid()), str(caught.exception))
+        finally:
+            first.close()
+
     def test_start_status_stop(self):
         code, body = self.agent.act("start", "flow")
         self.assertEqual((code, body["error"]), (200, None))
