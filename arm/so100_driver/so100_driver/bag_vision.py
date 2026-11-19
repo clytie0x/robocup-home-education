@@ -2,6 +2,9 @@
 since 2026-11-18; the forearm camera before), read the direction of its top ridge, and check whether the bag is
 off the floor (fixed camera: fixed_lifted; Xtion: lifted).
 
+The frame is the AX1080P JPEG from webcam_view (MJPG 640x480, the calibration size). This module
+does not open the camera and does not change that size.
+
 Bag detection (2026-11-19, color- and floor-agnostic):
   1. Primary: TensorRT YOLO11-seg engine (~/hmc-follow/models/yolo11s-seg_480x640.engine, or SO100_BAG_SEG_ENGINE)
      for COCO bag classes (backpack, handbag, suitcase) — works on any bag color and any arena floor.

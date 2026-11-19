@@ -28,6 +28,7 @@ bag_hover_only: stop with the jaws OPEN at the close height and hold still there
 measure how far the gap is from the wall); the log has the asked and the real (forward kinematics) gap middle.
 Put-down: turn towards the target at the hold height, come down along the same tilt steps, open, back off.
 """
+import copy
 import json
 import math
 import os
@@ -80,6 +81,8 @@ class FrontCamera:
         if not d.get("calibrated"):
             raise ValueError("front camera not calibrated")
         self.fx, self.cx, self.cy = float(d["fx"]), float(d["cx"]), float(d["cy"])
+        # webcam_view captures MJPG at this size. fx is for these pixels (front_camera.json).
+        self.width, self.height = int(d.get("width", 640)), int(d.get("height", 480))
         self.pos = np.array([float(d["x"]), float(d["y"]), float(d["z"])])
         self.mirror = bool(d.get("mirror", False))
         y, p, r = (math.radians(float(d.get(k, 0.0))) for k in ("yaw_deg", "pitch_deg", "roll_deg"))
@@ -93,6 +96,24 @@ class FrontCamera:
     def load(cls, path):
         with open(os.path.expanduser(path)) as f:
             return cls(json.load(f))
+
+    def for_image(self, image):
+        """This camera, or a copy whose fx, cx, cy match a uniformly scaled frame. None if the aspect changed."""
+        height, width = int(image.shape[0]), int(image.shape[1])
+        if width == self.width and height == self.height:
+            return self
+        if self.width <= 0 or self.height <= 0:
+            return None
+        sx, sy = width / float(self.width), height / float(self.height)
+        if abs(sx - sy) > 0.02:
+            return None
+        scale = (sx + sy) / 2.0
+        twin = copy.copy(self)
+        twin.fx = self.fx * scale
+        twin.cx = (self.cx + 0.5) * scale - 0.5
+        twin.cy = (self.cy + 0.5) * scale - 0.5
+        twin.width, twin.height = width, height
+        return twin
 
     def ray(self, u, v):
         d = np.array([(u - self.cx) / self.fx * (-1.0 if self.mirror else 1.0), (v - self.cy) / self.fx, 1.0])
@@ -469,7 +490,7 @@ class CameraBag:
             if (c - cam.pos) @ cam.rot[:, 2] <= 0:
                 continue
             u, v = cam.project(c)
-            if 0 <= u < 640 and 0 <= v < 480:
+            if 0 <= u < cam.width and 0 <= v < cam.height:
                 return True
         return False
 
@@ -484,6 +505,10 @@ class CameraBag:
             return None, None
         b = bv.find_bag(im)
         if b is None or cam is None:
+            return b, None
+        cam = cam.for_image(im)
+        if cam is None:
+            self.n.say("ภาพกล้องหน้าไม่ตรงขนาดคาลิเบรต (ต้องเป็นขนาดเดิม หรือสเกลเท่ากันทั้งสองแกน)")
             return b, None
         px, py = (float(v) for v in self.p("bag_front_cam_pan"))
         loc = locate(cam, b, (px, py), float(self.p("bag_cam_half_depth")), float(self.p("bag_cam_rim_h")),
