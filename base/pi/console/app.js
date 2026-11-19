@@ -891,7 +891,7 @@ $("btn-move-bag-60").addEventListener("click", async () => {
     if (c2 !== 0) { say(`หยุดที่ขั้น 2/4: เดินหน้าจบด้วย code ${c2}`, true); return; }
 
     say("3/4 ถึงจุดวางแล้ว กำลังวางถุง...");
-    const p3 = await post("/api/arm", { cmd: "drop_bag", x: 0.36, y: 0.0 });
+    const p3 = await post("/api/arm", { cmd: "drop_bag", x: 0.31, y: 0.0 });
     if (!p3 || p3.error) { say(`หยุดที่ขั้น 3/4: ${(p3 && p3.error) || "วางถุงไม่สำเร็จ"}`, true); return; }
 
     say("4/4 วางถุงแล้ว กำลังถอยกลับ 60 ซม....");
@@ -918,7 +918,7 @@ for (const b of document.querySelectorAll("[data-arm-cmd]")) {
     const cmd = b.dataset.armCmd;
     const bt = run && run.record && run.record.bag_task && run.record.bag_task.result;
     let payload;
-    if (cmd === "drop_bag") payload = { cmd, x: 0.36, y: 0.0 };
+    if (cmd === "drop_bag") payload = { cmd, x: 0.31, y: 0.0 };
     else if (cmd === "pick_bag") payload = (bt && bt.ok) ? { cmd } : { cmd, x: 0.36, y: 0.0 };
     else payload = { cmd };
     b.disabled = true;
@@ -1017,7 +1017,7 @@ $("btn-stop-all").addEventListener("click", async () => {
 // ------------------------------------------------------------ the arm (Jetson tab)
 
 const ARM_MOVES = { home: { cmd: "home" }, rest: { cmd: "rest" }, center: { cmd: "center" },
-  "pick-front": { cmd: "pick_bag", x: 0.36, y: 0.0 }, "drop-front": { cmd: "drop_bag", x: 0.36, y: 0.0 },
+  "pick-front": { cmd: "pick_bag", x: 0.36, y: 0.0 }, "drop-front": { cmd: "drop_bag", x: 0.31, y: 0.0 },
   bagpick: { cmd: "bagpick", putback: false },
   "torque-on": { cmd: "torque", on: true }, "torque-off": { cmd: "torque", on: false } };
 let armSending = false; // a move this tab sent is not answered yet (center takes up to 90 s, bagpick up to 300 s)

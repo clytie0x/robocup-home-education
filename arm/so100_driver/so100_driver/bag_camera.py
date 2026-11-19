@@ -53,6 +53,7 @@ LIFT_SPEED = 0.25                 # rad/s of the fastest joint on that lift
 UP = [(-52, 0.0), (-45, 0.02), (-38, 0.04), (-30, 0.06), (-22, 0.08), (-15, 0.10), (-8, 0.12), (0, 0.14),
       (0, 0.17), (0, 0.20), (0, 0.23), (0, 0.26), (0, 0.29), (0, 0.32)]   # (pitch, tip z): raise, small tilt steps
 HOLD_R = 0.32                     # finger tips from the pan axis while held up
+CARRY_THETA = math.radians(75)    # swing the held bag out to the left side so it clears the front LiDAR and Xtion
 DOWN = [(0, 0.14), (-30, 0.06), (-60, -0.02)]   # put-down: few, longer moves (the task gives it 20 s)
 PUT_DROP = 0.03                   # m above the grasp height the put-down lets go (the bag drops that far)
 JOINT_STEP = 0.03                 # rad between path points
@@ -542,8 +543,26 @@ class CameraBag:
                 self.n.gripper(0.9, "อ้าก้าม")
                 continue
             verified = held["verified"] = verified or bool(gone["lifted"])
+            # Swing the held bag out to the side so it does not hang in front of the LiDAR (x ~0.37 m) while driving
+            hold_pt, hold_tz = held.get("hold", (0, top))
+            for side_sign in (1.0, -1.0):
+                target_th = side_sign * CARRY_THETA
+                steps = max(1, int(math.ceil(abs(target_th - self.theta) / math.radians(10))))
+                start_th = self.theta
+                moved_ok = True
+                for k in range(1, steps + 1):
+                    try:
+                        self.theta = start_th + (target_th - start_th) * k / steps
+                        self.tip(r, hold_tz, hold_pt, roll, "เก็บถุงไว้ด้านข้าง (หลบ LiDAR)", pull_in=0.06,
+                                 speed=HELD_SPEED)
+                        held["theta"] = self.theta
+                    except Failed:
+                        moved_ok = False
+                        break
+                if moved_ok:
+                    break
             note = "" if verified else " (ยังไม่ได้ยืนยันด้วยกล้อง)"
-            return f"ถือถุงอยู่ด้านหน้า ปลายก้ามสูงจากพื้น {top - self.n.table_z:.2f} ม. (ลองที่ {i + 1}){note}"
+            return f"ถือถุงไว้ด้านข้าง ปลายก้ามสูงจากพื้น {top - self.n.table_z:.2f} ม. (ลองที่ {i + 1}){note}"
         raise Failed(f"จับถุงไม่ได้ใน {len(tries)} ครั้ง (หนีบ {closed} ครั้ง; ล่าสุด: {why})", "MISSED")
 
     # ------------------------------------------------------------------ put down
@@ -571,9 +590,19 @@ class CameraBag:
             if z2 < tz or p2 < pt:
                 self.tip(held.get("hold_r", HOLD_R) if p2 >= 0 else r, z2, p2, roll, "วางถุงลง", pull_in=0.06,
                          speed=PUT_SPEED)
-        self.tip(r, put_z, -60, roll, "วางถุงลงพื้น", pull_in=0.05, speed=HELD_SPEED)
+        placed_r = r
+        for cand_r in (r, held.get("r", r), r + 0.03, r + 0.06):
+            try:
+                self.tip(cand_r, put_z, -60, roll, "วางถุงลงพื้น", pull_in=0.05, speed=HELD_SPEED)
+                placed_r = cand_r
+                break
+            except Failed as exc:
+                if exc.code != "UNREACHABLE":
+                    raise
+        else:
+            raise Failed(f"วางถุงลงพื้น: แขนไปไม่ถึง (ปลายก้าม {r:.3f} ม. สูง {put_z:.3f})", "UNREACHABLE")
         self.n.gripper(0.9, "ปล่อย")
         self.n.holding = self.n.grasped = None
         self.n.progress(3, 3, "retreat", "ถอยออกแล้วกลับท่า ready...")
-        self.tip(r - 0.03, put_z + 0.13, -60, roll, "ถอยขึ้น", pull_in=0.05)
+        self.tip(placed_r - 0.03, put_z + 0.13, -60, roll, "ถอยขึ้น", pull_in=0.05)
         return "วางถุงแล้ว"
