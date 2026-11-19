@@ -151,7 +151,9 @@ SEARCH_MAX = 4 * math.pi  # rad; after two full turns, stand and wait
 SEARCH_HOLD = 3.0  # s held on a centred person who does not lock (a stranger, too far): then turn past them
 SEARCH_SKIP = 1.5  # s of turning on, past them, before a centred person can stop the turn again
 HISTORY = 2.0  # s of sent commands kept for the latency prediction
-CLOSED_GATE_SPEED = 0.15  # m/s; above this --drive needs the braking numbers measured (params.speed_gates_open)
+CLOSED_GATE_SPEED = 0.15  # m/s; above this --drive needs the braking numbers measured (params.speed_gates_open).
+# 0.15 itself is allowed once params.json max_speed is raised. tools/brake_distance.py and follow_speed.py
+# measure the stop first; this file does not change the cap.
 STILL = (0.0, 0.0, 0.0)  # the dry run's pose: zero motion
 LOG_ROOT = Path(__file__).resolve().parent / "logs"  # on the Pi: ~/hmc-base/logs
 FOLLOW, RETURN, DONE = "follow", "return", "done"  # the phases of a run
