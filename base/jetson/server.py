@@ -55,11 +55,30 @@ def seen_in(jpeg, detector, reid, pose=None, gate=None, normalise="none"):
 
     bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
     if bgr is None:
-        return {"people": [], "objects": []}  # a broken frame is "nobody seen", never an error that drops the link
+        # a broken frame is "nobody seen", never an error that drops the link
+        return {"people": [], "objects": [], "empty": "the frame could not be decoded"}
     raw, bgr = bgr, light.normalise(bgr, normalise)
-    boxes, objects = detector.detect_all(bgr) if hasattr(detector, "detect_all") else (detector.detect(bgr), [])
-    looks = reid.looks(bgr, [b[:4] for b in boxes])
-    people = [{"box": [float(v) for v in b[:4]], "conf": float(b[4]), "look": list(look)} for b, look in zip(boxes, looks)]
+    try:
+        boxes, objects = detector.detect_all(bgr) if hasattr(detector, "detect_all") else (detector.detect(bgr), [])
+    except RuntimeError as exc:
+        print("detector: 0 people: TensorRT execute failed: %s" % exc, flush=True)
+        return {"people": [], "objects": [], "empty": "TensorRT execute failed: %s" % exc}
+    try:
+        looks = reid.looks(bgr, [b[:4] for b in boxes])
+    except RuntimeError as exc:
+        print("reid failed, looks left empty: %s" % exc, flush=True)
+        looks = [None] * len(boxes)
+    from reid import clothing_histogram
+    colours = clothing_histogram(bgr, [b[:4] for b in boxes]) if boxes else []
+    # An empty look is [] (never JSON null: the Pi does tuple(look)). The Pi treats [] as no look,
+    # so a failed re-id is not enrolled. A real vector is a list of floats.
+    people = []
+    for i, (b, look) in enumerate(zip(boxes, looks)):
+        person = {"box": [float(v) for v in b[:4]], "conf": float(b[4]),
+                  "look": [float(v) for v in look] if look else []}
+        if i < len(colours):
+            person["colour"] = [float(v) for v in colours[i]]
+        people.append(person)
     if pose is not None:
         attach_keypoints(people, pose.poses(bgr))
     seen = {"people": people,
@@ -69,6 +88,8 @@ def seen_in(jpeg, detector, reid, pose=None, gate=None, normalise="none"):
         seen["quality"] = {"ok": ok, "why": why, "luma": round(gate.mean, 1)}
         for person in people:  # the light the camera really had, before normalise
             person["light"] = round(light.box_light(raw, person["box"]), 1)
+    if not people:
+        seen["empty"] = getattr(detector, "empty", None) or "no person box kept"
     return seen
 
 
@@ -157,7 +178,8 @@ def real_people(detector_path=DETECTOR, reid_path=REID, pose_path=POSE, normalis
     reid_p = _pick_engine(reid_path, REID_FALLBACK)
     pose_p = _pick_engine(pose_path, POSE_FALLBACK)
     print(f"engines: det={det_p} reid={reid_p} pose={pose_p}", flush=True)
-    detector, reid = Detector(det_p), ReId(reid_p)
+    reid_fallback = REID_FALLBACK if reid_p != REID_FALLBACK else None
+    detector, reid = Detector(det_p), ReId(reid_p, reid_fallback)
     pose_engine = Pose(pose_p) if pose_p and os.path.exists(pose_p) else None
     if pose_engine is None:
         print("no pose engine at", pose_path, "- answers carry no keypoints", flush=True)
@@ -254,8 +276,15 @@ class Server:
                     jpeg = _read_exactly(conn, header["jpeg"], self._stop, self._idle)
                     self._frames += 1
                     pose = header.get("pose") is True or (self._pose_every > 0 and self._frames % self._pose_every == 0)
-                    with self._detect_lock:  # pose passed only when wanted, so detect callables without it still work
-                        found = self._detect(jpeg, header["width"], header["height"], **({"pose": True} if pose else {}))
+                    try:
+                        with self._detect_lock:  # pose passed only when wanted, so detect callables without it still work
+                            found = self._detect(jpeg, header["width"], header["height"],
+                                                 **({"pose": True} if pose else {}))
+                    except RuntimeError as exc:
+                        # A TensorRT execute failure used to drop the socket; the Pi reconnected and it failed
+                        # again (65 times on 19 Nov). One empty answer keeps the link, like a broken JPEG.
+                        print("detect failed, answering nobody: %s" % exc, flush=True)
+                        found = {"people": [], "objects": []}
                     reply = {"seq": header["seq"], "t": header["t"]}
                     reply.update(found if isinstance(found, dict) else {"people": found})
                     reply = json.dumps(reply).encode("utf-8")

@@ -187,6 +187,32 @@ ignore the bottom 18 % (`JAW_ROI`). The floor there is teal with dark grout line
 distortion is not modelled. The camera pose is the camera-to-gripper transform `T_gripper_camera`
 (OpenCV axes).
 
+**Run the calibration.** On the Jetson, from `~/hmc-follow`, with the arm stack up and `webcam_view.py`
+on port 8082:
+
+```bash
+python3 tools/gripper_cam_cal.py
+```
+
+That is `floor_pick.py --calibrate-self`: no taped marker, the floor joint in view is the target.
+It moves the arm and writes `~/hmc-follow/gripper_camera.json`. Add `--dry-run` to print the moves
+and write nothing. With a red square at taped spots (metres, robot frame):
+
+```bash
+python3 tools/gripper_cam_cal.py --marker 0.36 0.0 --marker 0.38 0.08
+```
+
+`bag_arm` uses the file to measure the bag top. A measurement inside the spread, height and shift
+limits skips the touch probe. No file, or a rejected measurement, and the touch probe still runs.
+The live pick (`bag_method` `camera`) does not touch-probe: it closes at `bag_cam_close_h` and
+ignores the grasp z. The ~10 s added on 19 Nov was two Xtion reads of the Wi-Fi address, 5 s each.
+That URL now defaults to the LAN, `http://10.0.0.1:8081/stream`.
+The model is the camera on the gripper (`T_gripper_camera`). Since 2026-11-18 the webcam used for
+the pick is fixed under the deck (`front_camera.json`, `tools/front_cam_cal.py`). A
+`gripper_camera.json` fitted to that fixed camera will not pass the gate, and a planner pick falls
+back to the touch probe. On the camera pick, `bag_arm` still runs `measure_top` when the file
+exists, then the arm pick ignores that z.
+
 **Calibration** (`--calibrate`):
 
 1. Put a marker on the floor at a measured robot-frame position. It can be a red/pink printed square
