@@ -49,7 +49,7 @@ API สำหรับให้ส่วนอื่นของหุ่น (�
 - `camera` (`bag_camera.py`): หนีบ**ผนังหน้าถุง** (ด้านที่หันเข้าหาแขน) ตรงขอบปากถุง เช็กด้วยเว็บแคมหน้า
   ที่ติดอยู่กับที่ใต้ชั้นบน (ตั้งแต่ 2026-11-18 ก่อนหน้านั้นกล้องอยู่บนท่อนแขน; `webcam_view.py` พอร์ต 8082, `bag_cam_url`)
   1. ตำแหน่ง: `x, y` ของ goal = **กึ่งกลางถุง** ถ้ากล้องหน้าเห็นถุง ใช้ตำแหน่งซ้าย-ขวาจากภาพแทน (ใช้คาลิเบรต
-     `bag_front_cam_file` = `~/hmc-follow/front_camera.json`) เมื่อต่างจาก goal ไม่เกิน 8 ซม.
+     `bag_front_cam_file` = `~/hmc-follow/front_camera.json`) เมื่อความมั่นใจถึง `CONF_MIN` (ดู Camera pose ด้านล่าง)
      ทิศถุง: `orientation` ของ goal = แนวหูหิ้ว ถ้าไม่ส่ง (quaternion เป็นศูนย์ทั้งหมด) ถือว่าถุงหันหน้าเข้าหาหุ่น
      (หูหิ้วขนานแกน y ของหุ่น) ผนังหน้าอยู่หน้ากึ่งกลางถุง `bag_cam_half_depth` = 5.5 ซม.
   2. ก้ามเอียง 60° อ้าเต็ม ลงทีละ 2 ซม. ให้**กลางช่องก้าม** (นิ้วขยับข้างเดียว) อยู่บนผนังหน้า ปลายก้ามสูงจากพื้น
@@ -64,6 +64,8 @@ API สำหรับให้ส่วนอื่นของหุ่น (�
   - ระหว่างถือ: ไม่พับไปท่าพักเอง, `/arm/home` ตอบ `HOLDING` (ท่า ready จะเหวี่ยงถุงเข้าตัวหุ่น)
   - `/arm/place`: หันไปทางจุดวาง ลดลง ปล่อย ถอย แล้วกลับท่า ready
   - ยังไม่ได้ทดสอบบนหุ่นด้วยกล้องหน้า (ผลเดิมกับกล้องบนแขน 2026-11-15: หยิบ 40-55 วิ, วาง 16-18 วิ)
+
+**Camera pose (English).** `reconcile_edges` combines the rim estimate (`bag_cam_rim_h`) and the foot estimate (the floor). The pick uses that centre when its confidence is at least `CONF_MIN` (0.55), however far it is from the goal's x, y. Below that it uses the goal's x, y. The goal is still accepted by the API. A bag that is not standing, or whose rim width is far from `bag_cam_width`, is still an error. The old "within 8 cm of the goal" rule no longer applies. One JSON trial per pick is written under `bag_trial_dir` (default `~/hmc-follow/runs`). Joint speeds `bag_cam_free_speed`, `bag_cam_held_speed`, `bag_cam_put_speed` and `bag_cam_lift_speed` default to 0.8, 0.4, 0.6 and 0.25 rad/s. `bag_xtion_url` defaults to `http://10.0.0.1:8081/stream` (`BAG_XTION_URL` overrides it).
 - **`bag_hover_only`** (ค่าเริ่มต้น `false`, ใช้ได้ทั้ง `camera` และ `planner`): ทดสอบ แขนลงไปที่ระดับหนีบ
   **อ้าก้ามค้างไว้แล้วหยุด** ไม่หนีบ ไม่ยก ตอบ `STOPPED` พร้อมตำแหน่งกลางช่องก้ามจริง และไม่พับไปท่าพักเอง
   ให้ห้อยลูกดิ่งวัดว่าคลาดจากผนัง/หูหิ้วเท่าไร เสร็จแล้วสั่ง `/arm/home` ก่อนหยิบใหม่

@@ -57,6 +57,7 @@ on the lab Wi-Fi goes through the Pi's console. CORS headers are sent so a page 
 Plain Python 3 standard library.
 """
 import argparse
+import fcntl
 import json
 import os
 import shutil
@@ -601,13 +602,43 @@ def handler_for(agent, allow):
     return Handler
 
 
+def claim_instance(port, directory=None):
+    """One agent per port. Returns the lock file; the caller keeps it open. SystemExit if another holds it.
+
+    The kernel releases the lock when this process exits, so a crashed agent does not block the next start.
+    A live listener is not stolen: the socket is bound only after the lock, and SO_REUSEADDR is not set.
+    """
+    directory = directory or os.environ.get("HMC_LOCK_DIR", "/tmp")
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "hmc-agent-%s.lock" % port)
+    fd = open(path, "a+")
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fd.seek(0)
+        holder = fd.read().strip() or "unknown"
+        fd.close()
+        raise SystemExit("agent already running on port %d (pid %s); not starting a second one" % (port, holder))
+    fd.seek(0)
+    fd.truncate()
+    fd.write("%s\n" % os.getpid())
+    fd.flush()
+    return fd
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--allow", default=",".join(ALLOW), help="addresses that may start and stop (comma separated)")
     args = ap.parse_args(argv)
+    lock = claim_instance(args.port)
     agent = Agent()
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), handler_for(agent, tuple(args.allow.split(","))))
+    try:
+        server = ThreadingHTTPServer(("0.0.0.0", args.port), handler_for(agent, tuple(args.allow.split(","))))
+    except OSError as exc:
+        lock.close()
+        raise SystemExit("agent cannot listen on port %d: %s" % (args.port, exc)) from exc
+    server._instance_lock = lock  # kept open so the lock lives as long as the server
     server.daemon_threads = True
 
     def finish(*_):
