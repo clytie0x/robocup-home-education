@@ -21,6 +21,7 @@ See base/docs/floor-pick.md.
 import argparse
 import collections
 import math
+import os
 import sys
 import time
 
@@ -28,7 +29,9 @@ import numpy as np
 
 import console_gate
 import gripper_camera as gc
+import pick_log
 import ports
+import speed_profile
 from so100_ik import (ARM, BODY_HALF, CLOSED, DECK_TOP, JAW_OPEN, LIDAR_Z, Kinematics, Mount, Unreachable,
                       load_limits)
 
@@ -77,21 +80,22 @@ def qvec(q):
 
 # ===================================================================================== planning
 class Planner:
-    def __init__(self, kin, speed=SPEED_SCALE, bag_hang=BAG_HANG, bag_half=BAG_HALF):
+    def __init__(self, kin, speed=SPEED_SCALE, bag_hang=BAG_HANG, bag_half=BAG_HALF, line_speed=LINE_SPEED):
         self.k = kin
         self.vmax = {n: kin.velocity[n] * speed for n in ARM}
+        self.line_speed = float(line_speed)
         self.bag_hang, self.bag_half = bag_hang, bag_half
         self._carry = None
 
     # ---------------------------------------------------------------------------- timing
     def timed(self, start, qs):
-        """[(t, q)] with min-jerk timing, joint speeds <= vmax and the grasp point <= LINE_SPEED."""
+        """[(t, q)] with min-jerk timing, joint speeds <= vmax and the grasp point <= line_speed."""
         prev, prev_p = start, self.k.grasp_point(start)
         cost = []
         for q in qs:
             p = self.k.grasp_point(q)
             c = max(abs(q[n] - prev[n]) / self.vmax[n] for n in ARM)
-            cost.append(max(c, float(np.linalg.norm(p - prev_p)) / LINE_SPEED))
+            cost.append(max(c, float(np.linalg.norm(p - prev_p)) / self.line_speed))
             prev, prev_p = q, p
         total = float(sum(cost))
         if total < 1e-9:
@@ -340,13 +344,29 @@ class FloorPick:
       stop()   event(text)   snapshot() -> BGR image or None   sleep(s)
     """
 
-    def __init__(self, kin, transport, planner=None, log=print, grip_timeout=10.0):
+    def __init__(self, kin, transport, planner=None, log=print, grip_timeout=10.0, pick_log_dir=None,
+                 clock=time.monotonic, profile=speed_profile.SAFE):
         self.k = kin
         self.t = transport
         self.plan = planner or Planner(kin)
         self.log = log
         self.grip_timeout = grip_timeout
+        self.pick_log_dir = pick_log_dir
+        self.clock = clock
+        self.profile = profile
         self.moves = []          # (step, duration s) of this run
+        self.last_pick = None    # the per-pick JSON of the last pick (phase timings)
+
+    def _saved(self, phases, result):
+        body = phases.finish(profile=self.profile, ok=result.ok, code=result.code,
+                             speeds=speed_profile.get(self.profile))
+        self.last_pick = body
+        if self.pick_log_dir:
+            try:
+                pick_log.write_pick(self.pick_log_dir, body, time.strftime("%Y%m%d-%H%M%S"), "floor")
+            except OSError as exc:
+                self.log("pick log not written: %s" % exc)
+        return result
 
     # ------------------------------------------------------------------------------ steps
     def _check_state(self, what, holding_ok=True):
@@ -414,25 +434,32 @@ class FloorPick:
         target = np.array([x, y, z], float)
         sent = False
         self.moves = []
+        phases = pick_log.PhaseLog(self.clock)
         try:
+            phases.mark("plan")
             self._check_state("pick", holding_ok=False)
             plan = self.plan.pick_plan(target, pitch)
             carry = plan["carry"]
             self.log("plan: pitch %.0f deg; carry: %s" % (math.degrees(plan["pitch"]), carry["note"]))
+            phases.mark("above")
             self._goto("above the bag", plan["pre"], JAW_OPEN)
             self._grip("open", JAW_OPEN)
             if camera is not None:
+                phases.mark("servo")
                 plan = self._servo(plan, camera, detector or gc.BagHandleDetector())
             if hover_only:
                 self.log("hover only: stopped above (%.3f, %.3f, %.3f) with the jaws open" % tuple(plan["target"]))
-                return Result(True, "HOVER", "above the bag, jaws open")
+                return self._saved(phases, Result(True, "HOVER", "above the bag, jaws open"))
+            phases.mark("descend")
             self._move("descend", plan["descend"], plan["pre"])
+            phases.mark("close")
             r = self._grip("close", 0.0)
             if r.get("reached") or r.get("position", 0.0) < CLOSED:
                 self.log("jaws closed fully (%.3f rad): missed" % r.get("position", 0.0))
                 self._grip("open", JAW_OPEN)
                 self._move("back up", plan["back_up"], plan["descend"][-1])
                 raise Failure("MISSED", "I missed the bag.")
+            phases.mark("lift")
             self._move("lift", plan["lift"], plan["descend"][-1])
             self.t.sleep(SETTLE)
             g = self._current().get("gripper", 0.0)
@@ -440,11 +467,12 @@ class FloorPick:
                 raise Failure("DROPPED", "The bag slipped out after the lift.", stop=True)
             self.t.event("grab_success")
             sent = True
+            phases.mark("carry")
             self._move("to carry", plan["across"], plan["lift"][-1])
             self.log("holding the bag in the carry pose (%s)" % carry["note"])
-            return Result(True, "SUCCESS", "I have the bag.")
+            return self._saved(phases, Result(True, "SUCCESS", "I have the bag."))
         except Failure as exc:
-            return self._fail(exc, "grab", sent)
+            return self._saved(phases, self._fail(exc, "grab", sent))
 
     def _servo(self, plan, camera, detector, tol=0.004, max_step=0.03, iterations=8):
         """Centre the grasp point over the handle seen by the gripper camera, in small steps, at the
@@ -898,6 +926,23 @@ class RosArm:
     def sleep(self, s):
         time.sleep(s)
 
+    def set_speed_profile(self, name):
+        """Tell so100_pick_place which speed profile to use (safe or fast). The node reads it per move."""
+        import rclpy.parameter  # noqa: PLC0415
+        from rcl_interfaces.srv import SetParameters  # noqa: PLC0415
+        speed_profile.get(name)  # refuse a name this code does not know, before touching the node
+        if getattr(self, "_set_speed", None) is None:
+            self._rcl_parameter = rclpy.parameter
+            self._set_speed = self.node.create_client(SetParameters, "/so100_pick_place/set_parameters")
+        if not self._set_speed.wait_for_service(timeout_sec=3.0):
+            raise Failure("FAILED", "so100_pick_place parameters are not up; speed profile %s not set" % name)
+        msg = self._rcl_parameter.Parameter(
+            "speed_profile", self._rcl_parameter.Parameter.Type.STRING, str(name)).to_parameter_msg()
+        res, _ = self._wait(self._set_speed.call_async(SetParameters.Request(parameters=[msg])), 5.0)
+        if res is None or not res.results or not res.results[0].successful:
+            why = "no answer" if res is None or not res.results else res.results[0].reason
+            raise Failure("FAILED", "speed profile %s not set: %s" % (name, why))
+
     def close(self):
         self.ex.shutdown()
         self.node.destroy_node()
@@ -926,7 +971,9 @@ def parse(argv):
     ap.add_argument("--pan-xy", nargs=2, type=float, default=(0.012, 0.0145))
     ap.add_argument("--base-z", type=float, default=0.305)
     ap.add_argument("--yaw", type=float, default=0.0, help="arm yaw on the robot (deg)")
-    ap.add_argument("--speed", type=float, default=SPEED_SCALE, help="fraction of the URDF joint speeds")
+    ap.add_argument("--speed", type=float, default=SPEED_SCALE, help="fraction of the URDF joint speeds (safe profile)")
+    ap.add_argument("--speed-profile", choices=("safe", "fast"), default="safe",
+                    help="safe = today's speeds (default); fast = joint scale 0.45 and LINE_SPEED 0.08 after a supervised test")
     ap.add_argument("--camera-file", default=gc.DEFAULT_FILE)
     ap.add_argument("--snap-url", default="http://127.0.0.1:%d/snap.jpg" % ports.WEBCAM)
     ap.add_argument("--detector", help="module:Class with .detect(bgr) (default: colour + compact blob)")
@@ -937,7 +984,11 @@ def main(argv=None, transport=None):
     a = parse(argv)
     mount = Mount(tuple(a.pan_xy), a.base_z, a.z_offset, math.radians(a.yaw))
     kin = Kinematics(mount, load_limits())
-    planner = Planner(kin, min(a.speed, 1.0))
+    chosen = speed_profile.get(a.speed_profile)
+    # safe keeps --speed (default SPEED_SCALE) and LINE_SPEED. fast replaces both.
+    scale = chosen["joint_scale"] if a.speed_profile == "fast" else min(a.speed, 1.0)
+    line_speed = chosen["line_speed"] if a.speed_profile == "fast" else LINE_SPEED
+    planner = Planner(kin, scale, line_speed=line_speed)
     own = transport is None
     if own and not a.dry_run:  # the real arm (a dry run sends nothing)
         console_gate.require("arm: floor_pick.py")
@@ -946,7 +997,10 @@ def main(argv=None, transport=None):
             transport = DryRunArm(kin, planner.carry_plan()["q"], gripper=GRIP_HELD)
         else:
             transport = DryRunArm(kin) if a.dry_run else RosArm(a.snap_url)
-    fp = FloorPick(kin, transport, planner)
+    log_dir = None if a.dry_run else os.path.expanduser("~/hmc-follow/picks")
+    fp = FloorPick(kin, transport, planner, pick_log_dir=log_dir, profile=a.speed_profile)
+    if not a.dry_run and hasattr(transport, "set_speed_profile"):
+        transport.set_speed_profile(a.speed_profile)  # so100_pick_place reads this on its own moves
     try:
         if a.pick:
             camera = detector = None

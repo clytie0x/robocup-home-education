@@ -30,7 +30,7 @@ import ports
 DEFAULT_FILE = os.path.expanduser("~/hmc-follow/front_camera.json")
 SNAP_URL = "http://127.0.0.1:%d/snap.jpg" % ports.WEBCAM
 PORT = ports.LOOK  # TCP: bag measurements for the Pi (base/pi/bag.py Look)
-WIDTH, HEIGHT = 640, 480
+WIDTH, HEIGHT = 640, 480  # webcam_view opens the AX1080P at this size, MJPG. fx, cx, cy are for these pixels.
 F_GUESS = 480.0  # px: the same AX1080P webcam as gripper_camera.F_GUESS (about 67 deg across); the fit sets it
 X_GUESS = 0.20  # m ahead of the turning centre ("about 0.2 m", the lane brief); measure it with a tape
 Z_GUESS = 0.25  # m above the floor: a guess, the fit sets it
@@ -150,6 +150,29 @@ class FrontCamera:
                 return cls.from_dict(json.load(f))
         except (OSError, ValueError, KeyError, TypeError):
             return cls(calibrated=False, info={"why": "no calibration at %s" % path})
+
+
+def for_image(cam, image):
+    """The camera for this frame's pixel size.
+
+    The calibration (fx, cx, cy, width, height) is for WIDTH x HEIGHT. The same size is returned
+    unchanged. A frame that is a uniform scale of that size (the same aspect) gets fx, cx and cy
+    scaled about pixel centres, so a ray through a feature is the ray it had in the calibration
+    image. A different aspect (1280x720 against 640x480) is refused: scaling one axis would bend
+    the rays. Returns None in that case.
+    """
+    shape = np.asarray(image).shape
+    height, width = int(shape[0]), int(shape[1])
+    if width == cam.width and height == cam.height:
+        return cam
+    if cam.width <= 0 or cam.height <= 0:
+        return None
+    sx, sy = width / float(cam.width), height / float(cam.height)
+    if abs(sx - sy) > 0.02:
+        return None
+    scale = (sx + sy) / 2.0
+    return cam.copy(fx=cam.fx * scale, cx=(cam.cx + 0.5) * scale - 0.5, cy=(cam.cy + 0.5) * scale - 0.5,
+                    width=width, height=height)
 
 
 # ====================================================================== calibration fit
@@ -513,6 +536,11 @@ def measure_bag(cam, image, points, segmenter=None):
     if image is None:
         out["why"] = "no front camera frame"
         return out
+    scaled = for_image(cam, image)
+    if scaled is None:
+        out["why"] = "front frame is not %dx%d and not a uniform scale of it" % (cam.width, cam.height)
+        return out
+    cam = scaled
     pts = np.asarray(points, float).reshape(-1, 2)
     if len(pts) < 3:
         out["why"] = "fewer than 3 LiDAR points on the bag"
