@@ -17,10 +17,18 @@ from dataclasses import dataclass, field
 class Seen:
     bearing_deg: float  # positive = robot's left
     conf: float
-    look: tuple  # appearance numbers used to recognise the same person again
+    look: tuple  # appearance numbers, or None when the Jetson sent none (a failed re-id is not enrolled)
     box: list  # [x1, y1, x2, y2] in image pixels
     kp: list = None  # 17 COCO keypoints [x, y, visibility] in image pixels; only on frames sent with pose=True
     light: float = None  # mean luma (0-255) in the box, from the Jetson's light gate; None from a server without it
+
+
+def _look(raw):
+    """A look vector, or None. An empty list must not become (): LookMemory.add of an empty vector
+    drops the next real 512-d look."""
+    if not raw:
+        return None
+    return tuple(raw)
 
 
 @dataclass
@@ -240,7 +248,7 @@ class JetsonLink:
         quality = reply.get("quality") or {}
         good = quality.get("ok", True) is not False
         people = [  # keypoints from a frame judged bad are dropped: pointing waits for the next good one
-            Seen(bearing_deg(p["box"], width, self._hfov), p["conf"], tuple(p["look"]), p["box"],
+            Seen(bearing_deg(p["box"], width, self._hfov), p["conf"], _look(p.get("look")), p["box"],
                  p.get("kp") if good else None, p.get("light"))
             for p in reply["people"]
         ]

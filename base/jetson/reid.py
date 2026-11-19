@@ -1,4 +1,15 @@
-"""Look vectors (person re-identification) on a TensorRT engine of OSNet x0_25: one 512-number unit vector per box."""
+"""Look vectors (person re-identification): one 512-number unit vector per box.
+
+The live engine is OSNet ain x1_0 (server.REID). A plan is built for one GPU. "TensorRT execute failed"
+with "engine built for a different device" means that file was not built on this Jetson (19 Nov 2026: the
+ain plan failed on every re-id, 65 times, and the detector dropped the Pi). Rebuild it here:
+
+    trtexec --onnx=<the matching .onnx> --saveEngine=models/osnet_ain_x1_0_msmt17_256x128.engine --fp16
+
+Until that file runs, ReId loads the fallback (server.REID_FALLBACK, OSNet x0_25) once and retries.
+If that also fails, looks() returns None per box. The reply then carries "look": [] and the link stays
+up. An empty look must not be enrolled: LookMemory.add of an empty vector drops the next real 512-d look.
+"""
 
 import cv2
 import numpy as np
@@ -26,15 +37,61 @@ def unit_rows(features):
 
 
 class ReId:
-    def __init__(self, engine_path):
-        from engine import Engine
+    def __init__(self, engine_path, fallback_path=None):
+        from engine import Engine, EngineError
 
-        self._engine = Engine(engine_path)
-        self._max_batch = self._engine.max_input_shape[0]
+        self._EngineError = EngineError
+        self._gave_up = False
+        if fallback_path == engine_path:
+            fallback_path = None
+        self._fallback_path = fallback_path
+        try:
+            self._engine = Engine(engine_path)
+        except EngineError as exc:
+            self._engine = self._load_fallback(exc)
+        if self._engine is not None:
+            self._max_batch = self._engine.max_input_shape[0]
+
+    def _load_fallback(self, exc):
+        """Load the fallback engine once. None when there is none, or it will not load."""
+        path = self._fallback_path
+        self._fallback_path = None
+        if not path:
+            print("re-id engine failed and there is no fallback: %s" % exc, flush=True)
+            return None
+        print("re-id engine failed (%s); trying %s" % (exc, path), flush=True)
+        from engine import Engine, EngineError
+        try:
+            return Engine(path)
+        except (EngineError, OSError, RuntimeError, ImportError) as exc2:
+            print("re-id fallback failed: %s" % exc2, flush=True)
+            return None
+
+    def _vectors(self, batch):
+        feats = [self._engine.run(batch[i:i + self._max_batch])[0] for i in range(0, len(batch), self._max_batch)]
+        return [tuple(map(float, row)) for row in unit_rows(np.concatenate(feats))]
 
     def looks(self, bgr, boxes):
         if not len(boxes):
             return []
+        if self._engine is None:
+            return [None] * len(boxes)
         batch = crops(bgr, boxes)
-        feats = [self._engine.run(batch[i:i + self._max_batch])[0] for i in range(0, len(batch), self._max_batch)]
-        return [tuple(map(float, row)) for row in unit_rows(np.concatenate(feats))]
+        try:
+            return self._vectors(batch)
+        except self._EngineError as exc:
+            self._engine = self._load_fallback(exc)
+            if self._engine is None:
+                if not self._gave_up:
+                    print("re-id off for this process: %s" % exc, flush=True)
+                    self._gave_up = True
+                return [None] * len(boxes)
+            self._max_batch = self._engine.max_input_shape[0]
+            try:
+                return self._vectors(batch)
+            except (self._EngineError, RuntimeError) as exc2:
+                self._engine = None
+                if not self._gave_up:
+                    print("re-id off for this process: %s" % exc2, flush=True)
+                    self._gave_up = True
+                return [None] * len(boxes)

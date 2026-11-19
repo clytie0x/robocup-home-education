@@ -7,7 +7,7 @@ enough to keep the robot's front clear. They run on the Jetson next to the arm s
 
 - Arm stack running in robot mode: `~/so100_ws/start_arm.sh mount:=robot rviz:=false`
 - Webcam on the forearm, served by `webcam_view.py` on port 8082 (`/snap.jpg`)
-- Xtion stream from the base Pi at `http://192.168.31.21:8081/stream`
+- Xtion stream from the base Pi at `http://10.0.0.1:8081/stream` (the LAN cable). `BAG_XTION_URL` overrides it.
 - Copy the three `.py` files into `~/so100_ws` (same folder)
 
 ## Run

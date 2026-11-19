@@ -146,6 +146,11 @@ class LinkTests(unittest.TestCase):
             return jl.latest() is not None
         self.assertTrue(wait_for(got_answer, 5.0))
 
+    def test_an_empty_look_is_not_a_vector(self):
+        self.assertIsNone(link._look(None))
+        self.assertIsNone(link._look([]))
+        self.assertEqual(link._look([0.1, 0.2]), (0.1, 0.2))
+
     def test_bearing_sign_image_right_is_robot_left(self):
         self.assertGreater(link.bearing_deg([300, 0, 320, 240], 320, 58.59), 20)
         self.assertLess(link.bearing_deg([0, 0, 20, 240], 320, 58.59), -20)
