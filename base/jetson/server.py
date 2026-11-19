@@ -33,9 +33,12 @@ MAX_HEADER = 4096
 MAX_JPEG = 10_000_000
 
 
-DETECTOR = "models/yolo11n_256x320.engine"  # the choice waits for recall on this robot's frames (Task 11 step 4)
-REID = "models/osnet_x0_25_msmt17_256x128.engine"
-POSE = "models/yolo11n-pose_256x320.engine"
+DETECTOR = "models/yolo11s_480x640.engine"
+DETECTOR_FALLBACK = "models/yolo11n_256x320.engine"
+REID = "models/osnet_ain_x1_0_msmt17_256x128.engine"
+REID_FALLBACK = "models/osnet_x0_25_msmt17_256x128.engine"
+POSE = "models/yolo11s-pose_480x640.engine"
+POSE_FALLBACK = "models/yolo11n-pose_256x320.engine"
 POSE_CONF = 0.4
 KP_IOU = 0.3  # a pose box must overlap a person box at least this much to give it keypoints
 
@@ -133,6 +136,14 @@ class Pose:
         return decode_pose(self._engine.run(x)[0], scale, bgr.shape[1], bgr.shape[0])
 
 
+def _pick_engine(path, fallback):
+    import os
+
+    if path and os.path.exists(path):
+        return path
+    return fallback if fallback and os.path.exists(fallback) else path
+
+
 def real_people(detector_path=DETECTOR, reid_path=REID, pose_path=POSE, normalise=None):
     """find_people for the server, with the engines loaded once. Without the pose engine, pose asks get no "kp".
     Every frame goes through one light.FrameGate (the Server serves one frame at a time)."""
@@ -142,8 +153,12 @@ def real_people(detector_path=DETECTOR, reid_path=REID, pose_path=POSE, normalis
     from detector import Detector
     from reid import ReId
 
-    detector, reid = Detector(detector_path), ReId(reid_path)
-    pose_engine = Pose(pose_path) if pose_path and os.path.exists(pose_path) else None
+    det_p = _pick_engine(detector_path, DETECTOR_FALLBACK)
+    reid_p = _pick_engine(reid_path, REID_FALLBACK)
+    pose_p = _pick_engine(pose_path, POSE_FALLBACK)
+    print(f"engines: det={det_p} reid={reid_p} pose={pose_p}", flush=True)
+    detector, reid = Detector(det_p), ReId(reid_p)
+    pose_engine = Pose(pose_p) if pose_p and os.path.exists(pose_p) else None
     if pose_engine is None:
         print("no pose engine at", pose_path, "- answers carry no keypoints", flush=True)
     gate, mode = light.FrameGate(), normalise or light.NORMALISE

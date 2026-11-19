@@ -7,6 +7,7 @@ import numpy as np
 MIN_HEIGHT = 0.05  # m above the floor: lower than this is floor, carpet edge or noise
 MAX_RANGE = 3.0  # m, depth is too noisy beyond this
 CELL = 0.05  # m, one point per cell
+MIN_CELL_PIXELS = 3  # drop 1-2 flying depth pixels in a cell (a 5 cm belt at 3 m is ~22 px)
 MIN_VALID_SHARE = 0.05  # below this the image is blind (sunlight), not empty
 NEEDS = ("camera_x", "camera_y", "camera_height", "camera_pitch_deg", "robot_height", "camera_hfov_deg")
 
@@ -56,5 +57,6 @@ def points(depth, p):
     if len(xy) == 0:
         return xy
     cells = np.floor(xy / CELL).astype(np.int64)
-    _, first = np.unique(cells, axis=0, return_index=True)
-    return xy[np.sort(first)]
+    _, first, counts = np.unique(cells, axis=0, return_index=True, return_counts=True)
+    kept = first[counts >= MIN_CELL_PIXELS]
+    return xy[np.sort(kept)]
