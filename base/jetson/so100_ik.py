@@ -379,3 +379,43 @@ class Kinematics:
             return True
         except Unreachable:
             return False
+
+
+def reachable_drop(kin=None, y=0.0, heights=(0.22, 0.245, 0.26)):
+    """Robot-frame {x, y} where a place clears the arm at every height in `heights`.
+
+    The old default 0.31 m is the inner edge of the band that clears 0.22–0.26 m. The model
+    rejects it once the grip drops toward the deck (z=0.18 hits the deck; z=0 is out of reach),
+    and that point was unreachable on the robot at 13:26. The returned x is the middle of the
+    band after a 2 cm inset from the deck side and a 1 cm inset from the far side.
+    """
+    kin = kin or Kinematics()
+    good = []
+    for i in range(20, 56):
+        x = i / 100.0
+        if all(_drop_reaches(kin, (x, y, z)) for z in heights):
+            good.append(round(x, 2))
+    if not good:
+        raise Unreachable("no drop at y=%.3f clears %s" % (y, heights))
+    lo, hi = good[0], good[-1]
+    inner = min(hi, round(lo + 0.02, 2))
+    outer = max(inner, round(hi - 0.01, 2))
+    span = [x for x in good if inner - 1e-9 <= x <= outer + 1e-9]
+    x = span[len(span) // 2]
+    return {
+        "x": x, "y": y, "heights": [round(z, 3) for z in heights], "x_min": lo, "x_max": hi,
+        "why": (
+            "x=%.2f m is the middle of %.2f–%.2f m, the robot-x values inverse kinematics accepts "
+            "at y=%.3f and grip heights %s m (joint limits, floor clearance, and the deck). "
+            "The old default 0.31 m sits on the inner edge of that band and was unreachable on the "
+            "robot at 13:26; the floor itself (z=0) is outside this arm's reach."
+            % (x, lo, hi, y, ", ".join("%.3f" % z for z in heights))),
+    }
+
+
+def _drop_reaches(kin, target):
+    try:
+        kin.ik_any_pitch(target)
+        return True
+    except Unreachable:
+        return False

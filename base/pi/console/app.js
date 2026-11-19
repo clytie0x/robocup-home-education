@@ -1,13 +1,13 @@
-// Robot Console page: polls /api/state once a second, the run's status 3 times a second while a task runs
-// (only while this tab is in view: that read is the run's page heartbeat), the LiDAR while it is on screen,
-// the power bank estimate and the 21V motor battery's use every 15 s, and the Data tab's charts when it is open. Plain JS, no libraries.
+// Robot Console page. /api/state once a second, and only while this tab is in view (that read is also the
+// run's page heartbeat while a task runs). LiDAR and the skeleton once a second while they are on screen.
+// Camera streams are img tags. The Robot tab is drawn by robot.js (Preact + htm, one local file).
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const TABS = ["overview", "live", "task", "data", "more", "jetson", "checks", "logs", "help"];
+const TABS = ["robot", "overview", "live", "task", "data", "more", "jetson", "checks", "logs", "help"];
 const PHONE_ONLY_TABS = ["live", "more"]; // on a desktop the overview shows the camera and the LiDAR
 const MORE_TABS = ["jetson", "checks", "logs", "help"];
-const TITLES = { overview: "HMC Robot", live: "ภาพสด", task: "งาน", data: "ข้อมูล", more: "อื่นๆ", jetson: "Jetson",
+const TITLES = { robot: "Robot", overview: "HMC Robot", live: "ภาพสด", task: "งาน", data: "ข้อมูล", more: "อื่นๆ", jetson: "Jetson",
   checks: "ตรวจระบบ", logs: "Log", help: "วิธีใช้" };
 const PROGRAM_TEXT = {
   detector: "ตัวตรวจจับคน (server.py) TCP 5601",
@@ -27,10 +27,11 @@ function dotOf(level) { return level in DOT ? DOT[level] : "idle"; }
 const DESK = window.matchMedia("(min-width: 900px)");
 
 let state = null;      // the newest /api/state
-let run = null;        // the newest /api/run while a task runs
+let run = null;        // the newest run status, from /api/state while a task runs
+let localEvents = [];  // lines this page saw itself (a dead console never reaches the server list)
 let bank = null;       // the newest /api/bank
 let arm = null;        // the newest /api/arm while the Jetson tab is open
-let tab = "overview";
+let tab = "robot";
 const MISSION_TEXT = { follow_only: "ตามคนอย่างเดียว", bag_only: "หาและหยิบถุง", full: "โจทย์จริง HMC" };
 let choice = { mode: "dry", mission: "full", speed: null, minutes: 5, virtual: false };
 
@@ -86,13 +87,21 @@ function askPin() {
 }
 
 let toastTimer = null;
+function remember(text, bad) {
+  const line = String(text);
+  if (localEvents.length && localEvents[0].text === line) return;
+  localEvents.unshift({ time: Date.now() / 1000, level: bad ? "error" : "info", text: line });
+  if (localEvents.length > 40) localEvents.pop();
+}
 function toast(text, bad) {
+  remember(text, bad);
   const el = $("toast");
   el.textContent = text;
   el.className = bad ? "bad" : "";
   el.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.hidden = true; }, bad ? 6000 : 3000);
+  if (window.HmcRobot) window.HmcRobot.update({ state, localEvents, onStop: stop, onArm: sendArm });
 }
 
 function confirmBox(title, text, yes, drive) {
@@ -147,7 +156,7 @@ function tagHTML(text, dot, bad) {
 // ------------------------------------------------------------ tabs
 
 function showTab(name) {
-  if (!TABS.includes(name)) name = "overview";
+  if (!TABS.includes(name)) name = "robot";
   if (DESK.matches && PHONE_ONLY_TABS.includes(name)) name = "overview";
   tab = name;
   for (const t of TABS) $(`tab-${t}`).hidden = t !== name;
@@ -190,11 +199,22 @@ function taskRunning(s) { const j = jobOf(s); return jobRunning(s) && j && j.kin
 function card(id) { return state && (state.cards || []).find((c) => c.id === id); }
 
 async function pollState() {
+  if (document.visibilityState !== "visible") {
+    setTimeout(pollState, 1000);
+    return;
+  }
+  const beat = taskRunning(state);
+  const headers = {};
+  if (beat && session()) headers["X-HMC-Session"] = session();
   try {
-    state = await getJSON("/api/state");
+    state = await getJSON("/api/state" + (beat ? "?heartbeat=1" : ""), headers);
+    run = state && state.run && state.run.state !== "idle" ? state.run : null;
+    if (state && state.bank) bank = state.bank;
+    if (state && state.jetson && state.jetson.arm) arm = state.jetson.arm;
     $("offline").hidden = true;
   } catch (e) {
     $("offline").hidden = false;
+    remember("console did not answer", true);
   }
   render();
   setTimeout(pollState, 1000);
@@ -209,21 +229,20 @@ async function fetchRun() {
 }
 
 async function pollRun() {
-  if (taskRunning(state) && document.visibilityState === "visible") {
-    await fetchRun();
-  } else if (!taskRunning(state)) {
-    run = null;
-  }
-  setTimeout(pollRun, 333);
+  // The run's status rides on the 1s /api/state poll. fetchRun() is only the read right after a command.
 }
 
 async function pollBank() {
-  try { bank = await getJSON("/api/bank"); } catch (e) { bank = null; }
-  renderBank();
+  if (document.visibilityState === "visible" && !(state && state.bank)) {
+    try { bank = await getJSON("/api/bank"); } catch (e) { bank = null; }
+    renderBank();
+  }
   setTimeout(pollBank, 15000);
 }
 
 function render() {
+  if (window.HmcRobot) window.HmcRobot.update({ state, localEvents, onStop: stop, onArm: sendArm });
+  refreshSnap();
   if (!state) return;
   renderJob();
   renderOverview();
@@ -281,8 +300,8 @@ function renderJob() {
   const j = jobOf(state), running = jobRunning(state);
   document.body.classList.toggle("job", running);
   const bar = $("stopbar"), desk = $("btn-stop-desk");
-  bar.hidden = !running;
-  desk.disabled = !running;
+  bar.hidden = false;
+  desk.disabled = false;
   const stopping = running && !!j.stopping;
   bar.classList.toggle("stopping", stopping);
   desk.classList.toggle("stopping", stopping);
@@ -596,6 +615,58 @@ $("img-webcam").addEventListener("error", () => {
 });
 $("img-webcam").addEventListener("load", () => { delete $("img-webcam").dataset.failed; $("img-webcam").dataset.shown = "1"; });
 
+function refreshSnap() {
+  const img = $("img-snap");
+  if (!img) return;
+  const show = tab === "robot" && document.visibilityState === "visible";
+  if (!show) {
+    if (img.getAttribute("src")) { img.removeAttribute("src"); delete img.dataset.shown; }
+    return;
+  }
+  img.src = "/usb-snap?t=" + Date.now();
+}
+
+function measuredBag() {
+  const b = state && state.bag;
+  if (b && typeof b.x === "number" && typeof b.y === "number") return b;
+  const bt = run && run.record && run.record.bag_task && run.record.bag_task.result;
+  if (bt && bt.ok && typeof bt.x === "number" && typeof bt.y === "number") {
+    return { x: bt.x, y: bt.y, top: bt.top, yaw: bt.yaw, source: "run" };
+  }
+  return null;
+}
+
+function pickBody() {
+  const b = measuredBag();
+  if (!b) return null;
+  const body = { cmd: "pick_bag", x: b.x, y: b.y };
+  if (typeof b.top === "number") body.top = b.top;
+  if (typeof b.yaw === "number") body.yaw = b.yaw;
+  return body;
+}
+
+function dropBody() {
+  const b = measuredBag();
+  if (b) return { cmd: "drop_bag", x: b.x, y: b.y };
+  const d = state && state.drop;
+  if (d && typeof d.x === "number") return { cmd: "drop_bag", x: d.x, y: d.y };
+  return null;
+}
+
+function reachableDropBody() {
+  const d = state && state.drop;
+  if (d && typeof d.x === "number") return { cmd: "drop_bag", x: d.x, y: d.y };
+  return null;
+}
+
+async function sendArm(body) {
+  const word = body.cmd === "pick_bag" ? "Pick the bag" : "Drop the bag";
+  if (!(await confirmBox(word + "?", "Send " + body.cmd + " at x=" + body.x + " y=" + body.y + ". The arm will move.", "Send", true))) return null;
+  const r = await post("/api/arm", body);
+  fetchArm();
+  return r;
+}
+
 // The skeleton: COCO keypoints from the Jetson's pose detector, drawn over the console's own camera (not during a task:
 // then run_follow has the detector).
 const SKELETON = [[5, 7], [7, 9], [6, 8], [8, 10], [5, 6], [5, 11], [6, 12], [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
@@ -639,7 +710,7 @@ setInterval(async () => {
     return;
   }
   try { drawSkeleton(await getJSON("/api/skeleton")); } catch (e) { /* the next poll tries again */ }
-}, 200);
+}, 1000);
 
 const DEVICE_WORD = { live: "สด", stale: "ไม่มีข้อมูลใหม่", off: "ไม่พบ", held: "หยุดชั่วคราว" };
 
@@ -778,7 +849,7 @@ async function pollScan() {
     drawScan($("scan"), { points: [] });
     $("scan").dataset.blank = "1";
   }
-  setTimeout(pollScan, fromRun ? 200 : 100); // a run's page shares its process with the control loop: ask less often
+  setTimeout(pollScan, 1000); // once a second, and only while the LiDAR piece is on screen
 }
 
 // ------------------------------------------------------------ Task
@@ -881,7 +952,9 @@ $("btn-move-bag-60").addEventListener("click", async () => {
   const say = (msg, bad) => { setText(st, msg); toast(msg, bad); };
   try {
     say("1/4 กำลังหยิบถุงหน้าหุ่น...");
-    const p1 = await post("/api/arm", { cmd: "pick_bag", x: 0.36, y: 0.0 });
+    const pick = pickBody();
+    if (!pick) { say("หยุด: ยังไม่มีตำแหน่งถุงที่วัดได้", true); return; }
+    const p1 = await post("/api/arm", pick);
     if (!p1 || p1.error) { say(`หยุดที่ขั้น 1/4: ${(p1 && p1.error) || "หยิบถุงไม่สำเร็จ"}`, true); return; }
 
     say("2/4 หยิบแล้ว กำลังเดินหน้า 60 ซม....");
@@ -891,7 +964,9 @@ $("btn-move-bag-60").addEventListener("click", async () => {
     if (c2 !== 0) { say(`หยุดที่ขั้น 2/4: เดินหน้าจบด้วย code ${c2}`, true); return; }
 
     say("3/4 ถึงจุดวางแล้ว กำลังวางถุง...");
-    const p3 = await post("/api/arm", { cmd: "drop_bag", x: 0.31, y: 0.0 });
+    const drop = reachableDropBody();
+    if (!drop) { say("หยุดที่ขั้น 3/4: ยังไม่มีจุดวางที่แขนเอื้อมถึง", true); return; }
+    const p3 = await post("/api/arm", drop);
     if (!p3 || p3.error) { say(`หยุดที่ขั้น 3/4: ${(p3 && p3.error) || "วางถุงไม่สำเร็จ"}`, true); return; }
 
     say("4/4 วางถุงแล้ว กำลังถอยกลับ 60 ซม....");
@@ -916,11 +991,11 @@ for (const b of document.querySelectorAll("[data-command]")) {
 for (const b of document.querySelectorAll("[data-arm-cmd]")) {
   b.addEventListener("click", async () => {
     const cmd = b.dataset.armCmd;
-    const bt = run && run.record && run.record.bag_task && run.record.bag_task.result;
     let payload;
-    if (cmd === "drop_bag") payload = { cmd, x: 0.31, y: 0.0 };
-    else if (cmd === "pick_bag") payload = (bt && bt.ok) ? { cmd } : { cmd, x: 0.36, y: 0.0 };
+    if (cmd === "drop_bag") payload = dropBody();
+    else if (cmd === "pick_bag") payload = pickBody();
     else payload = { cmd };
+    if ((cmd === "pick_bag" || cmd === "drop_bag") && !payload) { toast("no measured bag position", true); return; }
     b.disabled = true;
     toast(`กำลังสั่ง${b.textContent.trim()}...`);
     const r = await post("/api/arm", payload);
@@ -937,7 +1012,11 @@ $("btn-task-arm-stop").addEventListener("click", async () => {
 
 async function stop() {
   const r = await post("/api/stop", {});
-  if (r && !r.error) toast(r.note ? "ไม่มีงานของคอนโซลอยู่ ส่งหยุดไปที่หน้าของงานและส่ง S# ให้ล้อแล้ว" : "กำลังหยุด");
+  const a = await post("/api/arm/stop", {});
+  const j = await post("/api/jetson/stop-all", {});
+  const bad = [r, a, j].filter((x) => !x || x.error).map((x) => (x && x.error) || "console did not answer");
+  if (!bad.length) toast(r && r.note ? "ไม่มีงานของคอนโซลอยู่ ส่งหยุดไปที่หน้าของงานและส่ง S# ให้ล้อแล้ว" : "กำลังหยุด");
+  else toast(bad.join("; "), true);
 }
 $("stopbar").addEventListener("click", stop);
 $("btn-stop-desk").addEventListener("click", stop);
@@ -1017,7 +1096,6 @@ $("btn-stop-all").addEventListener("click", async () => {
 // ------------------------------------------------------------ the arm (Jetson tab)
 
 const ARM_MOVES = { home: { cmd: "home" }, rest: { cmd: "rest" }, center: { cmd: "center" },
-  "pick-front": { cmd: "pick_bag", x: 0.36, y: 0.0 }, "drop-front": { cmd: "drop_bag", x: 0.31, y: 0.0 },
   bagpick: { cmd: "bagpick", putback: false },
   "torque-on": { cmd: "torque", on: true }, "torque-off": { cmd: "torque", on: false } };
 let armSending = false; // a move this tab sent is not answered yet (center takes up to 90 s, bagpick up to 300 s)
@@ -1028,8 +1106,7 @@ async function fetchArm() {
 }
 
 async function pollArm() {
-  if ((tab === "jetson" || (tab === "task" && taskRunning(state))) && document.visibilityState === "visible") await fetchArm();
-  setTimeout(pollArm, 1500);
+  // jetson.arm arrives on the 1s /api/state poll. fetchArm() runs right after an arm button.
 }
 
 function renderArm() {
@@ -1080,7 +1157,11 @@ for (const b of document.querySelectorAll("[data-arm]")) {
       "แขนจะยื่นออกไปและก้มลงถึงพื้นหน้าหุ่นเพื่อหยิบถุง ไม่มีคน มือ หรือของอื่นอยู่หน้าหุ่นแล้วใช่ไหม", "ใช่ หยิบถุง", true))) return;
     armSending = true;
     renderArm();
-    const r = await post("/api/arm", ARM_MOVES[name]);
+    let body = ARM_MOVES[name];
+    if (name === "pick-front") body = pickBody();
+    if (name === "drop-front") body = dropBody();
+    if (!body) { armSending = false; renderArm(); toast("no measured bag position", true); return; }
+    const r = await post("/api/arm", body);
     armSending = false;
     if (r && !r.error) toast(`แขน ${b.textContent} เสร็จแล้ว`);
     fetchArm();
@@ -1158,7 +1239,7 @@ async function loadLogs() {
     </div>`;
   }).join("");
 }
-setInterval(() => { if (tab === "logs") loadLogs(); }, 10000);
+setInterval(() => { if (tab === "logs" && document.visibilityState === "visible") loadLogs(); }, 10000);
 
 // the console's command log: one line per POST, and console_gate's maintenance lines (what, reason, user)
 async function loadCommands() {
@@ -1390,9 +1471,7 @@ function unhover(el) {
 // ------------------------------------------------------------ start
 
 updateStartButton();
-showTab(location.hash.slice(1) || "overview");
+showTab(location.hash.slice(1) || "robot");
 pollState();
-pollRun();
 pollScan();
 pollBank();
-pollArm();
