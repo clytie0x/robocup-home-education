@@ -202,8 +202,10 @@ class StatusPort(FakePort):
 
 class FirmwareStatus(unittest.TestCase):
     def test_parse_status_reads_counts_pwm_and_hex_flags(self):
-        self.assertEqual(wheels.parse_status("Eleft:+0000120,right:-0000007,pwm:+076,-012,flags:03#"),
-                         {"left": 120, "right": -7, "pwm": [76, -12], "flags": 3})
+        got = wheels.parse_status("Eleft:+0000120,right:-0000007,pwm:+076,-012,flags:03#")
+        self.assertEqual(got["fault"], wheels.describe_faults(3))
+        del got["fault"]
+        self.assertEqual(got, {"left": 120, "right": -7, "pwm": [76, -12], "flags": 3})
         self.assertEqual(wheels.parse_status("Eleft:+0000000,right:+0000000,pwm:+000,+000,flags:0c#")["flags"], 12)
 
     def test_an_unparsable_status_is_an_error(self):
@@ -356,6 +358,191 @@ class CurvatureAndBgOdom(unittest.TestCase):
         clock.now = 0.40
         with self.assertRaises(ValueError):
             w.cached_odom(max_age=0.25)
+
+
+# Bytes off the wheel port on 19 Nov 2026. The Pi stopped with
+# "odometry stale (0.31 s > 0.25 s; bad odom 'Ox:')", the same shape at 0.26 s with 'O',
+# and at 0.31 s with 'Ox:+000.'. Each quote is a prefix of a real Ox: reply, cut before '#'.
+# 17 Nov stops were "wheels not turning: fault 03" and "fault 02" (E# flags).
+RECORDED_ODOM = (
+    b"Ox:+000.90,y:+000.00,th:+000.86#\r\n"
+    b"O"  # 12:04 ICT, quoted as bad odom 'O'
+    b"x:+000.91,y:+000.00,th:+000.86#\r\n"
+    b"Ox:"  # 12:03, bad odom 'Ox:'
+    b"+000.92,y:+000.01,th:+000.87#\r\n"
+    b"Ox:+000."  # 12:09, bad odom 'Ox:+000.'
+    b"93,y:+000.02,th:+000.88#\r\n"
+    b"Ox:+000."  # prefix abandoned; the next reply must not be glued onto it
+    b"Ox:+000.94,y:+000.03,th:+000.89#\r\n"
+    b"\xffgarbage#\r\n"
+    b"Eleft:+0000010,right:+0000020,pwm:+040,+080,flags:02#\r\n"
+    b"Eleft:+0000010,right:+0000020,pwm:+076,+076,flags:03#\r\n"
+)
+
+
+class BytePort:
+    """One arrived byte per O# or E#, as a short read that times out before '#'."""
+
+    timeout = 0.2
+
+    def __init__(self, data):
+        self.data, self.i = data, 0
+        self.buf = bytearray()
+        self.written = []
+
+    def write(self, data):
+        self.written.append(bytes(data))
+        if bytes(data) in (b"O#", b"E#") and self.i < len(self.data):
+            self.buf.append(self.data[self.i])
+            self.i += 1
+
+    def reset_input_buffer(self):
+        self.buf.clear()
+
+    @property
+    def in_waiting(self):
+        return len(self.buf)
+
+    def read(self, n=1):
+        if not self.buf:
+            return b""
+        n = min(n, len(self.buf))
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
+
+    def read_until(self, end):
+        if not self.buf:
+            return b""
+        i = self.buf.find(end)
+        if i < 0:
+            out = bytes(self.buf)
+            self.buf.clear()
+            return out
+        n = i + len(end)
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
+
+    def close(self):
+        pass
+
+
+class SplitReplyPort:
+    """First O# yields only 'Ox:'. The tail stays in flight until the next read, then an E# reply."""
+
+    timeout = 0.2
+
+    def __init__(self):
+        self.buf = bytearray()
+        self.held = b""
+        self.reads = 0
+        self.written = []
+        self.odom_sent = False
+
+    def write(self, data):
+        self.written.append(bytes(data))
+        if data == b"O#" and not self.odom_sent:
+            self.buf += b"Ox:"
+            self.held = b"+000.90,y:+000.00,th:+000.86#\r\n"
+            self.odom_sent = True
+        elif data == b"E#":
+            self.buf += b"Eleft:+0000120,right:-0000007,pwm:+076,+076,flags:03#\r\n"
+
+    def reset_input_buffer(self):
+        self.buf.clear()
+
+    def _before_read(self):
+        self.reads += 1
+        if self.held and self.reads > 1:
+            self.buf = bytearray(self.held) + self.buf
+            self.held = b""
+
+    @property
+    def in_waiting(self):
+        return len(self.buf)
+
+    def read(self, n=1):
+        self._before_read()
+        if not self.buf:
+            return b""
+        n = min(n, len(self.buf))
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
+
+    def read_until(self, end):
+        self._before_read()
+        if not self.buf:
+            return b""
+        i = self.buf.find(end)
+        if i < 0:
+            out = bytes(self.buf)
+            self.buf.clear()
+            return out
+        n = i + len(end)
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
+
+    def close(self):
+        pass
+
+
+class FramingAndFaults(unittest.TestCase):
+    """Partial and garbled wheel-port bytes. Staleness follows the last valid Ox: frame."""
+
+    def test_fault_02_is_the_right_wheel_and_03_is_both(self):
+        # firmware safety.h: 0x01 left encoder, 0x02 right encoder, 0x04 no drive command.
+        # 0x03 is both encoder bits. safety.c latches that when PWM stays above 30% while the
+        # wheel stands still or turns the wrong way for 300 ms, and holds both motors off until S#.
+        right = wheels.parse_status("Eleft:+0000010,right:+0000020,pwm:+040,+080,flags:02#")
+        both = wheels.parse_status("Eleft:+0000010,right:+0000020,pwm:+076,+076,flags:03#")
+        self.assertEqual(right["flags"], 0x02)
+        self.assertIn("right encoder fault", right.get("fault", ""))
+        self.assertNotIn("left and right", right.get("fault", ""))
+        self.assertEqual(both["flags"], 0x03)
+        self.assertIn("left and right", both.get("fault", ""))
+        self.assertIn("21V", both.get("fault", ""))
+
+    def test_recorded_garbled_bytes_keep_the_last_valid_frame(self):
+        port, clock = BytePort(RECORDED_ODOM), Clock()
+        w = wheels.Wheels(P, port=port, clock=clock, start_thread=False, poll_odom=True)
+        for _ in range(len(RECORDED_ODOM)):
+            w.poll_odom_once()
+        self.assertEqual(w._raw, (0.94, 0.03, 0.89))
+        self.assertIsNone(w._odom_err)  # a discarded partial or junk line is not a sticky diagnostic
+        self.assertEqual(w._odom_at, 0.0)  # the clock did not move; only a valid frame stamps it
+        status = getattr(w, "status", None) or {}
+        self.assertEqual(status.get("flags"), 0x03)
+        self.assertIn("left and right", status.get("fault", ""))
+        # one more poll sees no byte: the partial must not refresh the valid-frame time
+        w.poll_odom_once()
+        self.assertEqual(w._odom_at, 0.0)
+        self.assertIsNone(w._odom_err)
+        clock.now = 0.31  # the 12:09 stop; a valid frame this old is still inside a sane tolerance
+        self.assertEqual(w.cached_odom(), w._pose)
+        self.assertGreaterEqual(wheels.ODOM_MAX_AGE, 0.31)
+        self.assertLess(wheels.ODOM_MAX_AGE, 1.0)
+        clock.now = wheels.ODOM_MAX_AGE + 0.01
+        with self.assertRaises(ValueError) as caught:
+            w.cached_odom()
+        message = str(caught.exception)
+        self.assertIn("stale", message)
+        self.assertNotIn("Ox:", message)  # the partial is not the reason; the age is
+        self.assertIn("%.2f" % clock.now, message)  # age is now minus the last valid frame
+
+    def test_a_split_reply_is_not_flushed_by_the_status_read(self):
+        port, clock = SplitReplyPort(), Clock()
+        w = wheels.Wheels(P, port=port, clock=clock, start_thread=False, poll_odom=True)
+        self.assertIsNone(w.poll_odom_once())  # only 'Ox:' has arrived
+        self.assertIsNone(w._odom_err)
+        self.assertIsNone(w._odom_at)
+        status = w.read_status()
+        self.assertEqual(status["flags"], 0x03)
+        self.assertIn("left and right", status["fault"])
+        self.assertEqual(w._raw, (0.90, 0.00, 0.86))  # the tail was still in the buffer
+        self.assertEqual(w._odom_at, 0.0)
 
 
 if __name__ == "__main__":
