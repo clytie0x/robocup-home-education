@@ -99,6 +99,14 @@ class PickTest(unittest.TestCase):
         arm = ApiArm(results={"pick_bag": (True, "SUCCESS", "holding", {"gripper_pos": 0.123, "gripper_load": 25.0})})
         make(arm).pick(0.31, 0.0, top=0.30)
         self.assertEqual(arm.sent, ["grab_success|SUCCESS|gripper_pos=0.123 gripper_load=25.0"])
+
+    def test_an_unverified_hold_stays_a_grab_and_names_the_code(self):
+        arm = ApiArm(results={"pick_bag": (True, "SUCCESS_UNVERIFIED", "closed, camera did not confirm",
+                                           {"gripper_pos": 0.1, "gripper_load": 10.0})})
+        res = make(arm).pick(0.31, 0.0, top=0.30)
+        self.assertTrue(res.ok)
+        self.assertEqual(res.code, "SUCCESS_UNVERIFIED")
+        self.assertEqual(arm.sent, ["grab_success|SUCCESS_UNVERIFIED|gripper_pos=0.100 gripper_load=10.0"])
         arm = ApiArm(results={"pick_bag": (False, "MISSED", "closed on air 3 times",
                                            {"gripper_pos": 0.041, "gripper_load": 3.0})})
         make(arm).pick(0.31, 0.0, top=0.30)

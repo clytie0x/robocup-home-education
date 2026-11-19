@@ -23,7 +23,8 @@ is the measured -0.331 itself, so no offset of ours is added); x, y go through M
 /robot/command (JSON {"action", "params"}):
   pick_bag {"x", "y"[, "top", "yaw"]}  robot frame, metres, rad -> grab_success | grab_failed|CODE|message
                                  (with their grasp reading: grab_success|SUCCESS|gripper_pos=R gripper_load=L,
-                                 grab_failed|CODE|message [gripper_pos=R gripper_load=L])
+                                 or grab_success|SUCCESS_UNVERIFIED|... when the gripper closed but the camera
+                                 did not confirm; grab_failed|CODE|message [gripper_pos=R gripper_load=L])
   drop_bag {"x", "y"}            floor point, robot frame -> drop_done | drop_failed|CODE|message
   stop                           while a job runs: /arm/stop (the arm holds where it is)
 Events go out on /robot/event, the names hmc_flow.py reads.
@@ -189,6 +190,7 @@ class BagArm:
         res = self.t.arm_task(name, timeout, **goal)
         ok, code, msg = res[:3]
         self.reading = res[3] if len(res) > 3 else {}     # their grasp reading (pick_bag), if they send one
+        self._arm_code = code or ("SUCCESS" if ok else "FAILED")
         if not ok:
             raise Failure(code or "FAILED", "/arm/%s: %s" % (name, msg))
         return msg
@@ -293,8 +295,12 @@ class BagArm:
                                                 " [%s]" % note if note else ""))
             return self._record(phases, Result(False, exc.code, exc.message), chosen)
         note = self._reading()
-        self.event("grab_success|SUCCESS|%s" % note if note else "grab_success")
-        return self._record(phases, Result(True, "SUCCESS", msg), chosen)
+        code = getattr(self, "_arm_code", "SUCCESS") or "SUCCESS"
+        if code == "SUCCESS":
+            self.event("grab_success|SUCCESS|%s" % note if note else "grab_success")
+        else:
+            self.event("grab_success|%s|%s" % (code, note) if note else "grab_success|%s" % code)
+        return self._record(phases, Result(True, code, msg), chosen)
 
     def place(self, x, y):
         """Put the held bag down at robot floor point (x, y). Sends drop_done or drop_failed|CODE|message."""

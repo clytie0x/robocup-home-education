@@ -111,7 +111,7 @@ class Geometry(unittest.TestCase):
     def test_the_target_is_inside_the_arms_reach(self):
         ahead = bag.TARGET_X - 0.012  # bag centre ahead of the arm's pan axis at robot (0.012, 0.0145)
         wall = ahead - bag.BAG_HALF_DEPTH  # front wall grasped by the fixed-camera bag pick
-        self.assertTrue(0.24 <= wall - bag.X_TOL and wall + bag.X_TOL <= 0.34)
+        self.assertTrue(0.24 <= wall - bag.X_TOL and wall + bag.X_TOL <= 0.32)
         self.assertGreater(bag.TARGET_X - bag.BAG_HALF_DEPTH, safety.FRONT)  # the bag's side stays off the body
 
 

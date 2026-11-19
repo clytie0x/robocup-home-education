@@ -61,7 +61,7 @@ from so100_interfaces.action import Home, Pick, PickBag, Place, Rest
 from so100_interfaces.action import PickPlace as PickPlaceAction
 from so100_interfaces.msg import ArmState
 
-from .bag_camera import GAP_MID, CameraBag
+from .bag_camera import GAP_MID, HELD_CODES, CameraBag, cool_reason, pick_result, wait_until_cool
 from .calib import Calibration
 from .ik import ARM, GRASP_Y, TIP_Y, Box, GraspPlanner, Kinematics, PlanError, bag_shifts, deck_box
 from . import motion_profile, pick_log
@@ -100,6 +100,7 @@ MESSAGES = {
     "STOPPED": "Stopped.",
     "REPLACED": "Another program moved my arm, so I stopped.",
     "FAILED": "Something went wrong.",
+    "SUCCESS_UNVERIFIED": "Gripper closed, but the camera did not confirm the bag is held.",
 }
 SUCCESS = {"pick": "I have picked it up.", "place": "I have put it down.", "pick_place": "Done, I moved it.",
            "home": "I am at the ready pose.", "rest": "I am resting.", "touch": "Done.",
@@ -731,6 +732,8 @@ class PickPlace(Node):
                     self.moved = False       # set by the first motion command; refusals keep the scene as is
                     self.grasped, self.grip_reading = None, (math.nan, math.nan)
                     self.phase_log = pick_log.PhaseLog()
+                    self.cool_note = None
+                    self.planned_motion = None
                     break
                 if self.task != "rest" or name == "rest" or time.monotonic() > end:
                     return "BUSY", MESSAGES["BUSY"], "กำลังทำงานอื่นอยู่"
@@ -748,7 +751,7 @@ class PickPlace(Node):
             if name not in ("rest", "home") and self.at_rest():
                 self.leave_rest()
             done = fn()
-            code, detail = "SUCCESS", done or "เสร็จ"
+            code, detail = pick_result(done)
             self.say(f"✔ {detail}")
         except (Failed, PlanError) as exc:
             code, detail = getattr(exc, "code", "FAILED"), str(exc)
@@ -776,7 +779,7 @@ class PickPlace(Node):
                 self.idle_since = time.monotonic()
         if code == "STOPPED" and not given_way:
             self.hold_still = "ถูกสั่งหยุด"      # someone stopped it on purpose: stay put until the next command
-        msg = MESSAGES.get(code, MESSAGES["FAILED"]) if code != "SUCCESS" else SUCCESS[name]
+        msg = SUCCESS[name] if code == "SUCCESS" else MESSAGES.get(code, MESSAGES["FAILED"])
         if not (auto or given_way):
             self.last = (code, msg)
         return code, msg, detail
@@ -839,7 +842,11 @@ class PickPlace(Node):
             directory = os.path.expanduser(str(self.get_parameter("pick_log_dir").value))
         except Exception:  # noqa: BLE001
             return
-        body = log.finish(task=name, ok=code == "SUCCESS", code=code, profile=profile, speeds=speeds)
+        body = log.finish(task=name, ok=code in HELD_CODES, code=code, profile=profile, speeds=speeds)
+        if getattr(self, "cool_note", None):
+            body["thermal_wait"] = self.cool_note
+        if getattr(self, "planned_motion", None):
+            body["motion"] = self.planned_motion
         try:
             path = pick_log.write_pick(directory, body, time.strftime("%Y%m%d-%H%M%S"), name)
             self.get_logger().info("pick log %s" % path)
@@ -948,6 +955,7 @@ class PickPlace(Node):
     def do_pick(self, obj, mode="auto"):
         if self.holding:
             raise Failed("ถือของอยู่แล้ว: สั่งวางก่อน", "HOLDING")
+        self.wait_motors_cool()
         plan = self.planner.plan_pick(obj, self.joints or None, mode)
         self.show_object(obj)
         self.pick(plan, n=6)
@@ -993,6 +1001,7 @@ class PickPlace(Node):
         unless gripper_camera.json is calibrated, in which case bag_default_top is used."""
         if self.holding:
             raise Failed("ถือของอยู่แล้ว: สั่งวางก่อน", "HOLDING")
+        self.wait_motors_cool()
         if self.get_parameter("bag_method").value == "camera":
             return self.cam.pick(obj)
         probed = False
@@ -1170,6 +1179,7 @@ class PickPlace(Node):
     def do_pick_place(self, obj, target, mode="auto"):
         if self.holding:
             raise Failed("ถือของอยู่แล้ว: สั่งวางก่อน", "HOLDING")
+        self.wait_motors_cool()
         plan = self.planner.plan(obj, target, self.joints or None, mode)
         self.show_object(obj)
         self.boxes[TGT] = copy_box(target)
@@ -1377,7 +1387,7 @@ class PickPlace(Node):
 
     def finish(self, handle, result, res, grip=(math.nan, math.nan)):
         code, msg, detail = res
-        result.success = code == "SUCCESS"
+        result.success = code in HELD_CODES
         result.error_code, result.message = code, msg
         if hasattr(result, "gripper_pos"):     # PickBag: (gripper rad, load %) of the last grasp
             result.gripper_pos, result.gripper_load = grip
@@ -1467,6 +1477,36 @@ class PickPlace(Node):
     def driver_field(self, key):
         text = self.driver_status
         return text.split(key + "=", 1)[1].split(" ", 1)[0] if key + "=" in text else ""
+
+    def arm_temp_c(self):
+        """Hottest motor from so100/status, or None when the driver has not reported one."""
+        text = self.driver_field("temp_max")
+        if not text:
+            return None
+        try:
+            return float(text.rstrip("C"))
+        except ValueError:
+            return None
+
+    def wait_motors_cool(self):
+        """Wait until the hottest motor is below 55 C. The driver refuses a move at 60 C.
+
+        The wait is said and stored on the pick JSON as thermal_wait. A cool arm, or no status yet, does not wait.
+        """
+        temp = self.arm_temp_c()
+        reason = cool_reason(temp)
+        self.cool_note = None
+        if not reason:
+            return
+        self.say(reason)
+        self.get_logger().info(reason)
+        log = getattr(self, "phase_log", None)
+        if log is not None:
+            log.mark("cool")
+        waited, reason, end_temp = wait_until_cool(self.arm_temp_c, time.sleep, time.monotonic)
+        self.cool_note = {"reason": reason, "wait_s": round(waited, 3),
+                          "temp_start_c": temp, "temp_end_c": end_temp}
+        self.get_logger().info("motors cooled to %.0f C after %.1f s" % (end_temp, waited))
 
     def driver_flags(self):
         """(torque_on, fault text) from the driver's so100/status line."""
