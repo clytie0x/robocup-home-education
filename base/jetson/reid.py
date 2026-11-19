@@ -212,7 +212,7 @@ class ReId:
     def _recover(self, exc):
         """Static batch-1 rebuild, then an existing x1_0, then the x0_25 fallback, then a histogram."""
         self.why = str(exc)
-        from engine import myelin_dynamic_batch, rebuild_static, trtexec_path
+        from engine import engine_present, myelin_dynamic_batch, rebuild_static, trtexec_path
         text = str(exc)
         onnx = os.path.splitext(self.path)[0] + ".onnx"
         has_trtexec = bool(self._trtexec) if self._trtexec is not None else bool(trtexec_path())
@@ -232,7 +232,7 @@ class ReId:
                 except Exception as exc2:  # noqa: BLE001
                     self.why = "%s; static engine did not load (%s)" % (exc, exc2)
         x1 = os.path.join(os.path.dirname(self.path) or ".", X1_NAME)
-        if os.path.exists(x1) and os.path.abspath(x1) != os.path.abspath(self.path):
+        if engine_present(x1) and os.path.abspath(x1) != os.path.abspath(self.path):
             from engine import Engine, EngineError
             try:
                 self._engine = Engine(x1)

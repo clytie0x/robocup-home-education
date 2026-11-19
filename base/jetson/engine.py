@@ -9,6 +9,8 @@ Rebuild on this Jetson, for example:
 """
 
 import ctypes
+import os
+import tempfile
 
 import numpy as np
 
@@ -77,10 +79,38 @@ def choose_backend(mismatch, failed, onnx_exists, trtexec):
     return "histogram"
 
 
-def rebuild_static(onnx_path, engine_path, run=None, input_name="input", free_bytes=None):
-    """Rebuild `engine_path` with a static batch of 1. True when the build command succeeds.
+def engine_present(path):
+    """True when `path` is a non-empty file. A 0-byte plan is an interrupted trtexec, so it is missing."""
+    try:
+        return bool(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
 
-    `run`, when given, is called with the argv and returns 0 on success. Tests never start trtexec.
+
+def _plan_loads(path):
+    """The temp plan is usable: non-empty, and a TensorRT engine when this process can deserialize one."""
+    if not engine_present(path):
+        return False
+    try:
+        import tensorrt as trt
+    except ImportError:
+        return True
+    try:
+        logger = _trt_logger(trt)
+        with open(path, "rb") as handle:
+            built = trt.Runtime(logger).deserialize_cuda_engine(handle.read())
+        return built is not None
+    except Exception:  # noqa: BLE001 — a bad plan must not replace the live engine
+        return False
+
+
+def rebuild_static(onnx_path, engine_path, run=None, input_name="input", free_bytes=None):
+    """Rebuild `engine_path` with a static batch of 1.
+
+    trtexec writes a temp file in the same directory. The live plan is replaced only after that file
+    is non-empty and deserializes. A failed or interrupted build deletes the temp file and leaves
+    the live plan untouched. `run`, when given, is called with the argv and returns 0 on success.
+    Tests never start trtexec.
     """
     exe = trtexec_path()
     if run is None and not exe:
@@ -93,13 +123,32 @@ def rebuild_static(onnx_path, engine_path, run=None, input_name="input", free_by
     if run is None and free_bytes is not None and free_bytes < REBUILD_FREE_BYTES:
         print("reid: skip static rebuild, %.1f GiB free" % (free_bytes / 2**30), flush=True)
         return False
-    cmd = [exe or "trtexec", "--onnx=%s" % onnx_path, "--saveEngine=%s" % engine_path, "--fp16"]
-    cmd += static_batch_flags(input_name)
-    if run is not None:
-        return run(cmd) == 0
-    import subprocess
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return result.returncode == 0
+    folder = os.path.dirname(os.path.abspath(engine_path)) or "."
+    fd, temp_path = tempfile.mkstemp(
+        prefix=".%s." % os.path.basename(engine_path), suffix=".part", dir=folder)
+    os.close(fd)
+    try:
+        cmd = [exe or "trtexec", "--onnx=%s" % onnx_path, "--saveEngine=%s" % temp_path, "--fp16"]
+        cmd += static_batch_flags(input_name)
+        try:
+            if run is not None:
+                code = run(cmd)
+            else:
+                import subprocess
+                code = subprocess.run(cmd, capture_output=True, text=True).returncode
+        except Exception:  # noqa: BLE001 — trtexec did not finish; keep the engine we already have
+            return False
+        if code != 0 or not _plan_loads(temp_path):
+            return False
+        os.replace(temp_path, engine_path)
+        temp_path = None
+        return True
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 def _cudart():
@@ -165,6 +214,8 @@ def gpu_free_bytes():
 
 class Engine:
     def __init__(self, path):
+        if not engine_present(path):
+            raise EngineError("could not load engine %s. The file is missing or empty." % path)
         import tensorrt as trt  # only on the Jetson, so the tests can import the callers anywhere
 
         cuda = _cudart()

@@ -2,6 +2,7 @@
 
 import os
 import sys
+import tempfile
 import unittest
 
 import numpy as np
@@ -127,16 +128,30 @@ class EnginePlanTests(unittest.TestCase):
 
     def test_static_rebuild_pins_the_batch_at_one(self):
         seen = []
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        live = os.path.join(folder.name, "a.engine")
 
         def run(cmd):
             seen.append(cmd)
+            dest = next(part.split("=", 1)[1] for part in cmd if str(part).startswith("--saveEngine="))
+            with open(dest, "wb") as handle:
+                handle.write(b"plan")
             return 0
 
-        self.assertTrue(engine.rebuild_static("a.onnx", "a.engine", run=run, free_bytes=0))
+        # The shape flags are what this test pins. Deserialization needs a real plan and TensorRT.
+        original = engine._plan_loads
+        engine._plan_loads = engine.engine_present
+        try:
+            self.assertTrue(engine.rebuild_static(os.path.join(folder.name, "a.onnx"), live,
+                                                   run=run, free_bytes=0))
+        finally:
+            engine._plan_loads = original
         self.assertIn("--minShapes=input:1x3x256x128", seen[0])
         self.assertIn("--optShapes=input:1x3x256x128", seen[0])
         self.assertIn("--maxShapes=input:1x3x256x128", seen[0])
         self.assertIn("--fp16", seen[0])
+        self.assertTrue(engine.engine_present(live))
 
     def test_crops_run_one_at_a_time_and_a_myelin_crash_does_not_raise(self):
         class Counter:
