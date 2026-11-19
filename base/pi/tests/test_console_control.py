@@ -211,24 +211,15 @@ class ControlTest(unittest.TestCase):
         self.assertIn("no reached bag", body["error"])
         self.assertEqual(len(self.agent.posts), 2)
 
-    def test_a_pick_takes_the_runs_reached_bag_and_waits_while_its_bag_task_drives(self):
-        self.console.fetch = run = FakeRun()
+    def test_arm_and_bag_buttons_are_refused_while_a_task_runs(self):
+        self.console.fetch = FakeRun()
         self.jobs.running = {"kind": "task", "label": "Drive task"}
-        reached = {"ok": True, "code": "OK", "x": 0.305, "y": 0.012, "odometry_m": 0.02, "top": 0.26, "top_by": "depth"}
-        run.record = {"phase": "bag", "bag_task": {"state": "creep", "result": None}}
-        for cmd in ({"cmd": "pick_bag"}, {"cmd": "drop_bag", "x": 0.3, "y": 0.0}):
+        for cmd in ({"cmd": "pick_bag"}, {"cmd": "drop_bag", "x": 0.3, "y": 0.0},
+                    {"cmd": "pick_bag", "x": 0.3, "y": 0.0}, {"cmd": "home"}, {"cmd": "bagpick"}):
             code, body = self.request("/api/arm", cmd)
-            self.assertEqual(code, 409)
-            self.assertIn("moving the base", body["error"])
-        run.record = {"phase": "follow", "bag_task": {"state": "reached", "result": reached}}
-        self.assertEqual(self.request("/api/arm", {"cmd": "pick_bag"})[0], 200)
-        self.assertEqual(self.agent.posts, [{"cmd": "pick_bag", "x": 0.305, "y": 0.012, "top": 0.26}])
-        run.record = {"phase": "idle", "bag_task": {"state": "failed", "result": {"ok": False, "code": "NO_BAG"}}}
-        self.assertEqual(self.request("/api/arm", {"cmd": "pick_bag"})[0], 409)
-        self.assertEqual(self.request("/api/arm", {"cmd": "home"})[0], 409)  # the other moves wait for the task's end
-        run.down = True
-        self.assertEqual(self.request("/api/arm", {"cmd": "pick_bag", "x": 0.3, "y": 0.0})[0], 503)
-        self.assertEqual(len(self.agent.posts), 1)
+            self.assertEqual(code, 409, cmd)
+            self.assertIn("task", body["error"])
+        self.assertEqual(self.agent.posts, [])
 
     def test_bagpick_waits_for_the_whole_run_with_the_pick_rules(self):
         code, body = self.request("/api/arm", {"cmd": "bagpick"})
@@ -239,21 +230,17 @@ class ControlTest(unittest.TestCase):
         self.assertEqual(self.agent.posts[1], {"cmd": "bagpick", "putback": True})
         self.assertEqual(self.agent.timeouts, [console.ARM_BAGPICK_TIMEOUT] * 2)
         self.assertGreaterEqual(console.ARM_BAGPICK_TIMEOUT, 330.0)  # the agent's ARM_BAGPICK_TIMEOUT
-        self.console.fetch = run = FakeRun()
+        self.console.fetch = FakeRun()
         self.jobs.running = {"kind": "task", "label": "Drive task"}
-        run.record = {"phase": "bag", "bag_task": {"state": "creep", "result": None}}
         code, body = self.request("/api/arm", {"cmd": "bagpick"})
         self.assertEqual(code, 409)
-        self.assertIn("moving the base", body["error"])
-        run.record = {"phase": "follow", "bag_task": {"state": "reached", "result": None}}
-        self.assertEqual(self.request("/api/arm", {"cmd": "bagpick"})[0], 200)  # a task runs: allowed
-        run.down = True
-        self.assertEqual(self.request("/api/arm", {"cmd": "bagpick"})[0], 503)
-        self.assertEqual(len(self.agent.posts), 3)
+        self.assertIn("task", body["error"])
+        self.assertEqual(self.request("/api/arm", {"cmd": "bagpick"})[0], 409)
+        self.assertEqual(len(self.agent.posts), 2)
         self.jobs.running = None
         self.console.hold = {"who": "deploy", "since": 0.0}
         self.assertEqual(self.request("/api/arm", {"cmd": "bagpick"})[0], 409)
-        self.assertEqual(len(self.agent.posts), 3)
+        self.assertEqual(len(self.agent.posts), 2)
 
     def test_stop_stops_the_arm_too_and_the_base_without_the_agent(self):
         code, body = self.request("/api/stop", {}, pin=None, page=False)

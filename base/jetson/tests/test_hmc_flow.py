@@ -955,5 +955,25 @@ class RosTests(unittest.TestCase):
             rclpy.shutdown()
 
 
+class ParkTests(unittest.TestCase):
+    def test_a_parked_flow_does_not_command_until_released(self):
+        flow = HmcFlow()
+        flow.start(0.0)
+        self.assertEqual(flow.on_event("console_owns_run", 1.0),
+                         [("log", "(parked: the console executive owns this run)")])
+        self.assertTrue(flow.parked)
+        quiet = [("log", "(parked: the console executive owns this run)")]
+        self.assertEqual(flow.on_heard("follow me", 2.0), quiet)
+        self.assertEqual(flow.on_intent({"action": "follow_me"}, 2.0), quiet)
+        self.assertEqual(flow.on_event("see_person", 2.5), [("log", "(parked)")])
+        self.assertEqual(flow.on_tick(3.0), [])
+        self.assertEqual(flow.on_status({"link": True, "locked": True, "search": True}, 3.0), [])
+        self.assertEqual(flow.state, READY)
+        flow.on_event("console_released", 4.0)
+        self.assertFalse(flow.parked)
+        heard = flow.on_heard("follow me", 5.0)
+        self.assertTrue(any(kind == "cmd" for kind, _value in heard))
+
+
 if __name__ == "__main__":
     unittest.main()

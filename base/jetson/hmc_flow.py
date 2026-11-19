@@ -10,6 +10,9 @@ The flow matches the task's own words in /speech/heard first ("follow me", "stop
 "go back", "done", ...). Only sentences it does not handle in the current state go on to the brain
 on /speech/text, so one sentence never triggers twice. Intents from the brain are used as well.
 
+A full run is owned by the Pi console executive (hmc.flow). While that run is active this node
+stays quiet: a console_owns_run event parks it, and console_released lets it command again.
+
 Start: the flow enters ready once tts_node says so on /tts/ready (latched, so the first line is heard), or after
 START_WAIT s without it (warning logged; lines are still published), and once one /base/status was read
 (at most STATUS_WAIT s: link and person as the Pi has them, so a restarted flow does not take the person
@@ -187,6 +190,7 @@ class HmcFlow:
         self.paused = False  # returning: halted by "stop"
         self.paused_at = None
         self.pause_asked = False  # returning: "Say continue ..." said for this pause
+        self.parked = False  # the console executive owns the run: this flow must not command
 
     # ---------------- helpers ----------------
     @staticmethod
@@ -256,6 +260,8 @@ class HmcFlow:
 
     def on_heard(self, text, now):
         """Raw speech. Handled here if it is a task word for this state, else forwarded to the brain."""
+        if self.parked:
+            return [("log", "(parked: the console executive owns this run)")]
         first = self._start_first(now)
         self.last_prompt = max(self.last_prompt, now)  # someone is talking: don't nag
         kind = classify(text)
@@ -267,6 +273,8 @@ class HmcFlow:
         return first + (out if out is not None else [("text", text)])
 
     def on_intent(self, intent, now):
+        if self.parked:
+            return [("log", "(parked: the console executive owns this run)")]
         first = self._start_first(now)
         kind = INTENT_KINDS.get(intent.get("action", "none"))
         out = self._handle(kind, now) if kind else None
@@ -325,6 +333,15 @@ class HmcFlow:
         return None
 
     def on_event(self, ev, now):
+        name = ev.strip().split("|", 1)[0].strip().lower()
+        if name == "console_owns_run":
+            self.parked = True
+            return [("log", "(parked: the console executive owns this run)")]
+        if name == "console_released":
+            self.parked = False
+            return [("log", "(console released this run)")]
+        if self.parked:
+            return [("log", "(parked)")]
         if self.state is None:  # base_bridge connects before tts_node: note it (link_ok, ...), don't start
             self._event(ev, now)
             return [("log", "(event '%s' before start: noted)" % ev.strip())]
@@ -427,6 +444,8 @@ class HmcFlow:
         """One /base/status from base_bridge (also before start). The first one sets link_ok and person_visible:
         the bridge sends base_link_ok and see_person only on a change, so a restarted flow would never hear
         them. While following, a Pi search that ended without a lock asks the operator back."""
+        if self.parked:
+            return []
         out = []
         if not self.status_seen:
             self.status_seen = True
@@ -446,6 +465,8 @@ class HmcFlow:
         return out
 
     def on_tick(self, now):
+        if self.parked:
+            return []
         s = self.state
         if self.link_lost_at is not None and s in NEEDS_BASE:
             if now - self.link_lost_at >= LINK_GRACE_S:

@@ -158,20 +158,19 @@ class Pose:
 
 
 def _pick_engine(path, fallback):
-    import os
+    from engine import engine_present
 
-    if path and os.path.exists(path):
+    if engine_present(path):
         return path
-    return fallback if fallback and os.path.exists(fallback) else path
+    return fallback if engine_present(fallback) else path
 
 
 def real_people(detector_path=DETECTOR, reid_path=REID, pose_path=POSE, normalise=None):
     """find_people for the server, with the engines loaded once. Without the pose engine, pose asks get no "kp".
     Every frame goes through one light.FrameGate (the Server serves one frame at a time)."""
-    import os
-
     import light
     from detector import Detector
+    from engine import engine_present
     from reid import ReId
 
     det_p = _pick_engine(detector_path, DETECTOR_FALLBACK)
@@ -180,7 +179,7 @@ def real_people(detector_path=DETECTOR, reid_path=REID, pose_path=POSE, normalis
     print(f"engines: det={det_p} reid={reid_p} pose={pose_p}", flush=True)
     reid_fallback = REID_FALLBACK if reid_p != REID_FALLBACK else None
     detector, reid = Detector(det_p), ReId(reid_p, reid_fallback)
-    pose_engine = Pose(pose_p) if pose_p and os.path.exists(pose_p) else None
+    pose_engine = Pose(pose_p) if engine_present(pose_p) else None
     if pose_engine is None:
         print("no pose engine at", pose_path, "- answers carry no keypoints", flush=True)
     gate, mode = light.FrameGate(), normalise or light.NORMALISE
