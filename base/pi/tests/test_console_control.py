@@ -211,6 +211,26 @@ class ControlTest(unittest.TestCase):
         self.assertIn("no reached bag", body["error"])
         self.assertEqual(len(self.agent.posts), 2)
 
+    def test_the_console_default_bag_point_is_not_a_measurement(self):
+        code, body = self.request("/api/arm", {"cmd": "pick_bag", "x": 0.36, "y": 0.0})
+        self.assertEqual(code, 409)
+        self.assertEqual(body["reason"], "DEFAULT_NOT_MEASURED")
+        self.assertIn("0.36", body["error"])
+        code, body = self.request("/api/arm", {"cmd": "pick_bag", "x": 0.36, "y": 0.00, "measured": True})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["sent"], {"cmd": "pick_bag", "x": 0.36, "y": 0.0})
+        self.assertEqual(self.request("/api/arm", {"cmd": "drop_bag", "x": 0.36, "y": 0.0})[0], 200)
+        self.assertEqual(len(self.agent.posts), 2)
+
+    def test_a_reached_bag_at_the_default_point_is_still_a_measurement(self):
+        self.jobs.running = {"kind": "task", "label": "Drive task"}
+        run = FakeRun()
+        run.record = {"phase": "wait", "bag_task": {"result": {"ok": True, "x": 0.36, "y": 0.0}}}
+        self.console.fetch = run
+        code, body = self.console.bag_job("pick_bag", {}, task=True)
+        self.assertEqual(code, 200)
+        self.assertEqual(body["sent"], {"cmd": "pick_bag", "x": 0.36, "y": 0.0})
+
     def test_arm_and_bag_buttons_are_refused_while_a_task_runs(self):
         self.console.fetch = FakeRun()
         self.jobs.running = {"kind": "task", "label": "Drive task"}

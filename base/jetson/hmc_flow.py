@@ -25,7 +25,9 @@ and "okay"/"ok" only in a sentence of at most SHORT (3) words ("wait here", "ple
 ("don't", "never", ...) cancels only a word after it in the same clause, so "I don't know, stop" is stop.
 
 States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, the arm picks it):
-  ready      entry: say how to start. "follow me" -> following
+  ready      entry: say how to start. "follow me" -> following, but only when the base link is known up.
+             Unknown or down: say to start the Pi base program (LINK_ASKS times), then stay quiet.
+             No follow_me and no find_bag until base_link_ok.
   following  sent follow_me (Pi follow). Lost: say "Please come back." once, when /base/status "search"
              (base_bridge) ended without a lock, or after come_back_s (20 s) lost (each ask risks -150).
              "stop" / "wait" / "this is the car" / "we are here" (or "go back") -> wait (Pi wait),
@@ -35,7 +37,9 @@ States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, t
              bag_reached x,y -> picking (no arm: say what it would do, then returning).
              bag_failed with NOT_POINTED, NO_BAG, BLOCKED, TIMEOUT or LOST_BAG -> say a short reason and
              "Please point at the bag again." and send find_bag again (MAX_BAG_TRIES in a row, then at_car);
-             NOT_POINTED first says "Please step back two steps and point at the bag." (the camera sees
+             NOT_POINTED, when a short "left" or "right" was already heard, uses that side once
+             ("No pointing was seen in 20 s. I will use the left you said.") before the step-back retry;
+             otherwise NOT_POINTED first says "Please step back two steps and point at the bag." (the camera sees
              the shoulder only from about 2.2 m);
              any other bag_failed (REFUSED, NO_LINK, CANCELLED) or no answer in bag_timeout -> at_car.
              "stop" -> wait (cancels the Pi's bag task) -> at_car. "follow me" -> following (Pi resume).
@@ -101,6 +105,8 @@ STATUS_WAIT = 1.0  # s to wait at start for one /base/status (link and person as
 # s a lost Pi link may last before the flow gives up (error): base_bridge reconnects and restores the
 # Pi's intent itself, so a short drop needs nothing from the flow
 LINK_GRACE_S = 4.0
+LINK_ASKS = 2  # spoken refusals while the base link is unknown or down; then the reason sticks
+BASE_LINK_SAY = "The base program is not running. Start the Pi base program."
 RESUME_AFTER_S = 20.0  # s into a "stop"/"wait" pause on the way back, the robot asks to be told to go on
 COME_BACK_TEXT = "Please come back."
 STEP_BACK_TEXT = "Please step back two steps and point at the bag."  # the camera sees the shoulder from about 2.2 m
@@ -149,6 +155,21 @@ def classify(text):
     return None
 
 
+_SIDE = re.compile(r"\b(left|right)\b")
+
+
+def spoken_side(text):
+    """left or right in a short sentence, or None. A long remark does not choose a side."""
+    low = (text or "").lower().strip()
+    if len(re.findall(r"[a-z']+", low)) > SHORT:
+        return None
+    found = None
+    for match in _SIDE.finditer(low):
+        if not _negated(low, match.start()):
+            found = match.group(1)
+    return found
+
+
 def should_start(tts_ready, waited_s, wait_s=START_WAIT, status_seen=True, status_wait_s=STATUS_WAIT):
     """The node starts the flow once tts_node published /tts/ready (or after wait_s without it) and a
     /base/status was read (or after status_wait_s without one). Not the subscriber count of /tts/say: stt_node
@@ -179,7 +200,12 @@ class HmcFlow:
         self.state = None
         self.deadline = None  # arm timeout of the current state
         self.carrying = False
-        self.link_ok = None  # None until base_bridge says anything
+        self.link_ok = None  # None until base_bridge says anything; None is not ready
+        self.link_tries = 0
+        self.link_stuck = False
+        self.reason_code = None
+        self.side = None  # a short "left" or "right" heard during the run
+        self.side_fallback_used = False
         self.person_visible = False
         self.lost_since = None  # following: when the operator was lost (None = seen)
         self.come_back_said = False
@@ -213,7 +239,10 @@ class HmcFlow:
         elif state == POINTING:
             self.deadline = now + self.bag_timeout
             out.append(("say", msg or self.point_text))
-            out.append(self._cmd("find_bag", again=True) if again else self._cmd("find_bag"))
+            if self.link_ok is True:
+                out.append(self._cmd("find_bag", again=True) if again else self._cmd("find_bag"))
+            else:
+                out.append(("log", "(find_bag withheld: BASE_LINK_DOWN)"))
         elif state == PICKING:
             self.deadline = now + self.grab_timeout
             more = {k: v for k, v in (("top", self.bag_top), ("yaw", self.bag_yaw)) if v is not None}
@@ -231,9 +260,28 @@ class HmcFlow:
                     ("say", (msg or "Sorry, something went wrong.") + " Say follow me to start again.")]
         return out
 
+    def _blocked_link(self):
+        """None when the base link is known up. Otherwise no follow_me and no find_bag.
+
+        An unknown link counts as down. Two refusals are spoken; after that the reason sticks
+        and further tries are logged only, until base_link_ok.
+        """
+        if self.link_ok is True:
+            self.link_tries = 0
+            self.link_stuck = False
+            return None
+        self.reason_code = "BASE_LINK_DOWN"
+        if self.link_stuck:
+            return [("log", "(BASE_LINK_DOWN)")]
+        self.link_tries += 1
+        if self.link_tries >= LINK_ASKS:
+            self.link_stuck = True
+        return [("say", BASE_LINK_SAY)]
+
     def _start_following(self, now):
-        if self.link_ok is False:
-            return [("say", "I cannot reach my wheels. Please check the base.")]
+        blocked = self._blocked_link()
+        if blocked is not None:
+            return blocked
         return [self._cmd("follow_me")] + self._goto(FOLLOWING, now)
 
     def _after_pick(self, now):
@@ -242,7 +290,11 @@ class HmcFlow:
 
     def _point(self, now, msg=""):
         """pointing afresh: from following or at_car (not a retry)."""
+        blocked = self._blocked_link()
+        if blocked is not None:
+            return blocked
         self.bag_tries, self.remeasured = 0, False
+        self.side_fallback_used = False
         return self._goto(POINTING, now, msg)
 
     def _at_start(self, now):
@@ -264,6 +316,9 @@ class HmcFlow:
             return [("log", "(parked: the console executive owns this run)")]
         first = self._start_first(now)
         self.last_prompt = max(self.last_prompt, now)  # someone is talking: don't nag
+        side = spoken_side(text)
+        if side:
+            self.side = side
         kind = classify(text)
         if kind is None and self.state == RETURNING:
             low = text.lower()
@@ -373,6 +428,10 @@ class HmcFlow:
         if name == "base_link_ok":
             self.link_ok = True
             self.link_lost_at = None
+            self.link_tries = 0
+            self.link_stuck = False
+            if self.reason_code == "BASE_LINK_DOWN":
+                self.reason_code = None
             return []
         if name == "base_link_lost":
             self.link_ok = False
@@ -434,6 +493,12 @@ class HmcFlow:
             if self.use_arm:
                 return self._goto(PICKING, now)
             return [("say", "I would pick up the bag now.")] + self._after_pick(now)
+        if code == "NO_LINK":
+            self.link_ok = False
+        if code == "NOT_POINTED" and self.side and not self.side_fallback_used and self.link_ok is True:
+            self.side_fallback_used = True
+            line = "No pointing was seen in 20 s. I will use the %s you said." % self.side
+            return [("say", line), self._cmd("find_bag", side=self.side, again=True)]
         first = [("say", STEP_BACK_TEXT)] if code == "NOT_POINTED" else []  # too close for the camera to see it
         if code in RETRY_CODES and self.bag_tries < MAX_BAG_TRIES:
             self.bag_tries += 1

@@ -32,6 +32,7 @@ PICK_S = 240.0  # the arm's pick, as the Jetson flow is launched
 HANDOVER_S = 30.0
 DROP_S = 60.0
 LINK_GRACE_S = 4.0
+LINK_ASKS = 2  # spoken refusals while the base link is unknown or down; then the reason sticks
 PAUSE_ASK_S = 20.0  # a wait on the way back never resumes by itself
 
 # The spine the console shows as step i of N. LOST_SEARCH shares FOLLOWING;
@@ -70,9 +71,9 @@ REASONS = {
         "outcome": "FAILED",
     },
     "BASE_LINK_DOWN": {
-        "en": "The link to the base dropped. The run has stopped.",
-        "th": "การเชื่อมต่อกับฐานหาย การวิ่งหยุดแล้ว",
-        "fix": "Check Wi-Fi between the Pi and the Jetson, then start again.",
+        "en": "The base link is not up, so following and the bag search stay off.",
+        "th": "ลิงก์ไปฐานไม่พร้อม จึงยังไม่ตามและยังไม่หาถุง",
+        "fix": "Start the Pi base program.",
         "level": "error",
         "outcome": "FAILED",
     },
@@ -440,6 +441,9 @@ class HmcFlow:
         self.confirm_asks = 0
         self.link_ok = None
         self.link_lost_at = None
+        self.link_tries = 0
+        self.link_stuck = False
+        self.side_fallback_used = False
         self.return_deadline = None
         self.paused = False
         self.paused_at = None
@@ -563,6 +567,8 @@ class HmcFlow:
             self.t0 = now
             self.running = True
             self.last_now = now
+            if isinstance(report, dict) and "link" in report:
+                self.link_ok = bool(report["link"])
             outs = self._enter("PRECHECK", now, say="Checking the base before we start.")
             code, detail = _precheck_code(report)
             if code:
@@ -718,9 +724,15 @@ class HmcFlow:
     def _heard(self, kind, extra, now):
         state = self.state
         if state == "READY" and kind == "follow":
+            blocked = self._block_without_link("follow")
+            if blocked is not None:
+                return blocked
             return self._enter("ENROLLING", now, say="I will follow you. Please stand in front of me.",
                                cmds=[{"action": "follow_me", "params": {}}])
         if state == "ENROLLING" and kind == "follow":
+            blocked = self._block_without_link("follow")
+            if blocked is not None:
+                return blocked
             self.enrol_tries = 0
             return self._say_cmd("I will look for you again.", [{"action": "follow_me", "params": {}}])
         if state == "FOLLOWING" and kind in ("arrive", "wait"):
@@ -773,9 +785,32 @@ class HmcFlow:
         return self._enter("AT_CAR", now,
                            say="Please point at the bag. You can also say left or right.")
 
+    def _block_without_link(self, detail):
+        """None when the base link is known up. Otherwise no follow_me and no find_bag.
+
+        An unknown link counts as down. Two refusals are spoken; after that the reason sticks
+        and further tries are logged only, until base_link_ok.
+        """
+        if self.link_ok is True:
+            self.link_tries = 0
+            self.link_stuck = False
+            return None
+        if self.link_stuck:
+            return [("log", "(BASE_LINK_DOWN)")]
+        self.link_tries += 1
+        self._set_reason("BASE_LINK_DOWN", detail)
+        if self.link_tries >= LINK_ASKS:
+            self.link_stuck = True
+        self.last_say = REASONS["BASE_LINK_DOWN"]["en"]
+        return [("say", self.last_say)]
+
     def _point(self, now, side):
+        blocked = self._block_without_link("find_bag")
+        if blocked is not None:
+            return blocked
         self.side = side or self.side
         self.bag_tries = 0
+        self.side_fallback_used = False
         params = {}
         if self.side:
             params["side"] = self.side
@@ -805,6 +840,10 @@ class HmcFlow:
         if name == "base_link_ok":
             self.link_ok = True
             self.link_lost_at = None
+            self.link_tries = 0
+            self.link_stuck = False
+            if self.reason and self.reason.get("code") == "BASE_LINK_DOWN":
+                self.reason = None
             return []
         if name == "base_link_lost":
             self.link_ok = False
@@ -909,8 +948,16 @@ class HmcFlow:
         if name == "bag_reached":
             return self._reached(detail, extra, now)
         mapped = _bag_code(code)
+        if mapped == "NOT_POINTED" and self.side and not self.side_fallback_used:
+            self.side_fallback_used = True
+            self._set_reason("NOT_POINTED", detail or "pointing timed out")
+            line = "No pointing was seen in 20 s. I will use the %s you said." % self.side
+            self.last_say = line
+            self.deadline = now + POINT_S
+            return [("say", line), ("cmd", {"action": "find_bag", "params": {"side": self.side, "again": True}})]
         if mapped == "NO_LINK":
-            return self._finish(now, "NO_LINK", detail)
+            self.link_ok = False
+            return self._block_without_link(detail or "find_bag")
         if mapped in ("REFUSED", "CANCELLED", "BAG_REFUSED"):
             self._set_reason("BAG_REFUSED", detail or code)
             return self._enter("AT_CAR", now, say=REASONS["BAG_REFUSED"]["en"],
@@ -1011,6 +1058,10 @@ class HmcFlow:
             if status.get("link"):
                 self.link_ok = True
                 self.link_lost_at = None
+                self.link_tries = 0
+                self.link_stuck = False
+                if self.reason and self.reason.get("code") == "BASE_LINK_DOWN":
+                    self.reason = None
             elif self.link_lost_at is None:
                 self.link_ok = False
                 self.link_lost_at = now
