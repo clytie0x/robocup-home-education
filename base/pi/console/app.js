@@ -155,7 +155,7 @@ function showTab(name) {
   for (const a of document.querySelectorAll("#tabbar a")) a.classList.toggle("here", a.dataset.tab === phoneTab);
   for (const a of document.querySelectorAll("#desk-tabs a")) a.classList.toggle("here", a.dataset.tab === name);
   if (name === "logs") loadLogs();
-  if (name === "jetson") fetchArm();
+  if (name === "jetson" || name === "task") fetchArm();
   if (name === "data") loadData();
   window.scrollTo(0, 0);
   render();
@@ -230,7 +230,7 @@ function render() {
   renderBank();
   renderRunParts();
   if (tab === "live") renderLive();
-  if (tab === "task") renderTask();
+  if (tab === "task") { renderTask(); renderArm(); }
   if (tab === "jetson") { renderJetson(); renderArm(); }
   if (tab === "checks") renderChecks();
   place();
@@ -654,6 +654,7 @@ function renderCamState() {
   const wt = web && !failed ? "สด" : web == null ? "กำลังตรวจ" : "ปิดอยู่";
   setText($("badge-webcam"), wt);
   setText($("badge-webcam-desk"), wt);
+  if ($("badge-webcam-task")) setText($("badge-webcam-task"), wt);
 }
 
 let scanLive = false; // the newest /scan answered and was fresh
@@ -802,6 +803,7 @@ function updateStartButton() {
   $("btn-start-task").textContent = `${m} (${choice.mode === "drive" ? "ขับจริง" : "ทดลอง"}` +
     (choice.virtual ? " คนเสมือน)" : ")");
 }
+updateStartButton();
 
 function renderSpeeds() {
   const el = $("seg-speed");
@@ -822,6 +824,10 @@ function renderTask() {
   const running = jobRunning(state), task = taskRunning(state), j = jobOf(state);
   $("task-start").hidden = running;
   $("task-running").hidden = !task;
+  const activeMission = (task && j && j.meta && j.meta.mission) || "full";
+  const showArm = task && activeMission !== "follow_only";
+  $("task-webcam-panel").hidden = !showArm;
+  $("task-arm-panel").hidden = !showArm;
   $("btn-start-task").disabled = running;
   const services = card("services");
   $("task-start-note").hidden = !!(services && services.level === "ok");
@@ -864,13 +870,24 @@ for (const b of document.querySelectorAll("[data-command]")) {
 for (const b of document.querySelectorAll("[data-arm-cmd]")) {
   b.addEventListener("click", async () => {
     const cmd = b.dataset.armCmd;
-    const payload = cmd === "drop_bag" ? { cmd, x: 0.31, y: 0.0 } : { cmd };
+    const bt = run && run.record && run.record.bag_task && run.record.bag_task.result;
+    let payload;
+    if (cmd === "drop_bag") payload = { cmd, x: 0.36, y: 0.0 };
+    else if (cmd === "pick_bag") payload = (bt && bt.ok) ? { cmd } : { cmd, x: 0.36, y: 0.0 };
+    else payload = { cmd };
     b.disabled = true;
+    toast(`กำลังสั่ง${b.textContent.trim()}...`);
     const r = await post("/api/arm", payload);
     if (r && !r.error) toast(`สั่ง${b.textContent.trim()}สำเร็จ`);
+    fetchArm();
     b.disabled = false;
   });
 }
+$("btn-task-arm-stop").addEventListener("click", async () => {
+  const r = await post("/api/arm/stop", {});
+  if (r && !r.error) toast("ส่งคำสั่งหยุดแขนแล้ว");
+  fetchArm();
+});
 
 async function stop() {
   const r = await post("/api/stop", {});
@@ -954,6 +971,7 @@ $("btn-stop-all").addEventListener("click", async () => {
 // ------------------------------------------------------------ the arm (Jetson tab)
 
 const ARM_MOVES = { home: { cmd: "home" }, rest: { cmd: "rest" }, center: { cmd: "center" },
+  "pick-front": { cmd: "pick_bag", x: 0.36, y: 0.0 }, "drop-front": { cmd: "drop_bag", x: 0.36, y: 0.0 },
   bagpick: { cmd: "bagpick", putback: false },
   "torque-on": { cmd: "torque", on: true }, "torque-off": { cmd: "torque", on: false } };
 let armSending = false; // a move this tab sent is not answered yet (center takes up to 90 s, bagpick up to 300 s)
@@ -964,8 +982,8 @@ async function fetchArm() {
 }
 
 async function pollArm() {
-  if (tab === "jetson" && document.visibilityState === "visible") await fetchArm();
-  setTimeout(pollArm, 2000);
+  if ((tab === "jetson" || (tab === "task" && taskRunning(state))) && document.visibilityState === "visible") await fetchArm();
+  setTimeout(pollArm, 1500);
 }
 
 function renderArm() {
@@ -976,11 +994,30 @@ function renderArm() {
   if (arm && arm.error) line = `<span class="val bad">${esc(arm.error)}</span>`;
   else if (arm && !s) line = "ยังไม่มี /arm/state จากแขน";
   else if (s) {
-    line = [`สถานะ ${esc(s.state)}`, `torque ${s.torque_on ? "on" : "off"}`, arm.busy ? "ทำงานอยู่" : "ว่าง"]
-      .concat(s.task ? [`${esc(s.task)} ${esc(s.step || "")}`] : []).join(" · ") +
+    const bits = [`สถานะ ${esc(s.state)}`, `torque ${s.torque_on ? "on" : "off"}`, arm.busy ? "ทำงานอยู่" : "ว่าง"];
+    if (s.holding) bits.push("ถือถุงอยู่");
+    if (s.task) bits.push(`${esc(s.task)} ${esc(s.step || "")}`.trim());
+    if (s.voltage_min != null) bits.push(`${fixed(s.voltage_min, 1)}V`);
+    if (s.temp_max != null) bits.push(`${fixed(s.temp_max, 0)}°C`);
+    line = bits.join(" · ") + (s.last_message ? ` · ${esc(s.last_message)}` : "") +
       (s.fault ? ` · <span class="val bad">fault ${esc(s.fault)}</span>` : "");
   }
   setHTML($("arm-line"), line);
+  // Also render arm + bag status on the Task tab
+  if ($("task-arm-word")) {
+    setText($("task-arm-word"), s ? (s.holding ? "ถือถุงอยู่" : s.state) : "-");
+    const bt = run && run.record && run.record.bag_task;
+    const bagStr = !bt ? "ยังไม่เริ่มหาถุง"
+      : bt.result ? (bt.result.ok ? `ถึงถุงแล้ว (${fixed(bt.result.x, 2)}, ${fixed(bt.result.y, 2)})` : `ไม่สำเร็จ: ${bt.result.code || bt.result.message || "-"}`)
+      : `กำลังทำงาน (${bt.state || "-"})`;
+    const items = [
+      ["สถานะถุง", bagStr, bt && bt.result && !bt.result.ok ? "bad" : "ok", null],
+      ["แขน", s ? `${s.state}${s.task ? " · " + s.task + (s.step ? " (" + s.step + ")" : "") : ""}` : (arm && arm.error ? arm.error : "-"), s && s.fault ? "bad" : "ok", null],
+      ["ข้อความล่าสุด", s && s.last_message ? s.last_message : "-", "ok", null],
+      ["ไฟ / อุณหภูมิ", s ? `${fixed(s.voltage_min, 1)} V · ${fixed(s.temp_max, 0)} °C` : "-", "ok", null],
+    ];
+    setHTML($("task-arm-kv"), rows(items));
+  }
   $("arm-held").hidden = !hold;
   if (hold) setText($("arm-held"), `คอนโซลถูกจองโดย ${hold.who} ปุ่มขยับแขนใช้ไม่ได้จนกว่าจะปล่อย (Stop ใช้ได้)`);
   for (const b of document.querySelectorAll("[data-arm]")) {

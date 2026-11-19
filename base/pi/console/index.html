@@ -204,6 +204,14 @@
           <div class="ph">LiDAR<span class="num" id="scan-info-task">4 m</span></div>
           <div class="slot" data-slot="lidar"></div>
         </div>
+        <div class="panel" id="task-webcam-panel" hidden>
+          <div class="ph">เว็บแคมหน้า (แขน)<span id="badge-webcam-task">-</span></div>
+          <div class="slot" data-slot="webcam"></div>
+        </div>
+        <div class="panel rows" id="task-arm-panel" hidden>
+          <div class="ph">สถานะแขนและถุง<span class="num" id="task-arm-word">-</span></div>
+          <div id="task-arm-kv"></div>
+        </div>
         <div class="slot span" data-slot="cmds"></div>
         <div class="panel rows span">
           <div class="ph"><span id="task-label">งาน</span><span class="num" id="task-phase">-</span></div>
@@ -280,7 +288,8 @@
           <button type="button" class="btn" data-arm="home">Home</button>
           <button type="button" class="btn" data-arm="rest">Rest</button>
           <button type="button" class="btn" data-arm="center">Center</button>
-          <button type="button" class="btn" data-arm="bagpick" title="แขนหาและหยิบถุงหน้าหุ่นด้วยกล้องแขน (bagpick.py)">Bagpick</button>
+          <button type="button" class="btn pri" data-arm="pick-front" title="หยิบถุงที่วางหน้าหุ่น (กล้องหน้า yolo11s-seg, x=0.36)">หยิบถุงหน้าหุ่น</button>
+          <button type="button" class="btn" data-arm="drop-front" title="วางถุงลงพื้นหน้าหุ่น (x=0.36)">วางถุง</button>
           <button type="button" class="btn" data-arm="torque-on">Torque on</button>
           <button type="button" class="btn" data-arm="torque-off" title="ปิดแรงบิดได้เฉพาะตอนแขนพัก (resting)">Torque off</button>
           <button type="button" class="btn" id="btn-arm-stop">Stop</button>
@@ -397,6 +406,7 @@
         <button type="button" class="btn" data-command="bag">หาถุง (ชี้)</button>
         <button type="button" class="btn pri" data-arm-cmd="pick_bag">หยิบถุง</button>
         <button type="button" class="btn" data-arm-cmd="drop_bag">วางถุง</button>
+        <button type="button" class="btn" id="btn-task-arm-stop">หยุดแขน</button>
       </div>
       <div class="btnrow" id="idle-cmds">
         <button type="button" class="btn pri" id="btn-go-task-desk"><svg width="16" height="16"><use href="#i-run"/></svg>เริ่มงาน</button>
