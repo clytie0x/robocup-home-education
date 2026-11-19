@@ -946,8 +946,14 @@ def cycle(state, now):
         state.history = [h for h in state.history if h[0] > now - HISTORY] + [(now, v, w)]  # only what reached the wheels
     state.coast.sent(v, w, now)
     if frame is not None and state.link is not None:
-        if state.phase == BAG and state.bag.wants_pose:
-            state.link.send(frame, pose=True)  # keypoints only while the bag task looks for the pointing
+        state._pose_tick = getattr(state, "_pose_tick", 0) + 1
+        want_pose = (state.phase == BAG and state.bag.wants_pose) or (
+            state.dashboard is not None and state._pose_tick % 2 == 0)
+        if want_pose:
+            try:
+                state.link.send(frame, pose=True)  # keypoints for bag pointing and live skeleton overlay (5 Hz)
+            except TypeError:
+                state.link.send(frame)
         else:
             state.link.send(frame)
     if state.n % SAVE_EVERY == 0:
@@ -1022,6 +1028,17 @@ def cycle(state, now):
     state.log.write(record)
     if state.dashboard is not None:
         state.dashboard.latest = record
+        if link_alive and answer is not None:
+            w = int(getattr(frame, "width", 0) or (frame.rgb.shape[1] if getattr(frame, "rgb", None) is not None else 320))
+            h = int(getattr(frame, "height", 0) or (frame.rgb.shape[0] if getattr(frame, "rgb", None) is not None else 240))
+            people = []
+            for s in answer.people:
+                x1, y1, x2, y2 = s.box
+                kp = [[w - k[0], k[1], k[2]] for k in s.kp] if s.kp else None
+                people.append({"box": [w - x2, y1, w - x1, y2], "kp": kp})
+            state.dashboard.skeleton = {"w": w, "h": h, "people": people}
+        else:
+            state.dashboard.skeleton = {"w": None, "h": None, "people": []}
         try:  # references only, for the console's Live tab (live_feed.py): never let it stop a cycle
             state.dashboard.feed.put(frame, lidar_points, record, now)
         except Exception:

@@ -604,7 +604,7 @@ const KP_SEEN = 0.3; // a keypoint's visibility must reach this to be drawn
 
 function drawSkeleton(s) {
   const svg = $("cam-skel");
-  if (!s || !s.on || !s.w || !$("img-camera").dataset.shown || liveFromRun(state)) { svg.innerHTML = ""; return; }
+  if (!s || !s.on || !s.w || !$("img-camera").dataset.shown) { svg.innerHTML = ""; return; }
   svg.setAttribute("viewBox", `0 0 ${s.w} ${s.h}`);
   let out = "";
   for (const p of s.people) {
@@ -628,10 +628,16 @@ $("btn-skel").addEventListener("click", async () => {
   if (!r || r.error) return;
   skeletonOn = r.on;
   $("btn-skel").setAttribute("aria-pressed", String(skeletonOn));
-  drawSkeleton(r);
+  if (!skeletonOn) drawSkeleton(null);
+  else if (liveFromRun(state) && run && run.skeleton) drawSkeleton(Object.assign({ on: true }, run.skeleton));
+  else drawSkeleton(r);
 });
 setInterval(async () => {
   if (!skeletonOn || !onScreen("cam-box") || document.visibilityState !== "visible") return;
+  if (liveFromRun(state)) {
+    drawSkeleton(run && run.skeleton ? Object.assign({ on: true }, run.skeleton) : null);
+    return;
+  }
   try { drawSkeleton(await getJSON("/api/skeleton")); } catch (e) { /* the next poll tries again */ }
 }, 200);
 

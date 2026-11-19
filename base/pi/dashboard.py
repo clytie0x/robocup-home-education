@@ -124,6 +124,7 @@ class Dashboard:
     def __init__(self, controls, run_info, port=PORT, host="0.0.0.0", remote=False, feed=None):
         self.controls, self.run_info, self.remote = controls, run_info, remote
         self.latest = None
+        self.skeleton = {"w": None, "h": None, "people": []}
         self.feed = feed  # live_feed.LiveFeed: the camera and the LiDAR for /stream and /scan, or None
         self.streams = 0  # /stream viewers now
         self.scan_cache = (None, None, -float("inf"), None)  # (feed, its scan time, made at, JSON)
@@ -251,5 +252,5 @@ class Dashboard:
         return body
 
     def status(self):
-        return {"record": self.latest, "controls": self.controls.snapshot(), "run": self.run_info,
-                "remote": self.remote, "uptime": round(time.monotonic() - self.started, 1)}
+        return {"record": self.latest, "skeleton": self.skeleton, "controls": self.controls.snapshot(),
+                "run": self.run_info, "remote": self.remote, "uptime": round(time.monotonic() - self.started, 1)}
