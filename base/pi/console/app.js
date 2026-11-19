@@ -860,6 +860,52 @@ $("btn-start-task").addEventListener("click", async () => {
   }
 });
 
+async function waitForCheckDone(timeoutMs) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    await new Promise((res) => setTimeout(res, 600));
+    let s;
+    try { s = await getJSON("/api/state"); } catch (e) { continue; }
+    if (s && s.job && !s.job.running) return s.job.job ? s.job.job.code : 0;
+  }
+  return -1;
+}
+
+$("btn-move-bag-60").addEventListener("click", async () => {
+  if (!(await confirmBox("ทดสอบย้ายถุง 60 ซม. ไหม",
+    "หุ่นจะ: 1) หยิบถุงหน้าหุ่น 2) เดินหน้า 60 ซม. 3) วางถุง 4) ถอยกลับ 60 ซม. พื้นที่หน้า-หลังโล่งและสายไฟปลอดภัยแล้วใช่ไหม",
+    "ใช่ เริ่มเลย", true))) return;
+  const btn = $("btn-move-bag-60"), st = $("move-bag-status");
+  btn.disabled = true;
+  st.hidden = false;
+  const say = (msg, bad) => { setText(st, msg); toast(msg, bad); };
+  try {
+    say("1/4 กำลังหยิบถุงหน้าหุ่น...");
+    const p1 = await post("/api/arm", { cmd: "pick_bag", x: 0.36, y: 0.0 });
+    if (!p1 || p1.error) { say(`หยุดที่ขั้น 1/4: ${(p1 && p1.error) || "หยิบถุงไม่สำเร็จ"}`, true); return; }
+
+    say("2/4 หยิบแล้ว กำลังเดินหน้า 60 ซม....");
+    const p2 = await post("/api/check/start", { check: "base_check", args: ["--line", "0.08", "--metres", "0.60", "--yes-owner-at-robot"] });
+    if (!p2 || p2.error) { say(`หยุดที่ขั้น 2/4: ${(p2 && p2.error) || "เดินหน้าไม่สำเร็จ"}`, true); return; }
+    const c2 = await waitForCheckDone(30000);
+    if (c2 !== 0) { say(`หยุดที่ขั้น 2/4: เดินหน้าจบด้วย code ${c2}`, true); return; }
+
+    say("3/4 ถึงจุดวางแล้ว กำลังวางถุง...");
+    const p3 = await post("/api/arm", { cmd: "drop_bag", x: 0.36, y: 0.0 });
+    if (!p3 || p3.error) { say(`หยุดที่ขั้น 3/4: ${(p3 && p3.error) || "วางถุงไม่สำเร็จ"}`, true); return; }
+
+    say("4/4 วางถุงแล้ว กำลังถอยกลับ 60 ซม....");
+    const p4 = await post("/api/check/start", { check: "back_up", args: ["--metres", "0.60", "--yes-back-up"] });
+    if (!p4 || p4.error) { say(`หยุดที่ขั้น 4/4: ${(p4 && p4.error) || "ถอยหลังไม่สำเร็จ"}`, true); return; }
+    const c4 = await waitForCheckDone(30000);
+    if (c4 !== 0) { say(`หยุดที่ขั้น 4/4: ถอยหลังจบด้วย code ${c4}`, true); return; }
+
+    say("ทดสอบย้ายถุง 60 ซม. และถอยกลับจุดเดิม เสร็จสมบูรณ์!");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 for (const b of document.querySelectorAll("[data-command]")) {
   b.addEventListener("click", async () => {
     const r = await post("/api/run/command", { command: b.dataset.command });
