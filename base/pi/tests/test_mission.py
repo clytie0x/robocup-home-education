@@ -115,3 +115,22 @@ class MissionTest(unittest.TestCase):
             self.assertEqual(code, 409, cmd)
             self.assertIn("task", body["error"])
         self.assertEqual(self.agent.posts, [])
+
+    def test_a_down_link_does_not_follow_until_it_is_back(self):
+        self.start()
+        code, raw = self.request("/api/mission/event", {"event": "base_link_lost"}, pin="2468")
+        self.assertEqual(code, 200, raw)
+        for _ in range(3):
+            code, raw = self.request("/api/mission/hear", {"text": "follow me"}, pin="2468")
+            self.assertEqual(code, 200, raw)
+            body = json.loads(raw)
+            self.assertEqual(body["mission"]["state"], "READY")
+            self.assertEqual(body["mission"]["reason"]["code"], "BASE_LINK_DOWN")
+            self.assertEqual(body["mission"]["reason"]["fix"], "Start the Pi base program.")
+        self.assertNotIn("follow", self.run.commands)
+        code, raw = self.request("/api/mission/event", {"event": "base_link_ok"}, pin="2468")
+        self.assertEqual(code, 200, raw)
+        code, raw = self.request("/api/mission/hear", {"text": "follow me"}, pin="2468")
+        body = json.loads(raw)
+        self.assertEqual(body["mission"]["state"], "ENROLLING")
+        self.assertIn("follow", self.run.commands)

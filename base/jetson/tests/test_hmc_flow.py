@@ -49,6 +49,8 @@ class FlowCase(unittest.TestCase):
         f = self.flow
         if state == READY:
             return
+        if f.link_ok is not True:
+            f.on_event("base_link_ok", max(0.0, now - 0.05))
         f.on_heard("follow me", now)
         if state == FOLLOWING:
             return
@@ -124,14 +126,19 @@ class StartTests(FlowCase):
 class EarlyInputTests(unittest.TestCase):
     """Input before start() (no tts_node listening yet): start the flow, then handle it. Nothing is lost."""
 
-    def test_follow_me_heard_before_start_starts_and_follows(self):
+    def test_follow_me_heard_before_start_refuses_an_unknown_link(self):
+        """An unknown link is not ready: the flow starts, but it does not send follow_me."""
         f = HmcFlow()
         out = f.on_heard("follow me", 1.0)
+        self.assertEqual(f.state, READY)
+        self.assertEqual([v for k, v in out if k == "state"], [READY])
+        self.assertEqual(actions(out), [])
+        self.assertEqual(f.reason_code, "BASE_LINK_DOWN")
+        self.assertIn(hmc_flow.BASE_LINK_SAY, says(out))
+        f.on_event("base_link_ok", 2.0)
+        out = f.on_heard("follow me", 3.0)
         self.assertEqual(f.state, FOLLOWING)
-        self.assertEqual([v for k, v in out if k == "state"], [READY, FOLLOWING])
-        self.assertLess(out.index(("state", READY)), out.index(("cmd", {"action": "follow_me", "params": {}})))
         self.assertEqual(actions(out), ["follow_me"])
-        self.assertEqual(forwarded(out), [])
 
     def test_other_speech_before_start_starts_and_goes_to_the_brain(self):
         f = HmcFlow()
@@ -140,11 +147,16 @@ class EarlyInputTests(unittest.TestCase):
         self.assertEqual(out[0], ("state", READY))
         self.assertEqual(forwarded(out), ["hello robot"])
 
-    def test_intent_before_start_starts_and_follows(self):
+    def test_intent_before_start_refuses_an_unknown_link(self):
         f = HmcFlow()
         out = f.on_intent({"action": "follow_me", "params": {}}, 1.0)
-        self.assertEqual(f.state, FOLLOWING)
+        self.assertEqual(f.state, READY)
         self.assertEqual(out[0], ("state", READY))
+        self.assertEqual(actions(out), [])
+        self.assertEqual(f.reason_code, "BASE_LINK_DOWN")
+        f.on_event("base_link_ok", 2.0)
+        out = f.on_intent({"action": "follow_me", "params": {}}, 3.0)
+        self.assertEqual(f.state, FOLLOWING)
         self.assertEqual(actions(out), ["follow_me"])
 
     def test_event_before_start_is_noted_but_does_not_start(self):
@@ -162,6 +174,7 @@ class EarlyInputTests(unittest.TestCase):
     def test_start_only_once(self):
         f = HmcFlow()
         f.on_heard("hello robot", 1.0)
+        f.on_event("base_link_ok", 1.5)
         out = f.on_heard("follow me", 2.0)
         self.assertNotIn(("state", READY), out)
         self.assertEqual(f.state, FOLLOWING)
@@ -192,6 +205,7 @@ class ShouldStartTests(unittest.TestCase):
 class ReadyTests(FlowCase):
     def test_follow_me_words_start_following(self):
         f = self.make()
+        f.on_event("base_link_ok", 0.5)
         out = f.on_heard("follow me", 1.0)
         self.assertEqual(f.state, FOLLOWING)
         self.assertEqual(actions(out), ["follow_me"])
@@ -200,9 +214,28 @@ class ReadyTests(FlowCase):
 
     def test_follow_me_intent_starts_following(self):
         f = self.make()
+        f.on_event("base_link_ok", 0.5)
         out = f.on_intent({"action": "follow_me", "params": {}, "reply": "Okay"}, 1.0)
         self.assertEqual(f.state, FOLLOWING)
         self.assertEqual(actions(out), ["follow_me"])
+
+    def test_an_unknown_link_does_not_follow_and_then_sticks(self):
+        f = self.make()
+        self.assertIsNone(f.link_ok)
+        first = f.on_heard("follow me", 1.0)
+        second = f.on_heard("follow me", 2.0)
+        third = f.on_heard("follow me", 3.0)
+        self.assertEqual(f.state, READY)
+        self.assertEqual(actions(first + second + third), [])
+        self.assertEqual(len(says(first)), 1)
+        self.assertEqual(len(says(second)), 1)
+        self.assertEqual(says(third), [])
+        self.assertTrue(f.link_stuck)
+        self.assertEqual(f.reason_code, "BASE_LINK_DOWN")
+        f.on_event("base_link_ok", 4.0)
+        f.on_heard("follow me", 5.0)
+        self.assertEqual(f.state, FOLLOWING)
+        self.assertIsNone(f.reason_code)
 
     def test_unmatched_text_goes_to_the_brain(self):
         f = self.make()
@@ -450,6 +483,35 @@ class PointingTests(FlowCase):
             out = f.on_event("bag_failed|%s|why" % code, 10.0)
             self.assertEqual(f.state, AT_CAR, code)
             self.assertEqual(actions(out), [], code)
+
+    def test_no_link_does_not_resend_find_bag_on_ready(self):
+        f = self.make()
+        self.go(POINTING)
+        f.on_event("bag_failed|NO_LINK|connection refused", 10.0)
+        self.assertEqual(f.state, AT_CAR)
+        self.assertFalse(f.link_ok)
+        for t in (11.0, 12.0, 13.0):
+            out = f.on_heard("ready", t)
+            self.assertEqual(actions(out), [], t)
+            self.assertEqual(f.state, AT_CAR)
+        self.assertEqual(f.reason_code, "BASE_LINK_DOWN")
+        self.assertTrue(f.link_stuck)
+        f.on_event("base_link_ok", 14.0)
+        out = f.on_heard("ready", 15.0)
+        self.assertEqual(f.state, POINTING)
+        self.assertEqual(actions(out), ["find_bag"])
+
+    def test_not_pointed_uses_a_spoken_side_once_before_the_step_back(self):
+        f = self.make()
+        self.go(POINTING)
+        f.on_heard("left", 5.0)
+        out = f.on_event("bag_failed|NOT_POINTED|no steady pointing in 20 s", 10.0)
+        self.assertEqual(f.state, POINTING)
+        self.assertEqual(says(out), ["No pointing was seen in 20 s. I will use the left you said."])
+        self.assertEqual(cmds(out), [{"action": "find_bag", "params": {"side": "left", "again": True}}])
+        out = f.on_event("bag_failed|NOT_POINTED|again", 20.0)
+        self.assertEqual(says(out)[0], "Please step back two steps and point at the bag.")
+        self.assertEqual(cmds(out), [{"action": "find_bag", "params": {}}])
 
     def test_stop_cancels_the_bag_task(self):
         f = self.make()
@@ -971,6 +1033,7 @@ class ParkTests(unittest.TestCase):
         self.assertEqual(flow.state, READY)
         flow.on_event("console_released", 4.0)
         self.assertFalse(flow.parked)
+        flow.on_event("base_link_ok", 4.5)
         heard = flow.on_heard("follow me", 5.0)
         self.assertTrue(any(kind == "cmd" for kind, _value in heard))
 

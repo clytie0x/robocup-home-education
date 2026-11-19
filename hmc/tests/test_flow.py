@@ -279,13 +279,17 @@ def test_pause_on_the_way_back_does_not_resume_itself(tmp_path):
     assert flow.state == "RETURNING"
 
 
-def test_not_pointed_asks_for_two_steps_then_a_refused_search_stays_at_the_car(tmp_path):
+def test_not_pointed_uses_the_spoken_side_before_the_step_back(tmp_path):
     flow = begin(tmp_path, "bags")
     follow(flow)
     to_car(flow)
     to_point(flow)
-    out = flow.on_event("bag_failed|NOT_POINTED|too close", 6.0)
+    out = flow.on_event("bag_failed|NOT_POINTED|no steady pointing in 20 s", 6.0)
+    assert flow.state == "POINTING"
     assert flow.reason["code"] == "NOT_POINTED"
+    assert says(out) == ["No pointing was seen in 20 s. I will use the left you said."]
+    assert out[-1] == ("cmd", {"action": "find_bag", "params": {"side": "left", "again": True}})
+    out = flow.on_event("bag_failed|NOT_POINTED|still nothing", 6.5)
     assert "step back" in says(out)[0]
     out = flow.on_event("bag_failed|REFUSED|not now", 7.0)
     assert flow.state == "AT_CAR"
@@ -293,16 +297,80 @@ def test_not_pointed_asks_for_two_steps_then_a_refused_search_stays_at_the_car(t
     assert "go_back" not in actions(out)
 
 
-def test_no_link_on_the_bag_search_still_returns(tmp_path):
+def test_not_pointed_without_a_side_still_asks_to_step_back(tmp_path):
+    flow = begin(tmp_path, "noside")
+    follow(flow)
+    to_car(flow)
+    flow.on_heard("ready", 4.0)
+    out = flow.on_event("bag_failed|NOT_POINTED|too close", 6.0)
+    assert flow.reason["code"] == "NOT_POINTED"
+    assert "step back" in says(out)[0]
+    assert "find_bag" in actions(out)
+
+
+def test_no_link_on_the_bag_search_does_not_resend_find_bag(tmp_path):
     flow = begin(tmp_path, "nolink")
     follow(flow)
     to_car(flow)
     to_point(flow)
     out = flow.on_event("bag_failed|NO_LINK|the link to the base is down", 6.0)
-    assert flow.reason["code"] == "NO_LINK"
-    assert flow.state == "RETURNING"
-    assert "go_back" in actions(out)
-    assert "could not look for the bag" not in " ".join(says(out)).lower()
+    assert flow.reason["code"] == "BASE_LINK_DOWN"
+    assert flow.reason["fix"] == "Start the Pi base program."
+    assert flow.state == "POINTING"
+    assert "find_bag" not in actions(out)
+    assert "go_back" not in actions(out)
+    out = flow.on_event("bag_failed|NO_LINK|still down", 7.0)
+    assert says(out)
+    assert "find_bag" not in actions(out)
+    out = flow.on_event("bag_failed|NO_LINK|still down", 8.0)
+    assert says(out) == []
+    assert actions(out) == []
+    assert flow.link_stuck
+    flow.on_event("base_link_ok", 9.0)
+    assert flow.reason is None
+    out = flow.on_heard("left", 10.0)
+    assert "find_bag" in actions(out)
+    assert flow.state == "POINTING"
+
+
+def test_ready_does_not_search_while_the_link_is_down(tmp_path):
+    flow = begin(tmp_path, "ready-link")
+    follow(flow)
+    to_car(flow)
+    flow.on_event("base_link_lost", 4.0)
+    assert flow.state == "AT_CAR"
+    for t in (5.0, 6.0, 7.0):
+        out = flow.on_heard("ready", t)
+        assert "find_bag" not in actions(out)
+        assert "follow_me" not in actions(out)
+        assert flow.state == "AT_CAR"
+    assert flow.reason["code"] == "BASE_LINK_DOWN"
+    assert flow.link_stuck
+    flow.on_event("base_link_ok", 8.0)
+    out = flow.on_heard("ready", 9.0)
+    assert actions(out) == ["find_bag"]
+    assert flow.state == "POINTING"
+
+
+def test_an_unknown_link_does_not_start_following(tmp_path):
+    report = {key: value for key, value in OK.items() if key != "link"}
+    flow = begin(tmp_path, "unknown", report=report)
+    assert flow.state == "READY"
+    assert flow.link_ok is None
+    out = flow.on_heard("follow me", 1.0)
+    assert flow.state == "READY"
+    assert actions(out) == []
+    assert flow.reason["code"] == "BASE_LINK_DOWN"
+    assert "ฐาน" in flow.reason["th"]
+    assert flow.reason["fix"] == "Start the Pi base program."
+    flow.on_heard("follow me", 2.0)
+    out = flow.on_heard("follow me", 3.0)
+    assert says(out) == []
+    assert flow.link_stuck
+    flow.on_event("base_link_ok", 4.0)
+    follow(flow, 5.0)
+    assert flow.state == "FOLLOWING"
+    assert flow.reason is None
 
 
 def test_drop_without_a_bag_is_not_holding(tmp_path):

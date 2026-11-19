@@ -1713,6 +1713,7 @@ class Console:
         and y takes the running task's last reached bag. Refused while the task's bag task moves the base, and while a
         task runs whose status does not say."""
         record = None
+        from_run = False
         if task:
             code, status = self.run_status()
             record = status.get("record") if code == 200 and isinstance(status, dict) else None
@@ -1732,6 +1733,7 @@ class Console:
             if not (isinstance(result, dict) and result.get("ok")):
                 return 409, {"error": "no reached bag in a running task: give x and y, or run bag or bag_near first"}
             body = result
+            from_run = True
         out = {"cmd": cmd}
         for key in ("x", "y", "top", "yaw") if cmd == "pick_bag" else ("x", "y"):
             value = body.get(key)
@@ -1741,6 +1743,14 @@ class Console:
                 return 400, {"error": "%s takes x and y in metres (robot frame)%s" % (
                     cmd, ", top (m) and yaw (rad) when known" if cmd == "pick_bag" else "")}
             out[key] = float(value)
+        # The page's empty bag fields are 0.36, 0.00. That point is not a measurement.
+        if cmd == "pick_bag" and abs(out["x"] - 0.36) < 0.001 and abs(out["y"]) < 0.001:
+            measured = body.get("measured") is True or (from_run and body.get("ok") is True)
+            if not measured:
+                return 409, {
+                    "error": "0.36, 0.00 is the console default, not a measured bag",
+                    "reason": "DEFAULT_NOT_MEASURED",
+                }
         code, answer = self.jetson.arm(out, timeout=ARM_JOB_TIMEOUT)
         return code, (dict(answer, sent=out) if isinstance(answer, dict) else answer)
 
@@ -1895,7 +1905,9 @@ class Console:
         except OSError:
             pass
         self._mission_saw_run = False
-        self._apply(self.mission.start(time.monotonic(), report=None, run_id=run_id, limit_s=limit))
+        # This call runs only after the Pi base program has started, so the local link is up.
+        # A later status or NO_LINK can take it down again.
+        self._apply(self.mission.start(time.monotonic(), report={"link": True}, run_id=run_id, limit_s=limit))
         self._park_flow()
 
     def _stop_mission(self):
