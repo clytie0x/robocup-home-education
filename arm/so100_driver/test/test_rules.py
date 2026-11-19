@@ -1,10 +1,12 @@
 """Rules of the task server and the driver that need no ROS: error codes as values, a held bag is never
 forgotten, a fault keeps the squeeze, one commander at a time, the load reading, one floor height, the touch probe for an unknown bag top."""
 import ast
+import json
 import math
 import os
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -290,6 +292,20 @@ class TouchProbe(unittest.TestCase):
         # a real z keeps the height check it always had
         to_bag = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "to_bag")
         self.assertIn("0.03 < h < 0.6", ast.unparse(to_bag))
+
+    def test_a_gripper_camera_file_counts_only_when_it_holds_the_transform(self):
+        self.assertFalse(tr.gripper_camera_calibrated("/no/such/gripper_camera.json"))
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "gripper_camera.json")
+            with open(path, "w") as f:
+                json.dump({"fx": 500}, f)
+            self.assertFalse(tr.gripper_camera_calibrated(path))
+            with open(path, "w") as f:
+                json.dump({"T_gripper_camera": [1, 0, 0, 0]}, f)
+            self.assertTrue(tr.gripper_camera_calibrated(path))
+            with open(path, "w") as f:
+                f.write("{")
+            self.assertFalse(tr.gripper_camera_calibrated(path))
 
     def test_weight_check_only_rescues_a_closed_bag_grasp(self):
         tree = ast.parse((PKG / "pick_place_node.py").read_text(encoding="utf-8"))

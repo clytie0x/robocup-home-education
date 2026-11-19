@@ -9,7 +9,9 @@ API (so100_interfaces, see API.md):
   arm on the robot: deck = [front, back, left, right] deck edges from the pan axis (m), deck_z = deck top;
             table_z is then the floor. /arm/pick_bag holds a bag by its top and carries it at the side
             (bag_carry_side deg, 90 = left) with its bottom bag_bottom_min m above the floor.
-            A PickBag grasp_pose z of NaN = top unknown: it is found by touch first (probe_bag, bag_probe_*).
+            A PickBag grasp_pose z of NaN = top unknown: it is found by touch first (probe_bag, bag_probe_*),
+            unless gripper_camera.json exists (gripper_camera_file): then the 0.02 m/s probe is skipped and
+            bag_default_top is used. speed_profile safe (default) keeps today's speeds; fast raises them.
 
 Pick-and-place test with the closed-form IK (ik.py).
 
@@ -20,8 +22,9 @@ Set the object size in the control panel, then press "หยิบ-วาง".
   topic     so100/pick_place/status (String)  what the planner/sequence is doing
   parameter object_size [depth, width, height] m  (depth = front-back, width = left-right before turning)
 
-Big moves go through MoveIt (collision-checked, object attached to the gripper while carried);
-the short straight approach / lift / lower / retreat lines are sent straight to the arm driver.
+Big moves go through MoveIt (collision-checked, object attached to the gripper while carried).
+The straight approach and lift are Pilz LIN (pipeline already loaded). Other short lines
+(probe steps, carry, lower, retreat) are still sent straight to the arm driver.
 """
 import math
 import os
@@ -42,12 +45,12 @@ from control_msgs.msg import JointTolerance
 from geometry_msgs.msg import Point, Pose, Quaternion
 from interactive_markers import InteractiveMarkerServer
 from moveit_msgs.action import MoveGroup
-from moveit_msgs.msg import (AttachedCollisionObject, CollisionObject, Constraints, JointConstraint, ObjectColor,
-                             PlanningScene)
+from moveit_msgs.msg import (AttachedCollisionObject, BoundingVolume, CollisionObject, Constraints, JointConstraint,
+                             ObjectColor, OrientationConstraint, PlanningScene, PositionConstraint)
 from moveit_msgs.srv import ApplyPlanningScene
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
-from std_msgs.msg import ColorRGBA, Empty, String
+from std_msgs.msg import ColorRGBA, Empty, Header, String
 from std_srvs.srv import SetBool, Trigger
 import tf2_geometry_msgs  # noqa: F401  (registers PoseStamped for tf2)
 from tf2_ros import Buffer, TransformListener
@@ -61,8 +64,9 @@ from so100_interfaces.msg import ArmState
 from .bag_camera import GAP_MID, CameraBag
 from .calib import Calibration
 from .ik import ARM, GRASP_Y, TIP_Y, Box, GraspPlanner, Kinematics, PlanError, bag_shifts, deck_box
-from .task_rules import (PICK_PLACE, PROBE_JOINTS, Failed, api_code, descent_loads, gripper_load, held_by_weight,
-                         probe_contact, settled_load, still_held, top_unknown)
+from . import motion_profile, pick_log
+from .task_rules import (PICK_PLACE, PROBE_JOINTS, Failed, api_code, descent_loads, gripper_camera_calibrated,
+                         gripper_load, held_by_weight, probe_contact, settled_load, still_held, top_unknown)
 
 READY = {"shoulder_pan": 0.0, "shoulder_lift": 1.2, "elbow_flex": -1.2, "wrist_flex": 0.3, "wrist_roll": 0.0}
 REST = {"shoulder_pan": 0.0, "shoulder_lift": 0.04, "elbow_flex": -0.04, "wrist_flex": 0.0, "wrist_roll": 0.0}  # SRDF 'rest'
@@ -203,6 +207,12 @@ class PickPlace(Node):
         self.declare_parameter("bag_weight_dip", 0.015)
         self.declare_parameter("bag_weight_settle_tol", 2.0)  # % two readings in a row may differ: settled
         self.declare_parameter("bag_weight_max_reads", 6)     # status lines (1 Hz) at most for one weight reading
+        # safe = the parameters above. fast = motion_profile.FAST_PROFILE, after a supervised arm test.
+        self.declare_parameter("speed_profile", "safe")
+        # when this file exists, an unknown bag top does not run the 0.02 m/s touch probe
+        self.declare_parameter("gripper_camera_file", "~/hmc-follow/gripper_camera.json")
+        self.declare_parameter("bag_default_top", 0.26)  # m above the floor, used only when that probe is skipped
+        self.declare_parameter("pick_log_dir", "~/hmc-follow/picks")  # per-pick JSON (phase timings)
         p = lambda n: self.get_parameter(n).value
         self.table_z = float(p("table_z"))
         self.sim = bool(p("sim"))
@@ -588,14 +598,24 @@ class PickPlace(Node):
             raise Failed(f"{what}: หมดเวลา", "FAILED")
         return res.result
 
+    def active_speeds(self):
+        """safe keeps velocity_scaling, line_speed and bag_speed. fast replaces them (motion_profile)."""
+        name = str(self.get_parameter("speed_profile").value)
+        current = {"joint_scale": float(self.get_parameter("velocity_scaling").value),
+                   "approach_speed": float(self.get_parameter("line_speed").value),
+                   "bag_speed": float(self.get_parameter("bag_speed").value)}
+        return motion_profile.resolve(name, current)
+
     def moveit_to(self, q, what):
         goal = MoveGroup.Goal()
         r = goal.request
+        req = motion_profile.ompl_request(self.active_speeds())
         r.group_name = "arm"
-        r.pipeline_id = "ompl"
-        r.num_planning_attempts = 3
-        r.allowed_planning_time = 5.0
-        r.max_velocity_scaling_factor = float(self.get_parameter("velocity_scaling").value)
+        r.pipeline_id = req["pipeline_id"]
+        r.planner_id = req["planner_id"]
+        r.num_planning_attempts = req["num_planning_attempts"]
+        r.allowed_planning_time = req["allowed_planning_time"]
+        r.max_velocity_scaling_factor = req["max_velocity_scaling_factor"]
         r.max_acceleration_scaling_factor = 0.6
         r.start_state.is_diff = True
         c = Constraints()
@@ -615,9 +635,54 @@ class PickPlace(Node):
                            -7: ("ถูกหยุดกลางทาง", "FAILED")}.get(code, (f"MoveIt code {code}", "FAILED"))
             raise Failed(f"{what}: {reason}", api)
 
+    def _lin_constraints(self, fields):
+        x, y, z = fields["position"]
+        qx, qy, qz, qw = fields["orientation_xyzw"]
+        header = Header(frame_id=fields["frame_id"])
+        sphere = SolidPrimitive(type=SolidPrimitive.SPHERE, dimensions=[fields["position_tolerance_m"]])
+        at = Pose(position=Point(x=x, y=y, z=z), orientation=Quaternion(w=1.0))
+        region = BoundingVolume(primitives=[sphere], primitive_poses=[at])
+        pos = PositionConstraint(header=header, link_name=fields["link"], constraint_region=region, weight=1.0)
+        ori = OrientationConstraint(
+            header=header, link_name=fields["link"], orientation=Quaternion(x=qx, y=qy, z=qz, w=qw),
+            absolute_x_axis_tolerance=fields["orientation_tolerance_rad"],
+            absolute_y_axis_tolerance=fields["orientation_tolerance_rad"],
+            absolute_z_axis_tolerance=fields["orientation_tolerance_rad"], weight=1.0)
+        return Constraints(position_constraints=[pos], orientation_constraints=[ori])
+
+    def moveit_lin(self, q, what, speed):
+        """Pilz LIN from the current state to the tip pose of joint position q."""
+        link, matrix = motion_profile.tip_frame(self.kin.frames(q))
+        fields = motion_profile.lin_request(matrix, speed, link)
+        goal = MoveGroup.Goal()
+        r = goal.request
+        r.group_name = fields["group_name"]
+        r.pipeline_id = fields["pipeline_id"]
+        r.planner_id = fields["planner_id"]
+        r.num_planning_attempts = 1
+        r.allowed_planning_time = float(self.active_speeds()["planning_time"])
+        r.max_velocity_scaling_factor = fields["velocity_scale"]
+        r.max_acceleration_scaling_factor = 0.6
+        r.start_state.is_diff = True
+        r.goal_constraints = [self._lin_constraints(fields)]
+        goal.planning_options.plan_only = False
+        res = self.run_action(self.move, goal, 60.0, what)
+        code = res.error_code.val
+        if code != 1:
+            raise Failed(f"{what}: Pilz LIN code {code}", "FAILED")
+
+    def straight(self, qs, what, speed=None):
+        """Approach or lift: Pilz LIN to the last pose. The joint line runs if LIN does not."""
+        speed = speed or self.active_speeds()["approach_speed"]
+        try:
+            self.moveit_lin(qs[-1], what, speed)
+        except Exception as exc:  # noqa: BLE001 (a bad pose must not brick the pick: the joint line still runs)
+            self.get_logger().warn(f"{what}: Pilz LIN failed ({exc}); sending the joint line")
+            self.line(qs, what, speed)
+
     def line(self, qs, what, speed=None, step=None):
         """Send a joint path of equal steps (default: the 5 mm straight lines) with a smooth start/stop."""
-        speed = speed or float(self.get_parameter("line_speed").value)
+        speed = speed or self.active_speeds()["approach_speed"]
         n = len(qs)
         total = 1.875 * n * (step or self.planner.STEP) / speed     # min-jerk peak speed = 1.875 x average
         goal = FollowJointTrajectory.Goal()
@@ -665,6 +730,7 @@ class PickPlace(Node):
                     self.cancel_requested, self.preempt = False, False
                     self.moved = False       # set by the first motion command; refusals keep the scene as is
                     self.grasped, self.grip_reading = None, (math.nan, math.nan)
+                    self.phase_log = pick_log.PhaseLog()
                     break
                 if self.task != "rest" or name == "rest" or time.monotonic() > end:
                     return "BUSY", MESSAGES["BUSY"], "กำลังทำงานอื่นอยู่"
@@ -677,6 +743,7 @@ class PickPlace(Node):
         if not auto:
             self.hold_still = ""         # a new command from someone: the arm may fold again later
         given_way = False
+        code = "FAILED"
         try:
             if name not in ("rest", "home") and self.at_rest():
                 self.leave_rest()
@@ -701,6 +768,7 @@ class PickPlace(Node):
             if self.moved and name != "rest":
                 self.after_failure()
         finally:
+            self._write_phase_log(name, code)
             with self.lock:
                 given_way = self.preempt
                 self.busy, self.task, self.step, self.goal_handle = False, "", "", None
@@ -760,8 +828,29 @@ class PickPlace(Node):
             self.get_logger().info(f"ว่างมา {after:.0f} วิ: ไปท่าพัก")
             self.start("rest", self.do_rest, auto=True)
 
+    def _write_phase_log(self, name, code):
+        """One JSON per pick under pick_log_dir: each progress step and how long it took."""
+        log = getattr(self, "phase_log", None)
+        if log is None or name not in ("pick", "pick_bag", "pick_place", "place"):
+            return
+        try:
+            speeds = self.active_speeds()
+            profile = str(self.get_parameter("speed_profile").value)
+            directory = os.path.expanduser(str(self.get_parameter("pick_log_dir").value))
+        except Exception:  # noqa: BLE001
+            return
+        body = log.finish(task=name, ok=code == "SUCCESS", code=code, profile=profile, speeds=speeds)
+        try:
+            path = pick_log.write_pick(directory, body, time.strftime("%Y%m%d-%H%M%S"), name)
+            self.get_logger().info("pick log %s" % path)
+        except OSError as exc:
+            self.get_logger().warn("pick log not written: %s" % exc)
+
     def progress(self, i, n, key, text):
         self.step = key
+        log = getattr(self, "phase_log", None)
+        if log is not None:
+            log.mark(key)
         self.say(f"{i}/{n} {text}")
         h = self.goal_handle
         if h is not None:
@@ -900,14 +989,22 @@ class PickPlace(Node):
 
     def do_pick_bag(self, obj):
         """Bag on the floor (table_z): hold its top part `obj`, lift, carry it at the side.
-        obj height NaN (grasp_pose z NaN): the top is found by touch first (probe_bag)."""
+        obj height NaN (grasp_pose z NaN): the top is found by touch first (probe_bag),
+        unless gripper_camera.json is calibrated, in which case bag_default_top is used."""
         if self.holding:
             raise Failed("ถือของอยู่แล้ว: สั่งวางก่อน", "HOLDING")
         if self.get_parameter("bag_method").value == "camera":
             return self.cam.pick(obj)
         probed = False
         if top_unknown(obj.size[2]):
-            obj, probed = self.probe_bag(obj), True
+            path = os.path.expanduser(str(self.get_parameter("gripper_camera_file").value))
+            if gripper_camera_calibrated(path):
+                top = float(self.get_parameter("bag_default_top").value)
+                self.get_logger().info(
+                    "gripper_camera.json is calibrated: skipping the 0.02 m/s touch probe, top %.3f m" % top)
+                obj = Box(obj.x, obj.y, obj.yaw, (obj.size[0], obj.size[1], top))
+            else:
+                obj, probed = self.probe_bag(obj), True
         p = lambda n: float(self.get_parameter(n).value)
         depth = p("bag_probe_grip_depth") if probed else None
         # The jaws open fully (JAW_G_MAX, 7.5 cm) over the part; a miss (jaws close on nothing) is tried again
@@ -946,7 +1043,7 @@ class PickPlace(Node):
             raise Failed(f"จับถุงไม่ได้ใน {len(shifts)} ครั้ง (ก้ามหุบโดนแต่อากาศ)", "MISSED")
         self.holding = plan
         self.progress(6, 6, "carry", "ยกถุงไปถือไว้ข้างตัว...")
-        self.line(carry["path"], "ยกถุงไปถือ", p("bag_speed"), self.planner.CARRY_STEP)
+        self.line(carry["path"], "ยกถุงไปถือ", self.active_speeds()["bag_speed"], self.planner.CARRY_STEP)
         bottom = self.planner.held_point(carry["q"], plan)[2] - hang - self.table_z
         how = " ถือด้วยน้ำหนัก ก้ามอ่านว่าหุบ (held by weight, jaws read closed)" if plan.get("by_weight") else ""
         return f'ถือถุงอยู่ ({plan["mode"]}) ก้นถุงสูงจากพื้นประมาณ {bottom * 100:.0f} ซม.{how}'
@@ -1112,7 +1209,7 @@ class PickPlace(Node):
                 self.line(list(reversed(s["approach"][:k - 1])) + [s["pre"]], "ขึ้นกลับท่าเหนือถุง")
             free = self.weight_loads("empty jaws above the bag (from below)")
         self.progress(3, n, "approach", "ลงไปที่ของ...")
-        self.line(s["approach"], "ลงไปที่ของ")
+        self.straight(s["approach"], "ลงไปที่ของ")
         if "hang" in plan:               # a bag: where the open gap really is, before closing
             c = plan["grasp_centre"]
             cd = plan["close_dir"]
@@ -1150,7 +1247,7 @@ class PickPlace(Node):
         if plan.get("by_weight"):        # at the pre-grasp pose already: on to the lift's end, where the carry starts
             self.line(self.planner.joint_path(s["pre"], s["lift"][-1], plan), "ยกขึ้น", None, self.planner.CARRY_STEP)
         else:
-            self.line(s["lift"], "ยกขึ้น")
+            self.straight(s["lift"], "ยกขึ้น")
         if self.on_lifted:
             self.on_lifted()
 
@@ -1159,7 +1256,7 @@ class PickPlace(Node):
         obj = self.boxes[OBJ]
         if path:
             self.progress(first, n, "move_above_target", "พาถุงไปเหนือจุดวาง...")
-            self.line(path, "พาถุงไปเหนือจุดวาง", float(self.get_parameter("bag_speed").value),
+            self.line(path, "พาถุงไปเหนือจุดวาง", self.active_speeds()["bag_speed"],
                       self.planner.CARRY_STEP)
         else:
             self.progress(first, n, "move_above_target", "ไปเหนือจุดวาง (MoveIt)...")
