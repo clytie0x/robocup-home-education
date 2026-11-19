@@ -342,12 +342,12 @@ def find_bag(im, segmenter=None):
                 if blob is not None:
                     return blob
 
-    # Fallback 1: color-agnostic floor-difference foreground
+    # Fallback 1: color-agnostic floor-difference foreground (reject huge background blobs)
     fg = floor_diff_mask(im, orange)
     comp = _largest_component(fg, im.shape[1])
     if comp is not None:
         blob = _blob_from_mask(comp, orange, "floor-diff")
-        if blob is not None:
+        if blob is not None and (blob["x1"] - blob["x0"]) <= im.shape[1] * 0.72 and blob["area"] <= im.shape[0] * im.shape[1] * 0.45:
             return blob
 
     # Fallback 2: legacy pink/red HSV mask

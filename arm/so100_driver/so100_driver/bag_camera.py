@@ -408,7 +408,7 @@ class CameraBag:
                 f"front camera bag: centre fwd {c[0]:.3f} left {c[1]:+.3f} (from the {loc['from']}; goal fwd {f:.3f} "
                 f"left {l:+.3f}, {off * 100:.1f} cm apart); rim width {width if width else float('nan'):.3f} m, "
                 f"standing {loc['standing']} (top seen {loc.get('top_seen_h', float('nan')):.2f} m)")
-            if loc["standing"] is False or (width is not None and not 0.65 * want < width < 1.5 * want):
+            if loc["standing"] is False or (width is not None and not 0.55 * want < width < 2.2 * want):
                 raise Failed(f"ถุงล้มหรือไม่ได้ตั้งหันหน้าเข้าหุ่น (กล้องเห็นขอบปากถุงกว้าง {(width or 0) * 100:.0f} "
                              f"ซม. ควรราว {want * 100:.0f}): ตั้งถุงใหม่แล้วสั่งอีกครั้ง", "FAILED")
             if off > GOAL_TOL:
