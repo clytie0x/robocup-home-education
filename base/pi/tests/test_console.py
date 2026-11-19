@@ -1027,5 +1027,102 @@ class MissionModesTest(unittest.TestCase):
         self.assertIn("mission", err)
 
 
+class RobotPageTest(unittest.TestCase):
+    """The Robot page's state, an idle run, the measured bag, and a finished log on the Data tab."""
+
+    setUp, tearDown, request = HttpTest.setUp, HttpTest.tearDown, HttpTest.request
+
+    def test_idle_run_is_200_and_does_not_ask_the_run(self):
+        asked = []
+
+        def fetch(url, body=None, timeout=None):
+            asked.append(url)
+            raise OSError("the run must not be asked while idle")
+
+        self.console.fetch = fetch
+        code, body = self.request("/api/run")
+        self.assertEqual(code, 200)
+        data = json.loads(body)
+        self.assertEqual(data.get("state"), "idle")
+        self.assertNotIn("error", data)
+        code, body = self.request("/api/state")
+        state = json.loads(body)
+        self.assertEqual(state["run"], {"state": "idle"})
+        self.assertEqual(asked, [])
+        self.assertIsInstance(state["events"], list)
+        drop = state["drop"]
+        self.assertIn("y", drop)
+        if drop.get("x") is not None:
+            self.assertGreaterEqual(drop["x"], drop["x_min"])
+            self.assertLessEqual(drop["x"], drop["x_max"])
+            self.assertNotEqual(drop["x"], 0.31)
+
+    def test_the_page_serves_the_robot_tab_and_one_local_library(self):
+        code, page = self.request("/")
+        self.assertEqual(code, 200)
+        self.assertIn(b'id="tab-robot"', page)
+        self.assertIn(b"/preact-htm.js", page)
+        self.assertNotIn(b"unpkg.com", page)
+        self.assertNotIn(b"jsdelivr", page)
+        code, lib = self.request("/preact-htm.js")
+        self.assertEqual(code, 200)
+        self.assertIn(b"preact", lib)
+        self.assertIn(b"htm", lib)
+        code, app = self.request("/app.js")
+        self.assertEqual(code, 200)
+        self.assertNotIn(b"x: 0.36", app)
+        self.assertNotIn(b"x: 0.31", app)
+
+    def test_stop_is_kept_on_the_event_list(self):
+        self.assertEqual(self.request("/api/stop", {})[0], 200)
+        events = json.loads(self.request("/api/state")[1])["events"]
+        self.assertTrue(any(e["text"] == "/api/stop ok" and e["level"] == "info" for e in events))
+
+    def test_a_front_camera_handle_is_the_bag_not_a_fixed_x(self):
+        self.console.devices.held = False
+        self.console.devices.scan.put([(0.44, 0.02), (0.45, 0.03)], self.console.devices.clock())
+        self.console._ask_front_camera = lambda points: {"ok": True, "handle": [0.44, 0.02], "top": 0.25, "yaw": 0.1}
+        self.console.probe_bag()
+        self.assertEqual(self.console.bag["source"], "front-camera")
+        self.assertEqual(self.console.bag["x"], 0.44)
+        self.assertNotEqual(self.console.bag["x"], 0.36)
+        bag = json.loads(self.request("/api/state")[1])["bag"]
+        self.assertEqual((bag["source"], bag["x"], bag["top"]), ("front-camera", 0.44, 0.25))
+
+    def test_lidar_is_used_only_when_the_camera_has_no_handle(self):
+        self.console.devices.held = False
+        self.console.devices.scan.put([(0.50, 0.0)], self.console.devices.clock())
+        self.console._ask_front_camera = lambda points: {"ok": False, "why": "no bag"}
+        self.console.probe_bag()
+        self.assertEqual(self.console.bag["source"], "lidar")
+        self.assertAlmostEqual(self.console.bag["x"], 0.5, places=2)
+        self.assertNotEqual(self.console.bag["x"], 0.36)
+        self.console._set_bag(0.44, 0.02, 0.25, None, "front-camera", time.time())
+        self.console.probe_bag()
+        self.assertEqual(self.console.bag["source"], "front-camera")
+        self.assertEqual(self.console.bag["x"], 0.44)
+
+    def test_usb_snap_is_one_jpeg(self):
+        self.assertEqual(self.request("/usb-snap")[0], 503)
+        self.console.jetson.webcam_snap = lambda: (200, b"\xff\xd8\xff", "image/jpeg")
+        code, body = self.request("/usb-snap")
+        self.assertEqual((code, body[:2]), (200, b"\xff\xd8"))
+
+    def test_data_tab_imports_a_finished_run_after_14_nov(self):
+        self.console.db_path = Path(self.tmp.name) / "robot.db"
+        name = "20261119-132600"
+        folder = Path(self.tmp.name) / name
+        folder.mkdir()
+        lines = [
+            json.dumps({"time": 1.0, "pose": [0.0, 0.0, 0.0], "v": 0.0, "w": 0.0}),
+            json.dumps({"time": 2.0, "pose": [0.1, 0.0, 0.0], "v": 0.1, "w": 0.0}),
+            json.dumps({"time": 3.0, "end": "done: stopped"}),
+        ]
+        (folder / "log.jsonl").write_text("\n".join(lines) + "\n")
+        code, body = self.request("/api/data/runs")
+        self.assertEqual(code, 200)
+        self.assertIn(name, [r["run_id"] for r in json.loads(body)["runs"]])
+
+
 if __name__ == "__main__":
     unittest.main()

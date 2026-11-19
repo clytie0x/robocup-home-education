@@ -24,6 +24,7 @@
   <header id="top" class="desk-only">
     <div class="brand"><b>H</b>HMC Robot Console</div>
     <nav id="desk-tabs" aria-label="ส่วนต่างๆ">
+      <a href="#robot" data-tab="robot">Robot</a>
       <a href="#overview" data-tab="overview">ภาพรวม</a>
       <a href="#task" data-tab="task">งาน</a>
       <a href="#jetson" data-tab="jetson">Jetson</a>
@@ -59,8 +60,31 @@
   </div>
 
   <main>
+    <!-- Robot: the default. The views stay outside the Preact tree (see #robot-root). -->
+    <section class="tab" id="tab-robot">
+      <div class="robot-views">
+        <div class="panel">
+          <div class="ph">Xtion<span class="num">/stream</span></div>
+          <div class="slot" data-slot="cam"></div>
+        </div>
+        <div class="panel">
+          <div class="ph">Arm webcam<span class="num">/usb-stream</span></div>
+          <div class="slot" data-slot="webcam"></div>
+        </div>
+        <div class="panel">
+          <div class="ph">Jetson snapshot<span class="num">:8082/snap.jpg</span></div>
+          <div class="cam snap"><img id="img-snap" alt="Jetson camera snapshot"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="ph">LiDAR<span class="num">/scan</span></div>
+        <div class="slot fill" data-slot="lidar"></div>
+      </div>
+      <div id="robot-root"></div>
+    </section>
+
     <!-- Overview -->
-    <section class="tab" id="tab-overview">
+    <section class="tab" id="tab-overview" hidden>
       <div class="ov-grid">
         <div class="ov-main">
           <div class="panel phone-only" id="ov-state">
@@ -290,8 +314,8 @@
           <button type="button" class="btn" data-arm="home">Home</button>
           <button type="button" class="btn" data-arm="rest">Rest</button>
           <button type="button" class="btn" data-arm="center">Center</button>
-          <button type="button" class="btn pri" data-arm="pick-front" title="หยิบถุงที่วางหน้าหุ่น (กล้องหน้า yolo11s-seg, x=0.36)">หยิบถุงหน้าหุ่น</button>
-          <button type="button" class="btn" data-arm="drop-front" title="วางถุงลงพื้นหน้าหุ่น (x=0.36)">วางถุง</button>
+          <button type="button" class="btn pri" data-arm="pick-front" title="Pick the bag at the measured front-camera position">หยิบถุงหน้าหุ่น</button>
+          <button type="button" class="btn" data-arm="drop-front" title="Drop the bag at the measured position, or the reachable default">วางถุง</button>
           <button type="button" class="btn" data-arm="torque-on">Torque on</button>
           <button type="button" class="btn" data-arm="torque-off" title="ปิดแรงบิดได้เฉพาะตอนแขนพัก (resting)">Torque off</button>
           <button type="button" class="btn" id="btn-arm-stop">Stop</button>
@@ -420,6 +444,7 @@
 
   <button type="button" id="stopbar" class="phone-only" hidden><i></i><span id="stopbar-text">STOP</span></button>
   <nav id="tabbar" class="phone-only" aria-label="แท็บ">
+    <a href="#robot" data-tab="robot"><svg width="20" height="20"><use href="#i-home"/></svg>Robot</a>
     <a href="#overview" data-tab="overview"><svg width="20" height="20"><use href="#i-home"/></svg>ภาพรวม</a>
     <a href="#live" data-tab="live"><svg width="20" height="20"><use href="#i-eye"/></svg>ภาพสด</a>
     <a href="#task" data-tab="task"><svg width="20" height="20"><use href="#i-run"/></svg>งาน</a>
@@ -439,6 +464,8 @@
   </div>
   <div id="toast" hidden></div>
 
+  <script src="/preact-htm.js"></script>
+  <script src="/robot.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -49,7 +49,8 @@ States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, t
              bag counts as path), queue and start heading. "stop"/"wait" -> wait (paused),
              "go back"/"continue" -> resume; after RESUME_AFTER_S (20 s) it only asks (never moves by itself), "Going back to
              the start.". at_start -> dropping_bag (no arm: say "Here is your bag." -> done)
-  dropping_bag  sent drop_bag {"x": 0.31, "y": 0.0}. drop_done -> say "Here is your bag." -> done.
+  dropping_bag  sent drop_bag at DROP_AT (so100_ik.reachable_drop, not the old 0.31 m edge).
+                drop_done -> say "Here is your bag." -> done.
              drop_failed / timeout -> error
   done       "follow me" starts a new run
   error      on base_link_lost from following / pointing / at_car / picking / returning with no base_link_ok
@@ -76,7 +77,14 @@ import time
 READY, FOLLOWING, POINTING, AT_CAR, PICKING, RETURNING, DROPPING, DONE, ERROR = (
     "ready", "following", "pointing", "at_car", "picking", "returning", "dropping_bag", "done", "error")
 NEEDS_BASE = (FOLLOWING, POINTING, AT_CAR, PICKING, RETURNING)  # a lost Pi link here is an error; not after at_start
-DROP_AT = {"x": 0.31, "y": 0.0}  # m, robot frame: where the arm puts the bag down at the start
+def _drop_at():
+    """Where the arm puts the bag down, from the arm's reach, not a fixed 0.31 m."""
+    import so100_ik
+    found = so100_ik.reachable_drop()
+    return {"x": found["x"], "y": found["y"]}
+
+
+DROP_AT = _drop_at()  # m, robot frame: reachable place at the start of the task
 MAX_BAG_TRIES = 3  # bag_failed answered with "point again" this many times in a row, then at_car
 RETRY_CODES = ("NOT_POINTED", "NO_BAG", "BLOCKED", "TIMEOUT", "LOST_BAG")  # the Pi looked: point again
 REMEASURE_CODES = ("MISSED", "NOT_FOUND")  # a grab that missed: the Pi measures the bag once more
