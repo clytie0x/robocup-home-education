@@ -31,7 +31,8 @@ let run = null;        // the newest /api/run while a task runs
 let bank = null;       // the newest /api/bank
 let arm = null;        // the newest /api/arm while the Jetson tab is open
 let tab = "overview";
-let choice = { mode: "dry", speed: null, minutes: 5, virtual: false };
+const MISSION_TEXT = { follow_only: "ตามคนอย่างเดียว", bag_only: "หาและหยิบถุง", full: "โจทย์จริง HMC" };
+let choice = { mode: "dry", mission: "full", speed: null, minutes: 5, virtual: false };
 
 // ------------------------------------------------------------ helpers
 
@@ -321,7 +322,10 @@ function renderRunParts() {
   setHTML($("task-kv3"), [["ระยะคน", f && f.op != null ? fixed(f.op, 2) : "-", "m"],
     ["ความเร็ว", f && f.v != null ? fixed(f.v, 2) : "-", "m/s"], ["ใกล้สุด", f && f.near != null ? fixed(f.near, 2) : "-", "m"]]
     .map(([k, v, u]) => `<div><span>${k}</span><b>${v}<small>${u}</small></b></div>`).join(""));
-  $("cmds").hidden = !task;
+  const job = jobOf(state);
+  const activeMission = (task && job && job.meta && job.meta.mission) || "full";
+  $("cmds").hidden = !task || activeMission === "bag_only";
+  $("bag-cmds").hidden = !task || activeMission === "follow_only";
   $("idle-cmds").hidden = task;
   for (const b of $("idle-cmds").querySelectorAll("button")) b.disabled = jobRunning(state);
   const ready = !!(f && f.r);
@@ -780,6 +784,7 @@ function segment(id, onPick) {
     onPick(b.dataset.value);
   });
 }
+segment("seg-mission", (v) => { choice.mission = v; updateStartButton(); });
 segment("seg-mode", (v) => { choice.mode = v; updateStartButton(); });
 segment("seg-speed", (v) => { choice.speed = Number(v); });
 segment("seg-minutes", (v) => { choice.minutes = Number(v); });
@@ -787,7 +792,8 @@ segment("seg-person", (v) => { choice.virtual = v === "virtual"; $("virtual-fiel
 $("virtual-host").value = storeGet("virtual-host") || "";
 
 function updateStartButton() {
-  $("btn-start-task").textContent = (choice.mode === "drive" ? "เริ่มงาน (ขับจริง" : "เริ่มงาน (ทดลอง") +
+  const m = MISSION_TEXT[choice.mission] || "เริ่มงาน";
+  $("btn-start-task").textContent = `${m} (${choice.mode === "drive" ? "ขับจริง" : "ทดลอง"}` +
     (choice.virtual ? " คนเสมือน)" : ")");
 }
 
@@ -826,7 +832,7 @@ $("btn-start-task").addEventListener("click", async () => {
   const drive = choice.mode === "drive";
   if (!choice.speed) { toast("params.json ไม่อนุญาตความเร็วใดเลย", true); return; }
   if (drive && !(await confirmBox("เริ่มขับจริงไหม", "หุ่นจะเคลื่อนที่ พื้นที่โล่งและสายไฟปลอดภัยแล้วใช่ไหม", "ใช่ เริ่มเลย", true))) return;
-  const body = { drive, speed: choice.speed, minutes: choice.minutes };
+  const body = { drive, mission: choice.mission, speed: choice.speed, minutes: choice.minutes };
   if (choice.virtual) {
     const host = $("virtual-host").value.trim();
     body.virtual = true;
@@ -834,13 +840,29 @@ $("btn-start-task").addEventListener("click", async () => {
     storeSet("virtual-host", host);
   }
   const r = await post("/api/task/start", body);
-  if (r && !r.error) toast(drive ? "เริ่มงานแล้ว หุ่นรอ Follow" : "เริ่มทดลองแล้ว");
+  if (r && !r.error) {
+    const msg = choice.mission === "bag_only" ? "เริ่มหาและหยิบถุงแล้ว"
+      : choice.mission === "follow_only" ? "เริ่มเดินตามคนอย่างเดียวแล้ว"
+      : (drive ? "เริ่มโจทย์จริงแล้ว หุ่นรอ Follow" : "เริ่มทดลองแล้ว");
+    toast(msg);
+  }
 });
 
 for (const b of document.querySelectorAll("[data-command]")) {
   b.addEventListener("click", async () => {
     const r = await post("/api/run/command", { command: b.dataset.command });
     if (r && !r.error) { toast(`ส่ง ${b.textContent.trim()} แล้ว`); fetchRun(); } // this tab's heartbeat starts now
+  });
+}
+
+for (const b of document.querySelectorAll("[data-arm-cmd]")) {
+  b.addEventListener("click", async () => {
+    const cmd = b.dataset.armCmd;
+    const payload = cmd === "drop_bag" ? { cmd, x: 0.31, y: 0.0 } : { cmd };
+    b.disabled = true;
+    const r = await post("/api/arm", payload);
+    if (r && !r.error) toast(`สั่ง${b.textContent.trim()}สำเร็จ`);
+    b.disabled = false;
   });
 }
 

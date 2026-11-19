@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 
 BAG_CLASSES = (24, 26, 28)  # COCO: backpack, handbag, suitcase
-SEG_CONF = 0.20
+SEG_CONF = 0.12  # downward-angled close-up bags score 0.19-0.26 on COCO; background < 0.05
 SEG_IOU = 0.45
 DEFAULT_SEG_ENGINE = os.path.expanduser("~/hmc-follow/models/yolo11s-seg_480x640.engine")
 
@@ -245,17 +245,29 @@ class _TrtBagSegmenter:
         ], axis=1)
         coeffs = sub[:, 4 + nc:]
         order = np.argsort(-scores)
+        picked = []
+        while order.size and len(picked) < 5:
+            i = int(order[0])
+            picked.append(i)
+            rest = order[1:]
+            xx1 = np.maximum(boxes[i, 0], boxes[rest, 0])
+            yy1 = np.maximum(boxes[i, 1], boxes[rest, 1])
+            xx2 = np.minimum(boxes[i, 2], boxes[rest, 2])
+            yy2 = np.minimum(boxes[i, 3], boxes[rest, 3])
+            inter = np.clip(xx2 - xx1, 0, None) * np.clip(yy2 - yy1, 0, None)
+            area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+            order = rest[inter / (area[i] + area[rest] - inter + 1e-9) <= SEG_IOU]
         protos = proto[0]
         results = []
-        for idx in order[:5]:
-            raw_m = np.tensordot(coeffs[int(idx)], protos, axes=(0, 0))
+        for idx in picked:
+            raw_m = np.tensordot(coeffs[idx], protos, axes=(0, 0))
             prob = 1.0 / (1.0 + np.exp(-np.clip(raw_m, -30.0, 30.0)))
             full_m = _resize_proto_to_frame(prob, (self._h, self._w), pad_hw, frame_hw)
-            bx1, by1, bx2, by2 = (int(round(v)) for v in boxes[int(idx)])
+            bx1, by1, bx2, by2 = (int(round(v)) for v in boxes[idx])
             mask = np.zeros((fh, fw), np.uint8)
             if bx2 > bx1 and by2 > by1:
                 mask[by1:by2, bx1:bx2] = (full_m[by1:by2, bx1:bx2] > 0.5).astype(np.uint8)
-            results.append((float(scores[int(idx)]), boxes[int(idx)], mask))
+            results.append((float(scores[idx]), boxes[idx], mask))
         return results
 
 

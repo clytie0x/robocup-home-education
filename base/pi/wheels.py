@@ -22,6 +22,8 @@ REVERSE_TURN_MAX = 0.05  # rad/s: send_reverse backs straight, the only path rea
 # E# (base firmware 0c020e4 on). It answers in a few ms; the old firmware has no E# and answers nothing,
 # so the read waits only this long, not the port's 0.2 s (a cycle is 0.1 s).
 STATUS_TIMEOUT = 0.05  # s
+ODOM_TIMEOUT = 0.05  # s, background O# poll timeout (keeps the 25 Hz watchdog responsive)
+ODOM_MAX_AGE = 0.25  # s, oldest cached pose accepted by cached_odom() before flagging stale
 FAULT_LEFT, FAULT_RIGHT, NO_COMMAND = 0x01, 0x02, 0x04  # E#'s flags: an encoder fault cuts the motors
 # Wheels that do not turn (2026-11-14: the motor supply died, the firmware cut the motors and run_follow
 # commanded 0.114 m/s for 60 s). A command at least STALL_V or STALL_W for STALL_TIME moves the base well
@@ -69,6 +71,16 @@ def least(v, w, error=None):
         if abs(w) < MIN_TURN:
             w = math.copysign(MIN_TURN, w)
     return v, w
+
+
+def clamp_curvature(v, w, p):
+    """Scale (v, w) by the same factor when either exceeds the base's limits, preserving turning radius (v / w)."""
+    if not (math.isfinite(v) and math.isfinite(w)):
+        return v, w
+    sv = (v / p["max_speed"]) if (v > 0 and p["max_speed"] > 0) else 0.0
+    sw = (abs(w) / p["max_turn_rate"]) if p["max_turn_rate"] > 0 else 0.0
+    scale = max(1.0, sv, sw)
+    return v / scale, w / scale
 
 
 def packet(v, w, p):
@@ -183,7 +195,7 @@ def true_step(pose, before, after, p):
 class Wheels:
     """Repeats the latest packet and stops the base when send() goes quiet."""
 
-    def __init__(self, p, port=None, clock=time.monotonic, start_thread=True):
+    def __init__(self, p, port=None, clock=time.monotonic, start_thread=True, poll_odom=False):
         if port is None:
             console_gate.require("wheels")
             import serial
@@ -192,11 +204,14 @@ class Wheels:
             port = serial.Serial(WHEEL_PORT, BAUD, timeout=0.2, write_timeout=0.1, parity=serial.PARITY_EVEN,
                                  dsrdtr=False, rtscts=False)
         self.p, self.port, self.clock = p, port, clock
+        self.poll_odom = poll_odom
         self.lock = threading.Lock()
         self.last = b"S#"
         self.sent_at = clock()
         self._raw = None  # the firmware's last (x, y, th)
         self._pose = None  # the true pose built from it, step by step (true_step)
+        self._odom_at = None  # clock() of the newest valid pose
+        self._odom_err = None  # last error from background polling
         self._write_stop()  # a base left driving by a crashed run stops as soon as we open the port
         self.done = threading.Event()
         self.thread = None
@@ -207,6 +222,8 @@ class Wheels:
     def _run(self):
         while not self.done.wait(PERIOD):
             self.tick()
+            if self.poll_odom:
+                self.poll_odom_once()
 
     def _write_stop(self):
         """S# several times. The caller holds the lock, except in __init__ where nobody else can."""
@@ -243,6 +260,49 @@ class Wheels:
             self.port.write(data)
         return data
 
+    def _accept_odom(self, line):
+        raw = parse_odom(line)
+        if self._raw is not None and (math.hypot(raw[0] - self._raw[0], raw[1] - self._raw[1]) > STEP_MAX
+                                      or abs(raw[2] - self._raw[2]) > TURN_MAX):
+            raise ValueError("jump from %s to %s" % (self._raw, raw))
+        if self._pose is None:  # the first reading: start where the old scaling put it
+            d = self.p["odom_distance_scale"]
+            self._pose = (raw[0] / d, raw[1] / d, raw[2] / self.p["odom_yaw_scale"])
+        else:
+            self._pose = true_step(self._pose, self._raw, raw, self.p)
+        self._raw = raw
+        self._odom_at = self.clock()
+        self._odom_err = None
+        return self._pose
+
+    def poll_odom_once(self):
+        """One short-timeout O# read for the background thread; updates cached pose or stores error."""
+        timeout = getattr(self.port, "timeout", 0.2)
+        try:
+            with self.lock:
+                self.port.reset_input_buffer()
+                self.port.timeout = ODOM_TIMEOUT
+                self.port.write(b"O#")
+                line = self.port.read_until(b"#").decode("ascii", "replace")
+                return self._accept_odom(line)
+        except Exception as err:
+            self._odom_err = str(err)
+            return None
+        finally:
+            with self.lock:
+                self.port.timeout = timeout
+
+    def cached_odom(self, max_age=ODOM_MAX_AGE):
+        """Latest pose from the background poller without waiting on serial (falls back to read_odom if not polling)."""
+        if not self.poll_odom:
+            return self.read_odom()
+        if self._pose is None:
+            return self.read_odom()
+        age = self.clock() - self._odom_at
+        if age > max_age:
+            raise ValueError(f"odometry stale ({age:.2f} s > {max_age:.2f} s; {self._odom_err})")
+        return self._pose
+
     def read_odom(self):
         line = ""
         for _ in range(4):
@@ -251,20 +311,10 @@ class Wheels:
                 self.port.write(b"O#")
             line = self.port.read_until(b"#").decode("ascii", "replace")
             try:
-                raw = parse_odom(line)
-            except ValueError:
+                return self._accept_odom(line)
+            except ValueError as err:
+                line = str(err)
                 continue
-            if self._raw is not None and (math.hypot(raw[0] - self._raw[0], raw[1] - self._raw[1]) > STEP_MAX
-                                          or abs(raw[2] - self._raw[2]) > TURN_MAX):
-                line = "jump from %s to %s" % (self._raw, raw)
-                continue
-            if self._pose is None:  # the first reading: start where the old scaling put it
-                d = self.p["odom_distance_scale"]
-                self._pose = (raw[0] / d, raw[1] / d, raw[2] / self.p["odom_yaw_scale"])
-            else:
-                self._pose = true_step(self._pose, self._raw, raw, self.p)
-            self._raw = raw
-            return self._pose
         raise ValueError(f"bad odom {line!r}")
 
     def read_status(self):

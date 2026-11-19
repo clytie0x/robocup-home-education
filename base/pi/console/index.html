@@ -160,8 +160,14 @@
     <!-- Task -->
     <section class="tab" id="tab-task" hidden>
       <div id="task-start" class="panel form">
-        <div class="ph">เริ่มงาน<span>เดินตามคน แล้วกลับจุดเริ่ม</span></div>
-        <label class="field-label">โหมด</label>
+        <div class="ph">เริ่มงาน<span>เลือกโหมดทดสอบหรือทำโจทย์จริง</span></div>
+        <label class="field-label">ประเภทภารกิจ</label>
+        <div class="seg" id="seg-mission">
+          <button type="button" data-value="follow_only">ตามคนอย่างเดียว<small>เดินตามเท่านั้น ไม่หยิบถุง</small></button>
+          <button type="button" data-value="bag_only">หาและหยิบถุง<small>ไปหาถุงหน้าหุ่นแล้วหยิบ</small></button>
+          <button type="button" data-value="full" class="on">ทำโจทย์จริง (HMC)<small>จำคน → ตาม → หยิบ → กลับ</small></button>
+        </div>
+        <label class="field-label">โหมดการขับ</label>
         <div class="seg" id="seg-mode">
           <button type="button" data-value="dry" class="on">ทดลอง<small>ล้อไม่หมุน</small></button>
           <button type="button" data-value="drive">ขับจริง<small>หุ่นเคลื่อนที่</small></button>
@@ -385,6 +391,12 @@
         <button type="button" class="btn" data-command="wait"><svg width="15" height="15"><use href="#i-pause"/></svg>Wait</button>
         <button type="button" class="btn" data-command="resume"><svg width="15" height="15"><use href="#i-run"/></svg>Resume</button>
         <button type="button" class="btn" data-command="return"><svg width="15" height="15"><use href="#i-back"/></svg>Back</button>
+      </div>
+      <div class="cmds" id="bag-cmds" hidden>
+        <button type="button" class="btn" data-command="bag_near">หาถุงใกล้สุด</button>
+        <button type="button" class="btn" data-command="bag">หาถุง (ชี้)</button>
+        <button type="button" class="btn pri" data-arm-cmd="pick_bag">หยิบถุง</button>
+        <button type="button" class="btn" data-arm-cmd="drop_bag">วางถุง</button>
       </div>
       <div class="btnrow" id="idle-cmds">
         <button type="button" class="btn pri" id="btn-go-task-desk"><svg width="16" height="16"><use href="#i-run"/></svg>เริ่มงาน</button>

@@ -335,5 +335,28 @@ class Least(unittest.TestCase):
         self.assertTrue(math.isnan(w))
 
 
+class CurvatureAndBgOdom(unittest.TestCase):
+    def test_clamp_curvature_preserves_turning_radius(self):
+        p = dict(P, max_speed=0.12, max_turn_rate=0.48)
+        v, w = wheels.clamp_curvature(0.12, 0.96, p)  # w is 2x limit -> both halve
+        self.assertAlmostEqual(v, 0.06, places=6)
+        self.assertAlmostEqual(w, 0.48, places=6)
+        self.assertAlmostEqual(v / w, 0.12 / 0.96, places=6)
+        self.assertEqual(wheels.clamp_curvature(0.10, -0.20, p), (0.10, -0.20))
+
+    def test_background_odom_returns_cached_and_rejects_stale(self):
+        port, clock = FakePort(), Clock()
+        w = wheels.Wheels(P, port=port, clock=clock, start_thread=False, poll_odom=True)
+        pose = w.poll_odom_once()
+        self.assertIsNotNone(pose)
+        clock.now = 0.10
+        written_before = len(port.written)
+        self.assertEqual(w.cached_odom(), pose)
+        self.assertEqual(len(port.written), written_before)  # zero serial wait
+        clock.now = 0.40
+        with self.assertRaises(ValueError):
+            w.cached_odom(max_age=0.25)
+
+
 if __name__ == "__main__":
     unittest.main()

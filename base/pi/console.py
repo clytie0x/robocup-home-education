@@ -86,6 +86,8 @@ FILES = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
 COMMANDS = ("follow", "wait", "resume", "return", "bag", "bag_again", "bag_near")
+MISSIONS = ("full", "follow_only", "bag_only")
+MISSION_LABEL = {"full": "โจทย์จริง HMC", "follow_only": "ตามคนอย่างเดียว", "bag_only": "หาและหยิบถุง"}
 NO_PIN = ("/api/stop", "/api/arm/stop", "/api/bank/full", "/api/bank/reading")  # STOPs, and the owner's battery marks
 CLIENT = re.compile(r"^[\w.@:%-]{1,64}$")  # a program's name (X-HMC-Client), e.g. robotctl's "xohm@192.168.31.50"
 ARM_CMDS = ("home", "rest", "center", "torque", "pick_bag", "drop_bag", "bagpick")
@@ -120,18 +122,22 @@ NEED_PIN_VIRTUAL = ("ตั้ง PIN ก่อน ถึงจะทดสอ�
 
 # ---------------------------------------------------------------- jobs
 
-def task_command(drive, speed, minutes, p, py=sys.executable, virtual=None):
+def task_command(drive, speed, minutes, p, py=sys.executable, virtual=None, mission="full"):
     """(argv, None) for run_follow, or (None, why not). virtual: the PC's IPv4 address for a virtual operator run."""
     if not isinstance(drive, bool):
         return None, "drive takes true or false"
+    if mission not in MISSIONS:
+        return None, "mission must be one of %s" % ", ".join(MISSIONS)
     if isinstance(speed, bool) or speed not in SPEEDS:
         return None, "top speed must be one of %s m/s" % ", ".join("%.2f" % s for s in SPEEDS)
     if speed > p["max_speed"] + 1e-9:
         return None, "%.2f m/s is above max_speed %.2f in params.json" % (speed, p["max_speed"])
     if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or not 0 < minutes <= MINUTES_MAX:
         return None, "length must be 1 to %d minutes" % MINUTES_MAX
+    # follow_only omits --remote so Jetson hmc_flow / voice cannot trigger bag picking or interfere
+    remote_flag = [] if mission == "follow_only" else ["--remote"]
     run = [py, str(HERE / "run_follow.py")] + (["--drive"] if drive else []) + [
-        "--seconds", str(int(round(minutes * 60))), "--max-speed", "%.2f" % speed, "--remote",
+        "--seconds", str(int(round(minutes * 60))), "--max-speed", "%.2f" % speed, *remote_flag,
         "--dashboard-host", "127.0.0.1"]  # its page skips the PIN: only the console may reach it
     if virtual is not None:
         if not _one_computer(virtual):
@@ -1497,6 +1503,43 @@ class Console:
         code, answer = self.jetson.arm(out, timeout=ARM_JOB_TIMEOUT)
         return code, (dict(answer, sent=out) if isinstance(answer, dict) else answer)
 
+    def _bag_only_worker(self, drive):
+        """Auto-sequence for mission='bag_only': wait for run_follow -> send bag_near -> when reached, trigger pick_bag."""
+        deadline = self.clock() + 15.0
+        sent = False
+        while self.clock() < deadline:
+            job = self.jobs.status()
+            if not (job["running"] and job["job"] and job["job"]["kind"] == "task"):
+                return
+            try:
+                code, _ = self.fetch(self.run_url + "/command", {"command": "bag_near"}, timeout=2.0)
+                if code == 200:
+                    sent = True
+                    break
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.5)
+        if not sent:
+            return
+        # Poll until bag_near finishes (up to 120 s)
+        pick_deadline = self.clock() + 120.0
+        while self.clock() < pick_deadline:
+            job = self.jobs.status()
+            if not (job["running"] and job["job"] and job["job"]["kind"] == "task"):
+                return
+            try:
+                code, status = self.fetch(self.run_url + "/status?heartbeat=1", timeout=2.0)
+            except (OSError, ValueError):
+                time.sleep(0.5)
+                continue
+            if code == 200 and isinstance(status, dict):
+                result = ((status.get("record") or {}).get("bag_task") or {}).get("result")
+                if isinstance(result, dict) and "ok" in result:
+                    if result.get("ok") and drive:
+                        self.bag_job("pick_bag", {}, task=True)
+                    return
+            time.sleep(0.5)
+
     def stop_arm(self):
         """The arm's stop beside the base's STOP, best effort: a note, never an error, never waits long."""
         out = []
@@ -1590,21 +1633,27 @@ class Console:
             virtual = body.get("virtual", False)
             if not isinstance(virtual, bool):
                 return 400, {"error": "virtual takes true or false"}
+            mission = body.get("mission", "full")
             pc = (body.get("virtual_host") or client) if virtual else None  # the PC that sends the virtual person
-            cmd, error = task_command(body.get("drive"), body.get("speed"), body.get("minutes"), self.p, virtual=pc)
+            cmd, error = task_command(body.get("drive"), body.get("speed"), body.get("minutes"), self.p,
+                                      virtual=pc, mission=mission)
             if error:
                 return 400, {"error": error}
             if body["drive"] and self.pin is None:
                 return 403, {"error": NEED_PIN}
             if virtual and self.pin is None:
                 return 403, {"error": NEED_PIN_VIRTUAL}
-            label = "งาน%s%s %.2f m/s %s นาที" % ("ขับจริง" if body["drive"] else "ทดลอง", " คนเสมือน" if virtual else "",
-                                                 body["speed"], ("%g" % body["minutes"]))
+            m_tag = MISSION_LABEL.get(mission, mission)
+            label = "%s (%s%s %.2f m/s %s นาที)" % (
+                m_tag, "ขับจริง" if body["drive"] else "ทดลอง", " คนเสมือน" if virtual else "",
+                body["speed"], ("%g" % body["minutes"]))
             error = self.jobs.start("task", label, cmd, {"drive": body["drive"], "speed": body["speed"],
-                                                         "minutes": body["minutes"],
+                                                         "minutes": body["minutes"], "mission": mission,
                                                          "virtual": {"host": pc, "port": VIRTUAL_PORT} if virtual else None})
             if not error:
                 self.commander = None  # a new run: no tab leads it until one sends a command
+                if mission == "bag_only":
+                    threading.Thread(target=self._bag_only_worker, args=(body["drive"],), daemon=True).start()
             return (409 if error else 200), {"error": error}
         if path == "/api/check/start":
             try:

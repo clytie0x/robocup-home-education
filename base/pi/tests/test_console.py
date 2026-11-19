@@ -1007,5 +1007,25 @@ class GuardTest(unittest.TestCase):
         self.assertNotEqual(code, 0)
 
 
+class MissionModesTest(unittest.TestCase):
+    def test_follow_only_omits_remote_while_full_and_bag_only_keep_it(self):
+        p = {"max_speed": 0.12}
+        cmd_full, err = console.task_command(False, 0.08, 5, p, mission="full")
+        self.assertIsNone(err)
+        self.assertIn("--remote", cmd_full)
+
+        cmd_bag, err = console.task_command(False, 0.08, 5, p, mission="bag_only")
+        self.assertIsNone(err)
+        self.assertIn("--remote", cmd_bag)
+
+        cmd_follow, err = console.task_command(False, 0.08, 5, p, mission="follow_only")
+        self.assertIsNone(err)
+        self.assertNotIn("--remote", cmd_follow)
+
+        cmd_bad, err = console.task_command(False, 0.08, 5, p, mission="invalid")
+        self.assertIsNone(cmd_bad)
+        self.assertIn("mission", err)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -770,7 +770,12 @@ def cycle(state, now):
 
     # 1. Sensors. Broken odometry means we no longer know where we are: stop (Review Focus 5).
     try:
-        pose = state.wheels.read_odom() if state.wheels is not None else STILL
+        if state.wheels is None:
+            pose = STILL
+        elif hasattr(state.wheels, "cached_odom"):
+            pose = state.wheels.cached_odom()
+        else:
+            pose = state.wheels.read_odom()
     except (ValueError, OSError) as error:  # pyserial's SerialException is an OSError
         return _end(state, now, "odometry", error)
     if state.wheels is not None:
@@ -931,6 +936,8 @@ def cycle(state, now):
     if cycle_time > SLOW_CYCLE:
         return _end(state, now, "slow cycle", "%.2f s from cycle start to send" % cycle_time)
     if state.wheels is not None:
+        if v > 0:
+            v, w = wheels_module.clamp_curvature(v, w, p)
         try:
             state.wheels.send_reverse(-v, w) if v < 0 else state.wheels.send(v, w)  # backward only in an escape
         except (ValueError, OSError) as error:
@@ -1100,7 +1107,7 @@ def refusal(drive, max_speed, p):
 
 def open_wheels(drive, p):
     """The wheel port is opened only with --drive."""
-    return wheels_module.Wheels(p) if drive else None
+    return wheels_module.Wheels(p, poll_odom=True) if drive else None
 
 
 # Ctrl+C, kill, and SIGHUP from a dropped ssh session (SIGHUP does not exist on Windows).
