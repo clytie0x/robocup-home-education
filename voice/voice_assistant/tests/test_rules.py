@@ -73,3 +73,41 @@ def test_task_words_do_not_break_the_generic_commands():
 def test_fuzzy_match_still_fixes_a_misheard_follow_me():
     # whisper writes "Hollow me"; nothing matched above, so the sound-alike fallback takes it
     assert parser().parse("Hollow me")[0] == "follow_me"
+
+
+@pytest.mark.parametrize("sentence, params", [
+    ("take the blue bag", {"colour": "blue"}),
+    ("pick up the bag on the left", {"side": "left"}),
+    ("carry the navy bag on the right", {"colour": "blue", "side": "right"}),
+    ("take the bag", {}),
+])
+def test_a_bag_request_carries_its_colour_and_side(sentence, params):
+    assert parser().parse(sentence)[:2] == ("carry_bag", params)
+
+
+@pytest.mark.parametrize("sentence, params", [
+    ("the blue one", {"colour": "blue"}),
+    ("Red.", {"colour": "red"}),
+    ("left", {"side": "left"}),
+    ("the one on the right", {"side": "right"}),
+    ("the left one please", {"side": "left"}),
+    ("blue bag on the right", {"colour": "blue", "side": "right"}),
+    ("the grey one", {"colour": "grey"}),
+    ("the gray one", {"colour": "grey"}),
+])
+def test_a_short_answer_to_which_one_is_a_choice(sentence, params):
+    assert parser().parse(sentence)[:2] == ("carry_bag", dict(params, choice=True))
+
+
+@pytest.mark.parametrize("sentence, action", [
+    ("turn left", "turn"),
+    ("I like the red car", "none"),
+    ("go to the left door", "go_to"),
+    ("the one", "none"),
+])
+def test_other_sentences_with_a_colour_or_side_are_no_choice(sentence, action):
+    assert parser().parse(sentence)[0] == action
+
+
+def test_the_generic_launch_has_no_choice_answers():
+    assert parser(task_words=False).parse("the blue one")[0] == "none"

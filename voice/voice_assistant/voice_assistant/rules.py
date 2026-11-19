@@ -109,6 +109,38 @@ TASK_WORDS = [
 # at_car the flow asks "point at the bag, then say ready": its word for "go on with the bag" is carry_bag
 # (INTENT_KINDS maps carry_bag to its "done")
 TASK_ACK = {"ready", "done", "okay", "ok", "got it", "go ahead"}
+# Which bag (base/jetson/bag_choice.py names them so): a colour and / or a side ride on carry_bag as params
+# ("take the blue bag", "pick up the one on the left"); a short answer of only those words to the flow's
+# "Which one?" is carry_bag with "choice": true ("the blue one", "red", "the left one", "the one on the right")
+BAG_COLOURS = {"red": "red", "orange": "orange", "yellow": "yellow", "green": "green", "blue": "blue",
+               "navy": "blue", "purple": "purple", "violet": "purple", "pink": "pink", "magenta": "pink",
+               "brown": "brown", "white": "white", "grey": "grey", "gray": "grey", "silver": "grey", "black": "black"}
+BAG_SIDES = {"left": "left", "right": "right", "middle": "middle", "centre": "middle", "center": "middle"}
+_COLOUR_RX = R(r"\b(%s)\b" % "|".join(BAG_COLOURS))
+_SIDE_RX = R(r"\b(%s)\b" % "|".join(BAG_SIDES))
+CHOICE_ONLY = R(r"^(?:(?:the|that|this|please|okay|ok|um|uh)\s+)*(?:(?:%s)\b\s*)?(?:(?:%s)\b\s*)?"
+                r"(?:one|bag)?(?:\s*(?:on|in|at)\s+the\s+(?:%s))?(?:\s+(?:one|bag))?(?:\s+please)?$"
+                % ("|".join(BAG_SIDES), "|".join(BAG_COLOURS), "|".join(BAG_SIDES)))
+
+
+def bag_words(text):
+    """{"colour", "side"} named in a sentence (each only when said)."""
+    low = (text or "").lower()
+    out = {}
+    c, sd = _COLOUR_RX.findall(low), _SIDE_RX.findall(low)
+    if c:
+        out["colour"] = BAG_COLOURS[c[-1]]
+    if sd:
+        out["side"] = BAG_SIDES[sd[-1]]
+    return out
+
+
+def choice_answer(bare):
+    """params for a short answer that is only a bag's colour and / or side, else None."""
+    words = bag_words(bare)
+    if not words or len(bare.split()) > 6 or not CHOICE_ONLY.match(bare):
+        return None
+    return dict(words, choice=True)
 TASK_REPLY = {"go_back": "Okay, I will go back to the start.", "resume": "Okay, going on.",
               "carry_bag": "Okay, I will take the bag."}
 
@@ -180,6 +212,10 @@ class RuleParser:
         if NEG.search(low) and not re.search(r"don'?t move", low):
             return "none", {}, "Okay, I won't."
         if self.task_words:
+            answer = choice_answer(bare)
+            if answer is not None:
+                said = " ".join(answer.get(k) for k in ("colour", "side") if answer.get(k))
+                return "carry_bag", answer, "Okay, the %s one." % said
             if bare in TASK_ACK:
                 return "carry_bag", {}, TASK_REPLY["carry_bag"]
             for action, rx in TASK_WORDS:
@@ -196,7 +232,7 @@ class RuleParser:
             if action == "drop_bag":
                 return "drop_bag", {}, "Okay, dropping the bag."
             if action == "carry_bag":
-                return "carry_bag", {}, "Sure, I will carry the bag for you."
+                return "carry_bag", bag_words(low), "Sure, I will carry the bag for you."
             if action == "follow_me":
                 return "follow_me", {}, "Okay, I will follow you."
             if action == "turn":

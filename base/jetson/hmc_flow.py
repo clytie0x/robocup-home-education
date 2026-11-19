@@ -26,7 +26,16 @@ States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, t
              "carry the bag" (brain carry_bag, also in done and error with empty hands) -> bag first: follow_me,
              wait (the Pi takes find_bag only in FOLLOW after wait), then pointing. Its pick does not go back:
              done "I have the bag. Say follow me ..." holding it; "follow me" -> resume -> following carrying it;
-             there "stop" -> wait -> dropping_bag (hand it over), "go back" -> returning
+             there "stop" -> wait -> dropping_bag (hand it over), "go back" -> returning.
+             With the arm (close_pick, on by default) bag first looks first: choosing_bag.
+  choosing_bag  sent look_bags (bag_arm, bag_choice.py: the bags in the front camera, the arm does not move).
+             bags_seen: one bag in reach (or the one the colour / side said with "take the ... bag" names) ->
+             picking straight away, no base move; several -> "I see a blue bag on the left and a red bag on
+             the right. Which one?"; an answer (brain carry_bag with colour / side, "choice") -> picking.
+             A named bag that is not there is asked, never guessed. MAX_CHOICE_TRIES answers naming no single
+             bag, no bag in reach, bags_seen FAILED or none in LOOK_TIMEOUT -> the Pi's pointing (bag first).
+             Its pick holds the bag as bag first does; a MISSED grab looks again once for the same colour.
+             "stop" -> ready, "follow me" -> following.
   following  sent follow_me (Pi follow). Lost: say "Please come back." once, when /base/status "search"
              (base_bridge) ended without a lock, or after come_back_s (20 s) lost (each ask risks -150).
              "stop" / "wait" / "this is the car" / "we are here" (or "go back") -> wait (Pi wait),
@@ -80,6 +89,9 @@ import time
 
 READY, FOLLOWING, POINTING, AT_CAR, PICKING, RETURNING, DROPPING, DONE, ERROR = (
     "ready", "following", "pointing", "at_car", "picking", "returning", "dropping_bag", "done", "error")
+CHOOSING = "choosing_bag"  # bag first, close: the front camera's bags, "Which one?" (bag_arm look_bags)
+LOOK_TIMEOUT = 15.0  # s for bags_seen after look_bags, then the Pi's pointing
+MAX_CHOICE_TRIES = 2  # answers that name no single bag, then the Pi's pointing
 NEEDS_BASE = (FOLLOWING, POINTING, AT_CAR, PICKING, RETURNING)  # a lost Pi link here is an error; not after at_start
 DROP_AT = {"x": 0.31, "y": 0.0}  # m, robot frame: where the arm puts the bag down at the start
 MAX_BAG_TRIES = 3  # bag_failed answered with "point again" this many times in a row, then at_car
@@ -156,8 +168,14 @@ class HmcFlow:
 
     def __init__(self, use_arm=True, grab_timeout=90.0, drop_timeout=20.0, come_back_s=20.0, reask_s=15.0,
                  error_pi_cmd="end", start_text="Say follow me when you are ready.",
-                 point_text="Please point at the bag.", bag_timeout=180.0):
+                 point_text="Please point at the bag.", bag_timeout=180.0, close_pick=True):
         self.use_arm = use_arm
+        self.close_pick = close_pick  # bag first with the arm: look at the bags in the front camera before pointing
+        self.bags = []  # choosing_bag: the bags of the last bags_seen
+        self.wanted = {}  # choosing_bag: the colour / side said with "take the ... bag"
+        self.looking = False  # choosing_bag: look_bags sent, no bags_seen yet
+        self.choice_tries = 0
+        self.picked_close = None  # the bag picked from the front camera's list ({"colour", "side"}), or None
         self.grab_timeout, self.drop_timeout = grab_timeout, drop_timeout  # grab: the arm's pick (slow on purpose)
         # come_back_s: lost this long, ask the operator back even if the Pi's search has not ended (each ask
         # risks -150 in the rules, so not after a short gap)
@@ -199,7 +217,7 @@ class HmcFlow:
         if state == READY:
             out.append(("say", self.start_text))
         elif state == FOLLOWING:
-            self.bag_first = False  # a bag-first pick ends in done, never through following
+            self.bag_first, self.picked_close, self.looking = False, None, False  # a bag-first pick ends in done, never through following
             self.lost_since = None if self.person_visible else now
             self.come_back_said = self.pi_searched = False
             out.append(("say", "I will follow you."))
@@ -223,7 +241,7 @@ class HmcFlow:
         elif state == DONE:
             out.append(("say", msg or "Here is your bag."))
         elif state == ERROR:
-            self.bag_first = False
+            self.bag_first, self.picked_close, self.looking = False, None, False
             out += [self._cmd(self.error_pi_cmd),
                     ("say", (msg or "Sorry, something went wrong.") + " Say follow me to start again.")]
         return out
@@ -234,11 +252,72 @@ class HmcFlow:
         return [self._cmd("follow_me")] + self._goto(FOLLOWING, now)
 
     def _after_pick(self, now):
-        self.carrying = True
+        self.carrying, self.picked_close, self.remeasured = True, None, False
         if self.bag_first:  # picked before following: hold it and wait for "follow me" (the Pi stays waiting)
             self.bag_first = False
             return self._goto(DONE, now, "I have the bag. Say follow me and I will carry it for you.")
         return self._goto(RETURNING, now)
+
+    # ---------------- bag first, close: which one of the bags in the front camera ----------------
+    def _look(self, now, say="Let me look at the bags."):
+        self.looking, self.choice_tries, self.bags = True, 0, []
+        self.state, self.deadline = CHOOSING, now + LOOK_TIMEOUT
+        out = [("state", CHOOSING)] + ([("say", say)] if say else [])
+        return out + [self._cmd("look_bags")]
+
+    def _point_instead(self, now, why):
+        """No bag to choose here: the Pi's pointing, as bag first without the camera."""
+        self.looking, self.deadline = False, None
+        return [("say", why)] + self._bag_first(now)
+
+    def _which(self, now, why=""):
+        """Say the bags and ask which one ('no red bag' -> 'I do not see a red bag.', 'more than one ...' as is)."""
+        import bag_choice  # noqa: PLC0415 (numpy and the bag words, not needed by the rest of the flow)
+        self.last_prompt = now
+        if why.startswith("no "):
+            why = "I do not see a %s." % why[3:]
+        elif why.startswith("more than one"):
+            why = "I see %s." % why
+        return [("say", (why + " " if why else "") + "I see %s. Which one?" % bag_choice.describe(self.bags))]
+
+    def _pick_close(self, bag, now):
+        self.bag_at, self.bag_top, self.bag_yaw = (float(bag["x"]), float(bag["y"])), None, None
+        self.bag_first, self.picked_close = True, {"colour": bag.get("colour"), "side": bag.get("side")}
+        self.looking = False
+        return [("say", "Okay, the %s bag." % bag.get("colour", ""))] + self._goto(PICKING, now)
+
+    def _bags_seen(self, code, text, now):
+        import bag_choice  # noqa: PLC0415
+        self.looking, self.deadline = False, None
+        try:
+            bags = json.loads(text).get("bags") if code == "OK" else None
+        except ValueError:
+            bags = None
+        if not isinstance(bags, list):
+            return self._point_instead(now, "I could not look at the bags.")
+        self.bags = [b for b in bags if isinstance(b, dict) and b.get("ok")]
+        if not self.bags:
+            return self._point_instead(now, "I see no bag near me.")
+        idx, why = bag_choice.choose(self.bags, **self.wanted)
+        if idx is not None:
+            return self._pick_close(self.bags[idx], now)
+        return self._which(now, "" if why == "which one" else why)  # a named bag that is not here: ask, never guess
+
+    def _choice(self, params, now):
+        """An answer to "Which one?" (carry_bag with a colour / side)."""
+        import bag_choice  # noqa: PLC0415
+        if self.state != CHOOSING or self.looking:
+            return None if self.state != CHOOSING else [("log", "(still looking at the bags)")]
+        words = {k: params[k] for k in ("colour", "side") if params.get(k)}
+        idx, why = bag_choice.choose(self.bags, **words)
+        if idx is not None and words:
+            return self._pick_close(self.bags[idx], now)
+        self.choice_tries += 1
+        if self.choice_tries >= MAX_CHOICE_TRIES:
+            return self._point_instead(now, "Sorry, I could not tell which bag.")
+        if not words:
+            return self._which(now, "Please say its colour or its side.")
+        return self._which(now, why)
 
     def _bag_first(self, now):
         """'carry the bag' before following: the Pi takes bag only in FOLLOW after wait, so follow, wait, find_bag."""
@@ -280,7 +359,13 @@ class HmcFlow:
     def on_intent(self, intent, now):
         first = self._start_first(now)
         kind = INTENT_KINDS.get(intent.get("action", "none"))
-        out = self._handle(kind, now) if kind else None
+        params = intent.get("params") if isinstance(intent.get("params"), dict) else {}
+        if kind == "bag" and (self.state == CHOOSING or params.get("choice")):
+            out = self._choice(params, now)
+        else:
+            if kind == "bag":
+                self.wanted = {k: params[k] for k in ("colour", "side") if params.get(k)}
+            out = self._handle(kind, now) if kind else None
         return first + (out if out is not None
                         else [("log", "(intent %s ignored in state %s)" % (intent.get("action"), self.state))])
 
@@ -289,8 +374,16 @@ class HmcFlow:
         s = self.state
         if kind == "bag":
             if s in (READY, DONE, ERROR) and not self.carrying:
+                if self.use_arm and self.close_pick:
+                    return self._look(now)
                 return self._bag_first(now)
             kind = "done"
+        if s == CHOOSING:
+            if kind == "stop":
+                return self._goto(READY, now)
+            if kind == "follow":
+                return self._start_following(now)
+            return None
         if s in (READY, DONE, ERROR):
             if kind == "follow" and self.carrying and s == DONE:  # holding a bag picked first: the Pi waits
                 return [self._cmd("resume")] + self._goto(FOLLOWING, now)
@@ -392,11 +485,18 @@ class HmcFlow:
         if name == "arm_empty":
             self.carrying = False
             return []
+        if name == "bags_seen" and s == CHOOSING and self.looking:
+            return self._bags_seen(code, parts[2].strip() if len(parts) > 2 else "", now)
         if s == POINTING and name in ("bag_chosen", "bag_reached", "bag_failed"):
             return self._bag_event(name, code, arm_msg, now)
         if name == "grab_success" and s == PICKING:
             return self._after_pick(now)
         if name == "grab_failed" and s == PICKING:
+            if self.picked_close is not None and code in REMEASURE_CODES and not self.remeasured:
+                self.remeasured = True  # look again and take the bag of the same colour (its side may have moved)
+                self.wanted = {"colour": self.picked_close["colour"]} if self.picked_close.get("colour") else {}
+                self.picked_close = None
+                return self._look(now, "I missed the bag. Let me look at it again.")
             if code in REMEASURE_CODES and not self.remeasured:
                 self.remeasured = True
                 return self._goto(POINTING, now, "I missed the bag. Let me look at it again.", again=True)
@@ -487,6 +587,11 @@ class HmcFlow:
         if s == AT_CAR and now - self.last_prompt > self.reask_s:
             self.last_prompt = now
             return [("say", self.ready_text)]
+        if s == CHOOSING and self.looking and self.deadline is not None and now > self.deadline:
+            return self._point_instead(now, "I could not look at the bags.")
+        if s == CHOOSING and not self.looking and now - self.last_prompt > self.reask_s and self.bags:
+            self.last_prompt = now
+            return self._which(now)
         if s == POINTING and self.deadline is not None and now > self.deadline:  # no answer: cancel the Pi's task
             return [self._cmd("wait")] + self._goto(AT_CAR, now, "Sorry, that took me too long.")
         if s == PICKING and self.deadline is not None and now > self.deadline:
@@ -516,10 +621,11 @@ def make_node():
             # "wait" by default: a short Wi-Fi drop on the way back must not end the Pi's run (500 points)
             self.declare_parameter("error_pi_cmd", "wait")
             self.declare_parameter("bag_timeout", 180.0)
+            self.declare_parameter("close_pick", True)  # bag first: the front camera's bags, "Which one?"
             p = lambda n: self.get_parameter(n).value  # noqa: E731
             self.logic = HmcFlow(bool(p("use_arm")), float(p("grab_timeout")), float(p("drop_timeout")),
                                  float(p("come_back_s")), float(p("reask_s")), str(p("error_pi_cmd")),
-                                 bag_timeout=float(p("bag_timeout")))
+                                 bag_timeout=float(p("bag_timeout")), close_pick=bool(p("close_pick")))
             self.pub_text = self.create_publisher(String, "/speech/text", 10)
             self.pub_say = self.create_publisher(String, "/tts/say", 10)
             self.pub_cmd = self.create_publisher(String, "/robot/command", 10)
