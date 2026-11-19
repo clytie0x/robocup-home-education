@@ -130,6 +130,11 @@ class PickPlace(Node):
         # (bag_camera.py; forearm camera until 2026-11-18), 'planner' = the planned grasp at the goal's position
         # (probe / shifts / carry at the side)
         self.declare_parameter("bag_method", "camera")
+        # bag finder: 'coco' is the COCO YOLO11-seg engine (backpack, handbag, suitcase) plus the
+        # floor-difference and HSV fallbacks. 'tuned' reads class 0 = bag and class 1 = handle from
+        # bag_tuned_engine and leaves the fallbacks off. A missing or empty file stays on coco.
+        self.declare_parameter("bag_model", "coco")
+        self.declare_parameter("bag_tuned_engine", "~/hmc-follow/models/bag11s-seg-v2_480x640.engine")
         self.declare_parameter("bag_cam_url", "http://localhost:8082/snap.jpg")    # front webcam (webcam_view.py)
         # Xtion MJPEG on the base Pi. BAG_XTION_URL overrides this. The LAN cable (10.0.0.1) answers in
         # about a millisecond; the Wi-Fi address times out for ~5 s, twice, on every pick when Wi-Fi is down.
