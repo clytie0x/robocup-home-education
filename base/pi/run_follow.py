@@ -63,6 +63,7 @@ import command_server
 import dashboard as dashboard_module
 import depth_obstacles
 import escape as escape_module
+import footprint
 import geometry
 import keyframes as keyframes_module
 import lidar
@@ -831,14 +832,21 @@ def cycle(state, now):
 
     # 3. The brain. While learning, RealSenses cannot lock by itself: enrol again whenever unlocked.
     senses = state.senses
-    senses.learned = follower.operator_look.count
+    senses.learned = getattr(follower, "learned_count", follower.operator_look.count)
     enrol = None
     if senses.learned < LEARNED and not senses.locked and answer is not None:
         # The first enrol takes the one person in view; once a look is learned, a re-enrol
         # must look like the operator, or a stranger who steps in would be learned too.
-        accept = (lambda look: follower.score(look) >= LOOK_MATCH) if senses.learned else None
+        # fused_score also counts a continuous LiDAR track, so a look dimmed by the light still passes.
+        if senses.learned and hasattr(follower, "fused_score"):
+            accept = lambda look: follower.fused_score(look, continuous=True) >= LOOK_MATCH
+        else:
+            accept = None
         result = senses.enrol(now, sensed, answer, accept)
-        enrol = result if isinstance(result, str) else "locked"
+        if isinstance(result, str):
+            enrol = result
+        else:
+            enrol = "locked" if not senses.enrol_how else "locked (%s)" % senses.enrol_how
         if enrol != state.enrol_said:
             print("enrol: %s" % enrol)
             state.enrol_said = enrol
@@ -875,7 +883,11 @@ def cycle(state, now):
         stop = "wheels"  # held for wheels that did not turn (_watch_wheels), until resume or follow
     if stop is None and senses.ambiguous and state.phase == FOLLOW:
         stop = "ambiguous"  # someone is right at the operator: wait, never guess who is who
-    points = lidar_points = scan_points(scan, p)
+    raw_lidar = scan_points(scan, p)
+    # The arm, cable and bag are rigid in the base frame. Leaving them in this cloud stopped every
+    # cycle on 18 Nov for an "obstacle" 0.26 m away, the outline's own corner.
+    lidar_points = footprint.drop_self(raw_lidar, p, sensor="lidar")
+    points = lidar_points
     if depth_points is not None:
         points = numpy.vstack([points, depth_points])
     v, w = state.body.command()
@@ -906,6 +918,7 @@ def cycle(state, now):
     # SLOW_CYCLE: the next cycle may come that late (a later one ends the run), so the command runs that long.
     # BAG creeping: the locked bag's own points are left out, only they may come closer than the clearance.
     checked = state.bag.safety_points(points) if state.phase == BAG else points
+    judged = (v, w)
     if stop is None and any(safety.must_stop(checked, mv, mw, p, cycle=SLOW_CYCLE) for mv, mw in state.coast.motions(v, w, now)):
         stop = "obstacle"
     if stop is None and v < 0 and not escape_module.rear_clear(points, state.cable.lay.points(pose), -v, p, -v * SLOW_CYCLE):
@@ -919,6 +932,12 @@ def cycle(state, now):
             stop = "idle"
         elif state.phase != DONE:
             stop = _held_now(state)
+    if stop == "obstacle":
+        cause = safety.stop_cause(lidar_points, depth_points, judged[0], judged[1], p, cycle=SLOW_CYCLE)
+    elif stop is not None:
+        cause = safety.nearest_return(lidar_points, depth_points)
+    else:
+        cause = None
     if stop is not None:
         v = w = 0.0
         if state.velocity is not None:
@@ -988,6 +1007,9 @@ def cycle(state, now):
         "memory": len(getattr(follower, "obstacle_memory", {}) or {}),  # the brain's remembered obstacles
         "nearest": float(numpy.hypot(points[:, 0], points[:, 1]).min()) if len(points) else None,  # m from the base centre
         "stop": stop,
+        # sensor + bearing of the return that stopped us (blocking) or the nearest return on any other stop
+        "stop_cause": cause,
+        "self_mask": {"lidar": footprint.LAST.get("lidar"), "depth": getattr(depth_obstacles.points, "last", None)},
         "search": None if search is None else ("hold" if search == (0.0, 0.0) else "turn"),
         "why": getattr(senses, "why", None),  # the senses rule behind an ambiguous cycle or a dropped track
         "enrol": enrol,
@@ -1040,7 +1062,7 @@ def cycle(state, now):
         else:
             state.dashboard.skeleton = {"w": None, "h": None, "people": []}
         try:  # references only, for the console's Live tab (live_feed.py): never let it stop a cycle
-            state.dashboard.feed.put(frame, lidar_points, record, now)
+            state.dashboard.feed.put(frame, raw_lidar, record, now)
         except Exception:
             pass
     PLANNER.update(remote=0, local=0)

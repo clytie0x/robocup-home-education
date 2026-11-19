@@ -4,6 +4,8 @@ import math
 
 import numpy as np
 
+import footprint
+
 MIN_HEIGHT = 0.05  # m above the floor: lower than this is floor, carpet edge or noise
 MAX_RANGE = 3.0  # m, depth is too noisy beyond this
 CELL = 0.05  # m, one point per cell
@@ -34,6 +36,7 @@ def points(depth, p):
     missing = [k for k in NEEDS if p.get(k) is None]
     if missing:
         raise ValueError("camera pose not measured yet: %s" % ", ".join(missing))
+    points.last = {"sensor": "depth", "count": 0, "nearest": None}
     valid = depth > 0
     # Any blind third (a window, sunlight on one side) makes the whole image "no depth":
     # half a frame blinded must not read as an empty room.
@@ -59,4 +62,9 @@ def points(depth, p):
     cells = np.floor(xy / CELL).astype(np.int64)
     _, first, counts = np.unique(cells, axis=0, return_index=True, return_counts=True)
     kept = first[counts >= MIN_CELL_PIXELS]
-    return xy[np.sort(kept)]
+    xy = xy[np.sort(kept)]
+    # The arm, cable and a carried bag are rigid in the base frame. robot_height 1.05 m lets the
+    # upward-tilted Xtion turn them into an obstacle a fixed ~0.26 m away (18 Nov).
+    kept = footprint.drop_self(xy, p, sensor="depth")
+    points.last = dict(footprint.LAST.get("depth") or points.last)
+    return kept

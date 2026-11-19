@@ -31,8 +31,75 @@ class EngineError(RuntimeError):
 
 def device_mismatch(messages):
     """True when TensorRT reported a plan built for another GPU."""
+    if isinstance(messages, str):
+        messages = [messages]
     text = " ".join(str(m) for m in messages).lower()
     return "different device" in text or "incompatible device" in text
+
+
+def myelin_dynamic_batch(text):
+    """True for the TRT 10.14+ InstanceNorm crash: Myelin __myl_Inor, CUDA 720, on a dynamic batch.
+
+    514 times in detector.log from 19 Nov 12:04 on the Orin Nano Super (TRT 10.16.2.10) after the
+    re-id plan switched to osnet_ain_x1_0. cudaSetDevice (this module) does not fix this kernel.
+    """
+    low = str(text).lower()
+    return any(mark in low for mark in (
+        "myl_inor", "instancenorm", "instance normalization", "cuda 720", "error 720", "(720)", " 720 ",
+    ))
+
+
+# A static batch of 1 is the workaround that thread names. Skip the rebuild below this much free RAM
+# (the Orin had about 3.3 GiB free on 19 Nov; trtexec must not take the last of the shared memory).
+REBUILD_FREE_BYTES = 2_500_000_000
+REID_SPATIAL = (3, 256, 128)
+
+
+def static_batch_flags(input_name, spatial=REID_SPATIAL, batch=1):
+    """trtexec shape flags that pin the batch, so the plan is not a dynamic-batch InstanceNorm kernel."""
+    spec = "%s:%d%s" % (input_name, batch, "".join("x%d" % int(d) for d in spatial))
+    return ["--minShapes=%s" % spec, "--optShapes=%s" % spec, "--maxShapes=%s" % spec]
+
+
+def trtexec_path():
+    import shutil
+    return shutil.which("trtexec")
+
+
+def choose_backend(mismatch, failed, onnx_exists, trtexec):
+    """tensorrt, rebuild, onnx or histogram. A bad plan is rebuilt on this device when that is possible."""
+    if not mismatch and not failed:
+        return "tensorrt"
+    if onnx_exists and trtexec:
+        return "rebuild"
+    if onnx_exists:
+        return "onnx"
+    return "histogram"
+
+
+def rebuild_static(onnx_path, engine_path, run=None, input_name="input", free_bytes=None):
+    """Rebuild `engine_path` with a static batch of 1. True when the build command succeeds.
+
+    `run`, when given, is called with the argv and returns 0 on success. Tests never start trtexec.
+    """
+    exe = trtexec_path()
+    if run is None and not exe:
+        return False
+    if free_bytes is None and run is None:
+        try:
+            free_bytes = gpu_free_bytes()[0]
+        except Exception:
+            free_bytes = None
+    if run is None and free_bytes is not None and free_bytes < REBUILD_FREE_BYTES:
+        print("reid: skip static rebuild, %.1f GiB free" % (free_bytes / 2**30), flush=True)
+        return False
+    cmd = [exe or "trtexec", "--onnx=%s" % onnx_path, "--saveEngine=%s" % engine_path, "--fp16"]
+    cmd += static_batch_flags(input_name)
+    if run is not None:
+        return run(cmd) == 0
+    import subprocess
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return result.returncode == 0
 
 
 def _cudart():
@@ -148,8 +215,11 @@ class Engine:
         _check(cuda.cudaMemcpy(self._dev[name], array.ctypes.data, array.nbytes, _H2D), "cudaMemcpy in")
         if not self._context.execute_async_v3(self._stream.value):
             err = _last_cuda_error()
+            recent = " ".join(_log_lines[-8:])
             mismatch = device_mismatch(_log_lines)
             extra = (" CUDA %s." % err) if err else ""
+            if myelin_dynamic_batch(recent + " " + err):
+                extra += " Myelin __myl_Inor CUDA 720 (dynamic batch InstanceNorm)."
             if mismatch:
                 extra += " This engine was built for a different device: rebuild it on this Jetson."
             raise EngineError("TensorRT execute failed." + extra, mismatch=mismatch)

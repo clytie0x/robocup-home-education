@@ -141,3 +141,73 @@ def rear_clear(points_base, speed, p, distance, margin=0.10):
 def speed_cap(depth_points, p):
     """A blind depth camera (None) is never 'nothing there': slow down. An empty array is a real view."""
     return p["max_speed"] if depth_points is not None else min(p["max_speed"], BLIND_CAP)
+
+
+def _cloud(points):
+    if points is None:
+        return None
+    pts = numpy.asarray(points, dtype=float).reshape(-1, 2)
+    return pts if len(pts) else None
+
+
+def _in_strip(pts, v, p):
+    """Points in the forward braking strip (the ones that stop a straight drive)."""
+    if not len(pts) or not v > 0:
+        return numpy.zeros(len(pts), dtype=bool)
+    x, y = pts[:, 0], pts[:, 1]
+    ahead = x - FRONT
+    return ((ahead > 0) & (ahead < braking_distance(v, p, margin=clearance(p)))
+            & (numpy.abs(y) < p["robot_half_width"] + SIDE_MARGIN))
+
+
+def _pick(sensor, pts, v, p):
+    """The return most likely to be what stopped us: the nearest one in the strip, else the nearest."""
+    if pts is None or not len(pts):
+        return None
+    chosen = pts
+    strip = _in_strip(pts, v, p)
+    if strip.any():
+        chosen = pts[strip]
+    i = int(numpy.hypot(chosen[:, 0], chosen[:, 1]).argmin())
+    return footprint.describe(sensor, chosen[i])
+
+
+def stop_cause(lidar_points, depth_points, v, w, p, cycle=CYCLE):
+    """The sensor and bearing of the point that makes this command stop, or None when the way is clear.
+
+    Each cloud is judged on its own, so a depth return and a LiDAR return are not mixed into one 'nearest'.
+    A reverse command is not the forward strip (must_stop refuses v < 0): the nearest return behind the centre.
+    """
+    hits = []
+    for sensor, raw in (("lidar", lidar_points), ("depth", depth_points)):
+        pts = _cloud(raw)
+        if pts is None:
+            continue
+        if v < 0:
+            behind = pts[pts[:, 0] < 0]
+            if len(behind):
+                hits.append(_pick(sensor, behind, 0.0, p))
+            continue
+        if must_stop(pts, v, w, p, cycle):
+            hits.append(_pick(sensor, pts, v, p))
+    hits = [h for h in hits if h is not None]
+    if not hits:
+        return None
+    cause = min(hits, key=lambda h: h["range_m"])
+    cause = dict(cause, blocking=True)
+    if len(hits) > 1:
+        cause["sensors"] = [h["sensor"] for h in hits]
+    return cause
+
+
+def nearest_return(lidar_points, depth_points):
+    """The closest return still in view, with its sensor and bearing. For a stop that was not an obstacle."""
+    hits = []
+    for sensor, raw in (("lidar", lidar_points), ("depth", depth_points)):
+        pts = _cloud(raw)
+        if pts is not None:
+            hits.append(_pick(sensor, pts, 0.0, {}))
+    hits = [h for h in hits if h is not None]
+    if not hits:
+        return None
+    return dict(min(hits, key=lambda h: h["range_m"]), blocking=False)

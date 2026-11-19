@@ -3,6 +3,7 @@ import math
 
 from hmc.world import Circle
 
+import footprint
 import geometry
 import lidar
 
@@ -34,12 +35,18 @@ class ObstacleMemory:
         self._depth = {cell: seen for cell, seen in self._depth.items() if now - seen[2] <= DEPTH_KEEP}
 
         lidar_cells = {}
+        bases = []
         for deg, metres in lidar.usable(scan):
             rad = math.radians(deg)
-            base = geometry.lidar_to_base((metres * math.cos(rad), metres * math.sin(rad)), self.p)
-            x, y = geometry.base_to_odom(base, pose)
-            if not near_person(x, y):
-                lidar_cells.setdefault((math.floor(x / LIDAR_CELL), math.floor(y / LIDAR_CELL)), (x, y))
+            bases.append(geometry.lidar_to_base((metres * math.cos(rad), metres * math.sin(rad)), self.p))
+        if bases:
+            own = footprint.own_mask(bases, self.p)  # the arm, cable and bag are not obstacles for the planner
+            for base, is_self in zip(bases, own):
+                if is_self:
+                    continue
+                x, y = geometry.base_to_odom(base, pose)
+                if not near_person(x, y):
+                    lidar_cells.setdefault((math.floor(x / LIDAR_CELL), math.floor(y / LIDAR_CELL)), (x, y))
 
         return [Circle(x, y, RADIUS) for x, y in lidar_cells.values()] + [
             Circle(x, y, RADIUS) for x, y, _ in self._depth.values() if not near_person(x, y)
