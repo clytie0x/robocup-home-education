@@ -591,10 +591,10 @@
           <p class="note">หยิบและวางส่งตัวเลขในช่องนี้ ตำแหน่งที่วัดได้ไม่ถูกแทนด้วย 0.36</p>
           ${outside(st.pickX) || outside(st.dropX) ? html`<p class="note bad">ค่า x นี้อยู่นอกระยะที่ตรวจแล้ว ${drop.x_min}–${drop.x_max} ม. แต่จะส่งตามที่พิมพ์</p>` : null}
           <div class="robot-fields">
-            <label>หยิบ x<input value=${st.pickX} onInput=${this.field("pickX", "pickDirty")} inputMode="decimal"></label>
-            <label>หยิบ y<input value=${st.pickY} onInput=${this.field("pickY", "pickDirty")} inputMode="decimal"></label>
-            <label>วาง x<input value=${st.dropX} onInput=${this.field("dropX", "dropDirty")} inputMode="decimal"></label>
-            <label>วาง y<input value=${st.dropY} onInput=${this.field("dropY", "dropDirty")} inputMode="decimal"></label>
+            <label>หยิบ x <input value=${st.pickX} onInput=${this.field("pickX", "pickDirty")} inputMode="decimal" /></label>
+            <label>หยิบ y <input value=${st.pickY} onInput=${this.field("pickY", "pickDirty")} inputMode="decimal" /></label>
+            <label>วาง x <input value=${st.dropX} onInput=${this.field("dropX", "dropDirty")} inputMode="decimal" /></label>
+            <label>วาง y <input value=${st.dropY} onInput=${this.field("dropY", "dropDirty")} inputMode="decimal" /></label>
           </div>
           <div class="btnrow">
             <button type="button" class="btn pri" onClick=${() => this.send("pick")}>หยิบ</button>

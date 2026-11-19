@@ -232,4 +232,9 @@ test("the page files wire Operate, the 800px breakpoint, and motion-only STOP", 
   assert.match(stopFn, /\/api\/arm\/stop/);
   assert.doesNotMatch(stopFn, /stop-all/);
   assert.match(app, /virtual/);
+  const js = fs.readFileSync(path.join(dir, "robot.js"), "utf8");
+  const fields = js.slice(js.indexOf("robot-fields"), js.indexOf("btnrow"));
+  assert.doesNotMatch(fields, /[xy]<input/);
+  assert.match(fields, /หยิบ x </);
+  assert.match(fields, /วาง y </);
 });
