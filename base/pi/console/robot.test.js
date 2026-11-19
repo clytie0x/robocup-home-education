@@ -217,7 +217,10 @@ test("the page files wire Operate, the 800px breakpoint, and motion-only STOP", 
   assert.doesNotMatch(html, /ทั้งสามตัว/);
   assert.match(html, /preact-htm\.js/);
   assert.match(html, /robot\.js/);
-  assert.doesNotMatch(css, /min-width:\s*900px/);
+  assert.match(css, /min-width:\s*900px\) and \(max-width:\s*1279px\)/);
+  assert.match(css, /min-height:\s*240px/);
+  assert.match(css, /min-height:\s*180px/);
+  assert.match(css, /position:\s*sticky/);
   assert.match(css, /min-width:\s*800px/);
   const columns = [];
   const re = /\.op-stage\s*\{[^}]*grid-template-columns:\s*([^;]+);/g;

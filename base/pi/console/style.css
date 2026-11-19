@@ -490,6 +490,26 @@ body.ws-engineer #shell { display: block; height: auto; max-width: 1280px; paddi
   .brand { grid-column: 1; grid-row: 1; }
 }
 
+/* 900–1279 (a 1024×560 laptop): two columns, cameras keep a real height, the page scrolls. */
+@media (min-width: 900px) and (max-width: 1279px) {
+  body.ws-operate { height: auto; min-height: 100dvh; overflow: auto; display: block; }
+  body.ws-operate #shell,
+  body.ws-operate #operate { height: auto; overflow: visible; display: flex; flex-direction: column; }
+  #top { position: sticky; top: 0; }
+  .banner { position: static; }
+  .op-stage {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: minmax(180px, auto) minmax(180px, auto) minmax(180px, auto) auto;
+    flex: none;
+  }
+  .tile-xtion { grid-column: 1; grid-row: 1 / span 2; min-height: 240px; }
+  .tile-arm { grid-column: 2; grid-row: 1; min-height: 180px; }
+  .tile-jetson { grid-column: 2; grid-row: 2; min-height: 180px; }
+  .tile-lidar { grid-column: 1 / -1; grid-row: 3; min-height: 180px; }
+  .op-task { grid-column: 1 / -1; grid-row: 4; max-height: none; overflow: visible; }
+  .events { flex: none; min-height: 112px; }
+}
+
 
 #robot-root { border-top: 1px solid var(--ink); padding: 6px 8px; overflow: visible; flex: none; }
 #robot-root .robot-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 6px 0; }
@@ -499,8 +519,8 @@ body.ws-engineer #shell { display: block; height: auto; max-width: 1280px; paddi
 #robot-root .note { margin: 4px 0; font-size: 12px; }
 #robot-root .note.bad { color: var(--red); }
 
-/* Laptop and iPad landscape. This is the last .op-stage column rule on purpose. */
-@media (min-width: 1100px) {
+/* Laptop. This is the last .op-stage column rule on purpose. */
+@media (min-width: 1280px) {
   .op-stage {
     grid-template-columns: minmax(0, 1.35fr) minmax(160px, 0.72fr) minmax(240px, 0.9fr);
     grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
