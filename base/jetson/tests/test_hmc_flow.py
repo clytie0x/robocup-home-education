@@ -605,11 +605,20 @@ class PickingTests(FlowCase):
 
 class ReturningTests(FlowCase):
     def test_at_start_drops_the_bag(self):
+        import so100_ik
         f = self.make()
         self.go(RETURNING)
         out = f.on_event("at_start", 5.0)
         self.assertEqual(f.state, DROPPING)
-        self.assertEqual(cmds(out), [{"action": "drop_bag", "params": {"x": 0.31, "y": 0.0}}])
+        drop = so100_ik.reachable_drop()
+        self.assertEqual(hmc_flow.DROP_AT, {"x": drop["x"], "y": drop["y"]})
+        self.assertEqual(cmds(out), [{"action": "drop_bag", "params": dict(hmc_flow.DROP_AT)}])
+        self.assertNotEqual(drop["x"], 0.31)  # 0.31 was the inner edge and unreachable at 13:26
+        kin = so100_ik.Kinematics()
+        for z in drop["heights"]:
+            kin.ik_any_pitch((drop["x"], drop["y"], z))
+        self.assertGreaterEqual(drop["x"], drop["x_min"])
+        self.assertLessEqual(drop["x"], drop["x_max"])
 
     def test_at_start_without_the_arm_is_done(self):
         f = self.make(use_arm=False)

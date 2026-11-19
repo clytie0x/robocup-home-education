@@ -82,7 +82,30 @@ ARM_FLOOR_Z = -0.331      # floor in the arm frame = their launch floor_z for mo
 TOP_RANGE = (0.15, 0.50)  # a triangulated top outside this is a wrong match
 MAX_SPREAD = 0.02         # m, RMS distance of the triangulated point from the view rays
 MAX_SHIFT = 0.08          # m, the camera may move the grasp point this far from the LiDAR's bag centre
+GRIPPER_CONF_AT_LIMIT = 0.55  # confidence at MAX_SPREAD; 1 at spread 0; 0 past a hard limit (gripper_gate)
 LOOK_CLEAR = 0.08         # m, the gripper stays this far above the assumed top while it looks
+
+
+def gripper_gate(spread, z, shift, max_spread=MAX_SPREAD, top_range=TOP_RANGE, max_shift=MAX_SHIFT):
+    """Confidence of one triangulated bag top. 1 at spread 0, GRIPPER_CONF_AT_LIMIT at max_spread, else 0.
+
+    Hard limits, unchanged: spread above max_spread, height outside top_range, or a shift from the
+    requested x, y above max_shift. Inside them the confidence falls in a straight line with the spread.
+    """
+    if spread > max_spread or not top_range[0] <= z <= top_range[1] or shift > max_shift:
+        return 0.0
+    if max_spread <= 0:
+        return 1.0
+    return 1.0 - (1.0 - GRIPPER_CONF_AT_LIMIT) * (spread / max_spread)
+
+
+def top_source(measured, probe):
+    """Where the bag top came from: "camera" when measured, else "probe" or "default"."""
+    if measured:
+        return "camera"
+    return "probe" if probe else "default"
+
+
 HOME_TIMEOUT = 60.0
 PICK_TIMEOUT = 150.0      # their pick: up to 3 tries, slow carry (bag_speed 0.08 on the safe profile)
 PICK_LOG_DIR = os.path.expanduser("~/hmc-follow/picks")  # one JSON per pick, with phase timings
@@ -193,9 +216,11 @@ class BagArm:
             self.log("bag seen from %d look(s): top not measured" % len(views))
             return None
         p, spread = gc.triangulate(self.k, self.camera, views)
-        self.log("bag point (%.3f, %.3f, %.3f), spread %.3f m from %d views" % (p[0], p[1], p[2], spread, len(views)))
-        if spread > MAX_SPREAD or not TOP_RANGE[0] <= p[2] <= TOP_RANGE[1] \
-                or math.hypot(p[0] - x, p[1] - y) > MAX_SHIFT:
+        shift = math.hypot(p[0] - x, p[1] - y)
+        confidence = gripper_gate(spread, p[2], shift)
+        self.log("bag point (%.3f, %.3f, %.3f), spread %.3f m, shift %.3f m, confidence %.2f from %d views"
+                 % (p[0], p[1], p[2], spread, shift, confidence, len(views)))
+        if confidence <= 0:
             self.log("bag point rejected (spread, height or shift out of range)")
             return None
         return p
@@ -239,6 +264,7 @@ class BagArm:
                 p = self.measure_top(x, y)
                 if p is not None:
                     where, top = p[:2], float(p[2])
+                    self.log("touch probe skipped: gripper camera measured the top (%s)" % top_source(True, self.probe))
                     self.fp._goto("back to ready", READY, JAW_OPEN)
                 elif self.camera is not None:
                     # gripper_camera.json loaded: do not spend the pick on the 0.02 m/s touch probe
@@ -246,8 +272,10 @@ class BagArm:
                     self.log("gripper camera is calibrated: touch probe skipped, top %.3f m" % top)
                 elif self.probe:
                     top = math.nan  # their pick_bag lowers its closed jaws until they touch the top
+                    self.log("touch probe: no gripper camera measurement")
                 else:
                     top = DEFAULT_TOP
+                    self.log("touch probe skipped: probe off, top %.2f m (%s)" % (top, top_source(False, False)))
             chosen = top
             grasp = np.array([*self.k.mount.to_arm([where[0], where[1], 0.0])[:2], ARM_FLOOR_Z + top])
             self.log("pick_bag at robot (%.3f, %.3f), top %s -> arm (%.3f, %.3f, %s) profile %s"
