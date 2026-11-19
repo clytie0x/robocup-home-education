@@ -3,7 +3,9 @@
 Tested on Windows (test/test_rules.py); the nodes only call them.
 """
 import ast
+import json
 import math
+import os
 
 
 class Failed(Exception):
@@ -88,6 +90,19 @@ def top_unknown(z):
     """PickBag grasp_pose z NaN = the caller does not know the height of the bag top: find it by touch.
     Every real z is used as given (as before)."""
     return math.isnan(float(z))
+
+
+def gripper_camera_calibrated(path):
+    """True when `path` is a gripper_camera.json the calibrator wrote (it has T_gripper_camera).
+
+    A missing or broken file is not a calibration: the 0.02 m/s touch probe still runs.
+    """
+    try:
+        with open(os.path.expanduser(path)) as f:
+            data = json.load(f)
+    except (OSError, ValueError, UnicodeError):
+        return False
+    return isinstance(data, dict) and "T_gripper_camera" in data
 
 
 def descent_loads(status):
