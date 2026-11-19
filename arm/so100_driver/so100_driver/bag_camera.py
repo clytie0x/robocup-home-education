@@ -43,10 +43,10 @@ GAP_MID = FIXED_INNER_X - jaw_gap(JAW_G_MAX) / 2   # gripper-frame x of the midd
 # (extra reach along the bearing m, pitch deg), best first: the open gap is 7.5 cm, so +-1.5 cm still keeps a
 # wall that is where it should be inside the jaws
 TRIES = ((0.0, -60), (0.015, -60), (-0.015, -60), (0.03, -50))
-GOAL_TOL = 0.10                   # m: the image wins over the goal's x, y; further apart than this = an error
-# arm pose for looking: tips high over the base, every link out of the front camera's picture (READY is in it,
-# right where a near bag shows) and clear of the deck (checked against the deck model, 2026-11-18)
-LOOK = {"shoulder_pan": 0.0, "shoulder_lift": 0.5, "elbow_flex": -1.6, "wrist_flex": 0.0, "wrist_roll": 0.0}
+GOAL_TOL = 0.16                   # m: the image wins over the goal's x, y; further apart than this = an error
+# arm pose for looking: folded REST pose stays completely out of the front camera's picture (0 pts in view;
+# READY puts 55 pts in view), so the arm never lifts high just to look at the bag
+LOOK = {"shoulder_pan": 0.0, "shoulder_lift": 0.04, "elbow_flex": -0.04, "wrist_flex": 0.0, "wrist_roll": 0.0}
 LIFT_DZ = (0.02, 0.04, 0.06, 0.08, 0.10)
 STRAIGHT_UP = tuple(0.02 * k for k in range(1, 11))   # m: the first lift, straight up to 20 cm
 LIFT_SPEED = 0.25                 # rad/s of the fastest joint on that lift
@@ -439,9 +439,13 @@ class CameraBag:
         hover = bool(self.p("bag_hover_only"))
         closed, why = 0, "ถุงไม่ลอยจากพื้น"
         close_z = self.n.table_z + self.close_h(obj)
+        need_look = True
+        w = None
         for i, (dt, pitch) in enumerate(tries):
-            self.n.progress(1, 4, "look", f"ลองที่ {i + 1}/{len(tries)}: ดูถุงจากกล้องหน้า...")
-            w = self.where(obj, first=(i == 0))
+            if need_look:
+                self.n.progress(1, 4, "look", f"ลองที่ {i + 1}/{len(tries)}: ดูถุงจากกล้องหน้า...")
+                w = self.where(obj, first=(i == 0))
+                need_look = False
             start = w["seen"]
             wall, normal = w["wall"], w["normal"]
             self.theta = math.atan2(wall[1], wall[0])
@@ -471,6 +475,7 @@ class CameraBag:
             self.n.get_logger().info(f"camera try {i + 1}: tips {r:.3f} m out, pitch {pitch}, roll {roll:+.1f} deg "
                                      f"(closing axis vs wall normal {align:.2f})")
             self.n.gripper(0.9, "อ้าก้าม")
+            need_look = True
             try:
                 self.above(r, cz, pitch, roll)
                 time.sleep(0.3)

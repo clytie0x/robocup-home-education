@@ -450,13 +450,10 @@ def fixed_lifted(b0, b1, min_up=12.0, min_cols=15):
 
 
 def foot_y(im, b, run=6):
-    """Image row of the bag's foot on the floor in the fixed front camera.
-
-    For full-bag masks (yolo-seg / floor-diff) the blob's own bottom row is already the foot when visible.
-    Otherwise searches below the blob for the first run of adaptive-floor rows.
-    """
-    if b.get("source") in ("yolo-seg", "floor-diff"):
-        return float(b["y1"]) if b["y1"] < b["h"] - 3 else None
+    """Image row of the bag's foot on the floor in the fixed front camera: below the blob, the first row
+    where the adaptive floor shows again (a patterned/white lower bag half may sit below b["y1"], so b["y1"]
+    alone is not necessarily the foot). Median over the blob's middle columns; None when the floor below is
+    out of the picture."""
     floor = adaptive_floor_mask(im)
     x0, x1 = int(b["x0"]), int(b["x1"])
     cols = range(x0 + (x1 - x0) // 4, x1 - (x1 - x0) // 4 + 1, 2)

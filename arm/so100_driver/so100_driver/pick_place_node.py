@@ -862,7 +862,7 @@ class PickPlace(Node):
             raise Failed("ไม่ได้ถือของอยู่", "NOT_HOLDING")
         if self.holding.get("camera"):
             done = self.cam.place(target)
-            self.moveit_to(READY, "กลับท่า ready")
+            self.moveit_to(REST, "พับแขนกลับท่าพัก")
             return done
         x, y, yaw, size = self.holding["object"]
         obj = Box(x, y, yaw, size)
@@ -1074,6 +1074,11 @@ class PickPlace(Node):
     def do_home(self):
         if self.holding and self.holding.get("camera"):
             raise Failed("ถือถุงอยู่: สั่งวางก่อน (ท่า ready จะเหวี่ยงถุงเข้าตัวหุ่น)", "HOLDING")
+        if str(self.get_parameter("bag_method").value) == "camera":
+            if not self.at_rest():
+                self.progress(1, 1, "home", "พับแขนหลบกล้องหน้า (ท่าพัก)...")
+                self.moveit_to(REST, "พับแขนหลบกล้องหน้า")
+            return "อยู่ท่าพัก (พ้นกล้องหน้า)"
         self.progress(1, 1, "home", "กลับท่า ready...")
         self.moveit_to(READY, "กลับท่า ready")
         return "อยู่ท่า ready"
