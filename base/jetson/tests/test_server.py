@@ -114,6 +114,8 @@ class ServerTests(unittest.TestCase):
         det = Detector()
         people = server.people_in(jpeg, det, ReId())
         self.assertEqual(det.shape, (240, 320, 3))  # the frame the Pi sent, not resized
+        colour = people[0].pop("colour")
+        self.assertEqual(len(colour), 128)  # clothing histogram, separate from the look
         self.assertEqual(people, [{"box": [10.0, 20.0, 60.0, 200.0], "conf": 0.8, "look": [0.6, 0.8]}])
         self.assertEqual(server.people_in(b"not a jpeg", det, ReId()), [])
 
@@ -143,9 +145,12 @@ class PoseAndBagTests(unittest.TestCase):
     def test_bags_come_from_the_same_detector_run_and_people_are_unchanged(self):
         seen = server.seen_in(jpeg_320x240(), FakeDetector(), FakeReId())
         self.assertEqual(seen["objects"], [{"cls": "handbag", "box": [100.0, 200.0, 130.0, 230.0], "conf": 0.6}])
+        colour = seen["people"][0].pop("colour")
+        self.assertEqual(len(colour), 128)
         self.assertEqual(seen["people"][0], {"box": [10.0, 20.0, 60.0, 200.0], "conf": 0.8, "look": [0.6, 0.8]})
         self.assertNotIn("kp", seen["people"][0])  # no pose asked
-        self.assertEqual(server.seen_in(b"broken", FakeDetector(), FakeReId()), {"people": [], "objects": []})
+        self.assertEqual(server.seen_in(b"broken", FakeDetector(), FakeReId()),
+                         {"people": [], "objects": [], "empty": "the frame could not be decoded"})
 
     def test_keypoints_go_to_the_person_box_they_overlap(self):
         class Pose:

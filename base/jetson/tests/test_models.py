@@ -9,6 +9,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import detector  # noqa: E402
+import engine  # noqa: E402
 import reid  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -82,6 +83,12 @@ class DecodeTests(unittest.TestCase):
         boxes = np.array([[0, 0, 10, 10], [20, 20, 30, 30], [1, 1, 10, 10]], np.float32)
         self.assertEqual(detector.nms(boxes, np.array([0.5, 0.9, 0.6], np.float32)), [1, 2])
 
+    def test_empty_reason_names_a_score_under_the_threshold(self):
+        out = yolo_output([(100, 100, 40, 120, 0.2)])
+        self.assertIn("0.20", detector.empty_reason(out))
+        self.assertIn("0.40", detector.empty_reason(out))
+        self.assertIn("no rows", detector.empty_reason(np.zeros((1, 84, 0), np.float32)))
+
 
 class LookTests(unittest.TestCase):
     def test_unit_rows(self):
@@ -95,6 +102,115 @@ class LookTests(unittest.TestCase):
         batch = reid.crops(bgr, [(-5, -5, 50, 100), (300, 200, 400, 300), (10, 10, 10, 10), (320, 100, 320, 200),
                                  (100, 240, 140, 240)])
         self.assertEqual(batch.shape, (5, 3, 256, 128))
+
+    def test_red_clothes_match_red_and_not_blue(self):
+        red = np.zeros((80, 40, 3), np.uint8)
+        red[:, :] = (0, 0, 220)
+        blue = np.zeros((80, 40, 3), np.uint8)
+        blue[:, :] = (220, 0, 0)
+        box = [(0, 0, 40, 80)]
+        same = np.dot(reid.clothing_histogram(red, box)[0], reid.clothing_histogram(red, box)[0])
+        other = np.dot(reid.clothing_histogram(red, box)[0], reid.clothing_histogram(blue, box)[0])
+        self.assertGreater(same, 0.99)
+        self.assertLess(other, same)
+
+
+class EnginePlanTests(unittest.TestCase):
+    def test_device_mismatch_and_the_myelin_crash(self):
+        self.assertTrue(engine.device_mismatch("engine was built for a different device"))
+        self.assertFalse(engine.device_mismatch("ok"))
+        self.assertTrue(engine.myelin_dynamic_batch("Myelin __myl_Inor CUDA 720"))
+        self.assertEqual(engine.choose_backend(False, False, True, True), "tensorrt")
+        self.assertEqual(engine.choose_backend(True, True, True, True), "rebuild")
+        self.assertEqual(engine.choose_backend(True, True, True, False), "onnx")
+        self.assertEqual(engine.choose_backend(True, True, False, False), "histogram")
+
+    def test_static_rebuild_pins_the_batch_at_one(self):
+        seen = []
+
+        def run(cmd):
+            seen.append(cmd)
+            return 0
+
+        self.assertTrue(engine.rebuild_static("a.onnx", "a.engine", run=run, free_bytes=0))
+        self.assertIn("--minShapes=input:1x3x256x128", seen[0])
+        self.assertIn("--optShapes=input:1x3x256x128", seen[0])
+        self.assertIn("--maxShapes=input:1x3x256x128", seen[0])
+        self.assertIn("--fp16", seen[0])
+
+    def test_crops_run_one_at_a_time_and_a_myelin_crash_does_not_raise(self):
+        class Counter:
+            def __init__(self):
+                self.calls = []
+                self.max_input_shape = (8, 3, 256, 128)
+
+            def run(self, batch):
+                self.calls.append(len(batch))
+                return [np.ones((len(batch), 4), np.float32)]
+
+        counter = Counter()
+        model = reid.ReId("osnet_ain.engine", runner=counter, trtexec=False)
+        bgr = np.zeros((40, 40, 3), np.uint8)
+        looks = model.looks(bgr, [(0, 0, 10, 30), (5, 5, 20, 35)])
+        self.assertEqual(counter.calls, [1, 1])
+        self.assertEqual(len(looks), 2)
+
+        class Boom:
+            max_input_shape = (4, 3, 256, 128)
+            device_mismatch = False
+
+            def run(self, batch):
+                raise RuntimeError("TensorRT execute failed: Myelin __myl_Inor CUDA 720")
+
+        failed = reid.ReId("missing.engine", runner=Boom(), trtexec=False)
+        again = failed.looks(bgr, [(0, 0, 10, 30)])
+        self.assertEqual(failed.backend, "histogram")
+        self.assertEqual(len(again[0]), 128)
+        self.assertAlmostEqual(float(np.dot(again[0], again[0])), 1.0, places=5)
+
+    def test_a_different_device_rebuilds_once_then_uses_the_histogram(self):
+        import os
+        import tempfile
+
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "osnet_ain_x1_0_msmt17_256x128.engine")
+        open(path, "wb").close()
+        open(os.path.splitext(path)[0] + ".onnx", "wb").close()
+        calls = []
+
+        class Mismatch:
+            max_input_shape = (1, 3, 256, 128)
+            device_mismatch = True
+
+            def run(self, batch):
+                raise AssertionError("the mismatched plan must not execute")
+
+        def rebuild(onnx, engine_path):
+            calls.append((onnx, engine_path))
+            return False
+
+        model = reid.ReId(path, runner=Mismatch(), rebuild=rebuild, trtexec=True)
+        self.assertEqual(calls, [(os.path.splitext(path)[0] + ".onnx", path)])
+        self.assertEqual(model.backend, "histogram")
+        self.assertIn("different device", model.why)
+        bgr = np.zeros((40, 40, 3), np.uint8)
+        got = model.looks(bgr, [(0, 0, 8, 20)])
+        self.assertEqual(len(got[0]), 128)
+
+    def test_a_detector_execute_failure_returns_no_people_and_says_why(self):
+        det = detector.Detector.__new__(detector.Detector)
+        det._h, det._w, det._yolox = 32, 32, False
+        det.empty, det._said = None, None
+
+        class Boom:
+            def run(self, array):
+                raise RuntimeError("TensorRT execute failed: Myelin")
+
+        det._engine = Boom()
+        frame = np.zeros((16, 16, 3), np.uint8)
+        self.assertEqual(det.detect(frame), [])
+        self.assertIn("TensorRT", det.empty)
+        self.assertEqual(det.detect_all(frame), ([], []))
 
 
 try:

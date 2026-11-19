@@ -55,14 +55,30 @@ def seen_in(jpeg, detector, reid, pose=None, gate=None, normalise="none"):
 
     bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
     if bgr is None:
-        return {"people": [], "objects": []}  # a broken frame is "nobody seen", never an error that drops the link
+        # a broken frame is "nobody seen", never an error that drops the link
+        return {"people": [], "objects": [], "empty": "the frame could not be decoded"}
     raw, bgr = bgr, light.normalise(bgr, normalise)
-    boxes, objects = detector.detect_all(bgr) if hasattr(detector, "detect_all") else (detector.detect(bgr), [])
-    looks = reid.looks(bgr, [b[:4] for b in boxes])
+    try:
+        boxes, objects = detector.detect_all(bgr) if hasattr(detector, "detect_all") else (detector.detect(bgr), [])
+    except RuntimeError as exc:
+        print("detector: 0 people: TensorRT execute failed: %s" % exc, flush=True)
+        return {"people": [], "objects": [], "empty": "TensorRT execute failed: %s" % exc}
+    try:
+        looks = reid.looks(bgr, [b[:4] for b in boxes])
+    except RuntimeError as exc:
+        print("reid failed, looks left empty: %s" % exc, flush=True)
+        looks = [None] * len(boxes)
+    from reid import clothing_histogram
+    colours = clothing_histogram(bgr, [b[:4] for b in boxes]) if boxes else []
     # An empty look is [] (never JSON null: the Pi does tuple(look)). The Pi treats [] as no look,
     # so a failed re-id is not enrolled. A real vector is a list of floats.
-    people = [{"box": [float(v) for v in b[:4]], "conf": float(b[4]),
-               "look": [float(v) for v in look] if look else []} for b, look in zip(boxes, looks)]
+    people = []
+    for i, (b, look) in enumerate(zip(boxes, looks)):
+        person = {"box": [float(v) for v in b[:4]], "conf": float(b[4]),
+                  "look": [float(v) for v in look] if look else []}
+        if i < len(colours):
+            person["colour"] = [float(v) for v in colours[i]]
+        people.append(person)
     if pose is not None:
         attach_keypoints(people, pose.poses(bgr))
     seen = {"people": people,
@@ -72,6 +88,8 @@ def seen_in(jpeg, detector, reid, pose=None, gate=None, normalise="none"):
         seen["quality"] = {"ok": ok, "why": why, "luma": round(gate.mean, 1)}
         for person in people:  # the light the camera really had, before normalise
             person["light"] = round(light.box_light(raw, person["box"]), 1)
+    if not people:
+        seen["empty"] = getattr(detector, "empty", None) or "no person box kept"
     return seen
 
 

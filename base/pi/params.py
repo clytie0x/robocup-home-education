@@ -10,6 +10,9 @@ JSON holds no comments, so where a number was measured is written here (the rest
 - command_latency 0.40 s: the online estimates gave 0.393 to 0.421 s in the same four runs (the first value, 0.17,
   was far off).
   stop_clearance stays 0.10 m, and calib.safe_braking still brakes with the smaller of an estimate and these.
+- self_mask: the arm, cable and a carried bag. skin_m is how far past the outline still counts as the robot.
+  sectors are base-frame degrees (0 ahead, positive left) and a range from the centre. polygons are extra
+  [x, y] rings in that same frame. Missing the key uses footprint.DEFAULT_SECTORS.
 """
 import json
 from pathlib import Path

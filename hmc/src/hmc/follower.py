@@ -35,6 +35,17 @@ GO_ON_GAP = 2.5  # metres; once we are this close again, we ask them to go on
 LOST_AFTER = 2.0  # seconds without seeing the operator before we start to search
 DRIVE_FOR = 10.0  # seconds at most to reach the last seen spot (it may be blocked)
 LOOK_AROUND = 5.0  # seconds of turning on the spot before we ask them to come back
+# On a loss the camera is still pointed the way we were going. Turn back to the last heading
+# before driving off, and ask them to wait well before the long look-around ends in "come back".
+FACE_FOR = 1.5  # seconds at most spent turning to the last heading
+FACE_TOL = math.radians(12)  # close enough to that heading to start the search drive
+ASK_WAIT = 0.5  # seconds into the search: ask them to wait
+# A look that is a bit off still passes when the LiDAR track never jumped and the clothes match.
+# Weights are on top of the appearance score (weight 1). Continuity or colour alone stay under
+# OPERATOR_MATCH, so a stranger on the same track is not enrolled.
+COLOUR_W = 0.55
+TRACK_W = 0.35
+COLOUR_AGREE = 0.75  # cosine of the clothing histogram; below this the clothes are not the operator's
 
 
 def _small(shape) -> bool:
@@ -54,6 +65,10 @@ class Senses:
     obstacles: list[Shape]
     # The look of each person in people the camera saw this step, by the same id.
     looks: dict[int, tuple[float, ...]] = field(default_factory=dict)
+    # Clothing histogram of the operator this step, and a look whose light was too far to use for
+    # identity but close enough to count while the LiDAR track is still continuous. Both optional.
+    operator_colour: tuple[float, ...] | None = None
+    soft_look: tuple[float, ...] | None = None
 
 
 class Mode(Enum):
@@ -84,6 +99,8 @@ class Follower:
         self.tracker = perception.MotionTracker()
         self.people_trackers: dict[int, perception.MotionTracker] = {}
         self.operator_look = LookMemory()
+        self.colour = LookMemory()  # clothing histogram, separate from the re-id vector
+        self.soft_credits = 0  # continuous-track frames whose light was too far to store the vector
         self.navigator = navigation.Navigator()
         # Breadcrumbs for the way back, from where we stand now (the start).
         self.route = Route(body.pos)
@@ -96,10 +113,80 @@ class Follower:
         self.look_since: float | None = None
         self.asked_back = False
         self.asked_at = 0.0
+        self.faced_last = False  # on the next loss, turn to the last heading before driving off
+
+    @property
+    def learned_count(self) -> int:
+        """Looks stored, plus continuous-track frames that confirmed the operator without a usable vector.
+
+        The extra frames count only once five real looks are in, so a run of bad light cannot finish
+        enrolment on its own.
+        """
+        extra = self.soft_credits if self.operator_look.count >= 5 else 0
+        return self.operator_look.count + extra
 
     def score(self, look) -> float:
         """How much a look is like the operator's: 1.0 is the same, around 0 unrelated."""
         return self.operator_look.similarity(look)
+
+    def _within_reach(self, pos, time) -> bool:
+        """True when pos is where the operator's LiDAR track can still be (the same gate as a rejected jump)."""
+        if pos is None or self.last_operator_pos is None or not self.tracker.seen:
+            return False
+        since = max(0.0, time - self.tracker.last_time)
+        reach = OPERATOR_JUMP + PERSON_MAX_SPEED * since
+        return distance(pos, self.tracker.last()) <= reach
+
+    def fused_score(self, look, colour=None, continuous=False) -> float:
+        """Appearance, plus the clothing histogram and whether the LiDAR track is still continuous.
+
+        A different vector length (the re-id network fell back to a histogram mid-run) is not compared
+        with the old embedding: only matching clothes on a continuous track then pass.
+        """
+        if (
+            look is not None
+            and self.operator_look.count
+            and len(look) != len(self.operator_look.total)
+        ):
+            if (
+                continuous
+                and colour is not None
+                and self.colour.count
+                and self.colour.similarity(colour) >= COLOUR_AGREE
+            ):
+                return OPERATOR_MATCH
+            return 0.0
+        appearance = self.score(look) if look is not None and self.operator_look.count else 0.0
+        total, weight = appearance, 1.0
+        if colour is not None and self.colour.count:
+            total += COLOUR_W * self.colour.similarity(colour)
+            weight += COLOUR_W
+        if continuous and self.operator_look.count:
+            total += TRACK_W
+            weight += TRACK_W
+        return total / weight
+
+    def _remember(self, memory: LookMemory, sample, adapt: bool) -> None:
+        """Add one sample. Once the window is full, drop one average sample so a new light can move it."""
+        if not sample:
+            return  # an empty look (re-id failed) must not set the vector length
+        if memory.count and len(sample) != len(memory.total):
+            return  # a histogram after a 512-d embedding is not the same vector
+        if adapt and memory.count >= OPERATOR_LEARN:
+            mean = [value / memory.count for value in memory.total]
+            memory.total = [value - part for value, part in zip(memory.total, mean)]
+            memory.count -= 1
+        memory.add(sample)
+
+    def _note_soft(self, soft, colour, continuous) -> None:
+        """Count a frame whose light was too far to trust the vector, when the track and the clothes agree."""
+        if soft is None or not continuous or not self.operator_look.count:
+            return
+        clothes = colour is not None and (not self.colour.count or self.colour.similarity(colour) >= 0.6)
+        if clothes and self.colour.count < OPERATOR_LEARN:
+            self.colour.add(colour)
+        if clothes or self.score(soft) >= 0.45:
+            self.soft_credits = min(OPERATOR_LEARN, self.soft_credits + 1)
 
     def watch(self, senses: Senses) -> Point | None:
         """Update where the people and the operator are. Returns this step's detection.
@@ -111,18 +198,26 @@ class Follower:
             tracker.update(senses.time, pos)
         operator = senses.operator
         look = senses.operator_look
+        if look is not None and len(look) == 0:
+            look = None
+        colour = getattr(senses, "operator_colour", None)
+        continuous = self._within_reach(operator, senses.time)
         if operator is not None and look is not None:
             if self.operator_look.count < OPERATOR_LEARN:
-                self.operator_look.add(
-                    look
-                )  # at the start the operator is in front of us
-                if (
-                    self.operator_look.count == OPERATOR_LEARN
-                    and self.mode == Mode.LEARN
-                ):
-                    self.mode = Mode.FOLLOW
-            elif self.score(look) < OPERATOR_MATCH:
+                self._remember(self.operator_look, look, adapt=False)
+                if colour is not None:
+                    self._remember(self.colour, colour, adapt=False)
+            elif self.fused_score(look, colour, continuous) < OPERATOR_MATCH:
                 operator = None  # does not look like the operator: someone else
+            elif continuous:
+                # Same LiDAR track: keep the look current while we follow (a room gets brighter, clothes crease).
+                self._remember(self.operator_look, look, adapt=True)
+                if colour is not None:
+                    self._remember(self.colour, colour, adapt=True)
+        elif operator is not None and look is None:
+            self._note_soft(getattr(senses, "soft_look", None), colour, continuous)
+        if self.mode == Mode.LEARN and self.operator_look.count >= 5 and self.learned_count >= OPERATOR_LEARN:
+            self.mode = Mode.FOLLOW
         if operator is not None and self.last_operator_pos is not None:
             # A detection far from where the operator can be is someone else: ignore it.
             since = senses.time - self.tracker.last_time
@@ -152,6 +247,7 @@ class Follower:
         if senses.time - self.tracker.last_time > LOST_AFTER:
             self.search_since, self.look_since = senses.time, None
             self.asked_back = False
+            self.faced_last = False
             self.mode = Mode.SEARCH
             # no brake here: one cycle keeps the last command, as the sim always did (byte-identical refactor); the Pi's must_stop covers it
             return
@@ -192,7 +288,23 @@ class Follower:
         # so a stranger who walks by is not taken for them.
         if self.operator_now is not None and senses.operator_look is not None:
             self.mode = Mode.FOLLOW
+            self.faced_last = False
             return
+        # Face the heading we last saw them on before driving away or spinning. The camera only
+        # sees 58 degrees, and a blind left turn looks at the empty side of the room first.
+        if not self.faced_last and self.last_operator_pos is not None:
+            self.body.turn_toward(self.last_operator_pos, dt)
+            dx = self.last_operator_pos[0] - self.body.pos[0]
+            dy = self.last_operator_pos[1] - self.body.pos[1]
+            err = math.atan2(math.sin(math.atan2(dy, dx) - self.body.heading),
+                             math.cos(math.atan2(dy, dx) - self.body.heading))
+            if abs(err) < FACE_TOL or now - self.search_since >= FACE_FOR:
+                self.faced_last = True
+            if not self.asked_to_wait and now - self.search_since >= ASK_WAIT:
+                self.speech.say(now, hri.WAIT_TEXT)
+                self.asked_to_wait = True
+            if not self.faced_last:
+                return
         if self.look_since is None:
             reached = self.navigator.step(
                 self.body, self.last_operator_pos, self.shapes(senses), now, dt,

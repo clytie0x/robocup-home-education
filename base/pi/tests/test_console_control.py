@@ -94,9 +94,18 @@ class ControlTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def log(self):
-        return [json.loads(line) for line in
-                (Path(self.tmp.name) / "console" / "commands.jsonl").read_text(encoding="utf-8").splitlines()]
+    def log(self, n=None):
+        """The command lines written so far. The server writes a line after it has sent the answer, so a read
+        in the same moment can miss the last POST. `n` waits (briefly) until that many lines are there."""
+        path = Path(self.tmp.name) / "console" / "commands.jsonl"
+        deadline = time.monotonic() + 1.0
+        while True:
+            lines = []
+            if path.is_file():
+                lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if n is None or len(lines) >= n or time.monotonic() >= deadline:
+                return lines
+            time.sleep(0.01)
 
     def test_a_program_is_taken_only_from_the_pi_itself(self):
         dry = {"drive": False, "speed": 0.08, "minutes": 1}
@@ -116,7 +125,7 @@ class ControlTest(unittest.TestCase):
         self.request("/api/stop", {})
         text = (Path(self.tmp.name) / "console" / "commands.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("2468", text)
-        first, wrong, stop = self.log()
+        first, wrong, stop = self.log(3)
         self.assertEqual((first["client"], first["address"], first["path"], first["code"]),
                          ("xohm@10.0.0.9", "127.0.0.1", "/api/run/command", 409))
         self.assertEqual(first["body"], {"command": "follow"})
