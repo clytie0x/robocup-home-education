@@ -53,7 +53,7 @@ import safety
 
 # The arm (owner's numbers, 2026-11-15)
 ARM_Y = 0.0145  # m, the arm's pan axis is at robot (0.012, 0.0145)
-TARGET_X = 0.31  # m, where the bag centre ends: 0.298 ahead of the pan axis, inside its 0.24 to 0.34 reach
+TARGET_X = 0.36  # m, bag centre 0.348 m ahead of pan axis -> front wall ~0.293 m (sweet spot of 0.24..0.34 reach & visible in front webcam)
 X_TOL = 0.03  # m, reached when the centre is this close to TARGET_X
 Y_TOL = 0.03  # m, and this close to ARM_Y
 Y_AIM = 0.015  # m, before the creep a turn puts the bag this close to ARM_Y (straight on keeps y)

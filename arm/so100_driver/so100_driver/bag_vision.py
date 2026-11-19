@@ -63,9 +63,14 @@ def floor_diff_mask(im, orange=None):
     if orange is None:
         orange = orange_mask(im)
     h, w = im.shape[:2]
-    fg = (~adaptive_floor_mask(im, orange)).astype(np.uint8)
+    lab, med, thresh = _estimate_floor_lab(im, orange)
+    fg = (np.linalg.norm(lab - med, axis=2) > thresh).astype(np.uint8)
     fg[orange > 0] = 0
-    # Ignore the extreme top 12% and side 8% borders (robot deck / background clutter)
+    # On bright glossy floors, exclude washed-out ceiling-light glare (high V, very low S)
+    if med[0] > 140.0:
+        hsv = cv2.cvtColor(im, cv2.COLOR_BGR2HSV)
+        fg[(hsv[..., 2] > 228) & (hsv[..., 1] < 38)] = 0
+    # Ignore the extreme top 12% and side 6% borders (robot deck / background clutter)
     fg[:int(h * 0.12), :] = 0
     fg[:, :int(w * 0.06)] = 0
     fg[:, int(w * 0.94):] = 0
