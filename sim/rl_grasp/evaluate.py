@@ -26,10 +26,10 @@ def format_report(name, episodes, successes, times, collisions):
     ))
 
 
-def run(policy, episodes, seed, nominal, max_tries):
+def run(policy, episodes, seed, nominal, max_tries, hard=False):
     """`policy` is "scripted" or a checkpoint path."""
     name, choose = _chooser(policy)
-    env = GraspEnv(nominal=nominal, max_tries=max_tries, seed=seed)
+    env = GraspEnv(nominal=nominal, max_tries=max_tries, seed=seed, hard=hard)
     successes = 0
     collisions = 0
     times = []

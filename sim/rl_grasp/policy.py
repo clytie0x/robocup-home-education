@@ -39,12 +39,15 @@ def _trunk(in_dim, hidden):
 class ActorCritic(nn.Module):
     """PPO actor and value, one trunk."""
 
-    def __init__(self, obs_dim, act_dim, hidden=64):
+    def __init__(self, obs_dim, act_dim, hidden=64, zero_mean=False, log_std_init=-0.5):
         super().__init__()
         self.body = _trunk(obs_dim, hidden)
         self.mean = nn.Linear(hidden, act_dim)
         self.value = nn.Linear(hidden, 1)
-        self.log_std = nn.Parameter(torch.full((act_dim,), -0.5))
+        self.log_std = nn.Parameter(torch.full((act_dim,), float(log_std_init)))
+        if zero_mean:
+            nn.init.zeros_(self.mean.weight)
+            nn.init.zeros_(self.mean.bias)
 
     def forward(self, obs):
         features = self.body(obs)
@@ -77,11 +80,17 @@ class ActorCritic(nn.Module):
 class Actor(nn.Module):
     """SAC actor. Twin Q networks live next to the update."""
 
-    def __init__(self, obs_dim, act_dim, hidden=64):
+    def __init__(self, obs_dim, act_dim, hidden=64, zero_mean=False, log_std_init=None):
         super().__init__()
         self.body = _trunk(obs_dim, hidden)
         self.mean = nn.Linear(hidden, act_dim)
         self.log_std = nn.Linear(hidden, act_dim)
+        if zero_mean:
+            nn.init.zeros_(self.mean.weight)
+            nn.init.zeros_(self.mean.bias)
+        if log_std_init is not None:
+            nn.init.zeros_(self.log_std.weight)
+            nn.init.constant_(self.log_std.bias, float(log_std_init))
 
     def forward(self, obs):
         features = self.body(obs)

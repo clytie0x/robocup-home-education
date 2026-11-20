@@ -11,8 +11,10 @@ from .reward import outcome_reward
 from .scene import actuator_id, joint_id, load_scene, qpos_of, qvel_of
 
 class GraspEnv:
-    def __init__(self, nominal=False, max_tries=1, seed=0):
+    def __init__(self, nominal=False, max_tries=1, seed=0, hard=False, tuned=False):
         self.nominal = bool(nominal)
+        self.hard = bool(hard)
+        self.tuned = bool(tuned)
         self.max_tries = int(max_tries)
         self.rng = np.random.default_rng(seed)
         self._scenes = {}
@@ -49,7 +51,10 @@ class GraspEnv:
         self._apply_dynamics(floor)
         self._place_bag(wall, left, yaw, floor)
         self._park_arm()
-        self.cam_true = self.cam_nominal if self.nominal else camera.sample_camera(self.kin, self.rng)
+        if self.nominal:
+            self.cam_true = self.cam_nominal
+        else:
+            self.cam_true = camera.sample_camera(self.kin, self.rng, hard=self.hard)
         self._settle()
         self.tries = 0
         self._clock = float(self.data.time)
@@ -80,25 +85,35 @@ class GraspEnv:
             handle = (0.0, 0.0, 0.0, 0.0)
         else:
             handle = (*reading["handle"], 1.0)
-        return np.asarray((
+        raw = np.asarray((
             *position, *velocity, position[-1], load,
             reading["forward"], reading["left"], *handle,
             reading["width"], 1.0 if reading["standing"] else 0.0,
             reading["confidence"], 1.0 if reading["source"] == "camera" else 0.0,
         ), dtype=np.float64)
+        return raw / np.asarray(C.OBS_SCALE, dtype=np.float64)
 
     def reading(self):
         truth = _truth(self.model, self.data)
-        noise = 0.0 if self.nominal else C.PIXEL_NOISE_PX
-        dropout = 0.0 if self.nominal else C.DROPOUT_P
-        return camera.detect(
+        if self.nominal:
+            noise, dropout = 0.0, 0.0
+        elif self.hard:
+            noise, dropout = C.HARD_PIXEL_NOISE_PX, C.HARD_DROPOUT_P
+        else:
+            noise, dropout = C.PIXEL_NOISE_PX, C.DROPOUT_P
+        reading = camera.detect(
             truth, self.cam_true, self.cam_nominal, self.rng, self.kin, noise, dropout,
         )
+        # coco, the real default, aims at the rim. The handle shift is the tuned model.
+        if not self.tuned:
+            reading["handle"] = None
+        return reading
 
     def _sample_pose(self):
         if self.nominal:
             return C.NOMINAL_WALL, 0.0, 0.0, C.FLOOR_Z
-        wall = float(self.rng.uniform(0.30, 0.318))
+        # 0.305–0.312 m: the close collides near 0.28 m and REACH_WALL is 0.32 m.
+        wall = float(self.rng.uniform(0.305, 0.312))
         left = float(self.rng.uniform(-0.04, 0.04))
         yaw = math.radians(float(self.rng.uniform(-30.0, 30.0)))
         floor = C.FLOOR_Z + float(self.rng.uniform(-0.01, 0.01))
@@ -108,15 +123,19 @@ class GraspEnv:
         if self.nominal:
             return
         snap = self._nominal_dyn
-        mass_scale = float(self.rng.uniform(0.4, 2.0))
+        mass_range = C.HARD_MASS_SCALE if self.hard else C.MASS_SCALE
+        friction_range = C.HARD_FRICTION_SCALE if self.hard else C.FRICTION_SCALE
+        actuator_range = C.HARD_ACTUATOR_SCALE if self.hard else C.ACTUATOR_SCALE
+        bend_range = C.HARD_BEND_SCALE if self.hard else C.BEND_SCALE
+        mass_scale = float(self.rng.uniform(*mass_range))
         bag = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "bag")
         self.model.body_mass[bag] = snap["mass"][bag] * mass_scale
-        slide = float(self.rng.uniform(0.5, 1.5))
+        slide = float(self.rng.uniform(*friction_range))
         for name in ("bag_wall", "rim", "floor", "pad_fixed", "pad_jaw"):
             gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
             self.model.geom_friction[gid, 0] = snap["friction"][gid, 0] * slide
         for index in range(self.model.nu):
-            scale = float(self.rng.uniform(0.7, 1.3))
+            scale = float(self.rng.uniform(*actuator_range))
             self.model.actuator_gainprm[index, 0] = snap["gain"][index, 0] * scale
             self.model.actuator_biasprm[index, 1] = snap["bias"][index, 1] * scale
             self.model.actuator_biasprm[index, 2] = snap["bias"][index, 2] * scale
@@ -124,7 +143,7 @@ class GraspEnv:
         if self.model.flex_bending.size:
             # Coefficients above the compiled value segfault MuJoCo 4.0.1.
             # Entries of -1 are unused slots, not stiffnesses, so they stay.
-            bend = float(self.rng.uniform(0.3, 1.0))
+            bend = float(self.rng.uniform(*bend_range))
             scaled = snap["bend"].copy()
             positive = scaled > 0.0
             scaled[positive] *= bend
