@@ -331,7 +331,10 @@ def main():
     if bus == "bluetooth" and not sensor:
         sys.exit("REFUSED: the Bluetooth controller shows no motion-sensor stream, so a lost link could not be noticed")
     print("controller %s (%s), heartbeat from %s" % (js, bus or "bus unknown", sensor or "nothing"), flush=True)
-    pad = Pad(js, sensor)
+    try:
+        pad = Pad(js, sensor)
+    except OSError as error:
+        sys.exit("REFUSED: cannot open the controller %s (%s): plug it in, or pair and connect it" % (js, error.strerror or error))
     session = wheels_ = None
     signal.signal(signal.SIGTERM, _terminate)  # the console's STOP: end through the finally blocks, like Ctrl+C
     try:

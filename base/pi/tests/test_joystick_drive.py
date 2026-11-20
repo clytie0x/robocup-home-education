@@ -295,7 +295,7 @@ class TermPad(FakePad):
 class FakeOpens:
     """Stands in for Pad, LiDAR and Wheels in main(): records what main opened and in what order."""
 
-    def __init__(self, test, script, pad_class=FakePad):
+    def __init__(self, test, script, pad_class=FakePad, open_error=None):
         self.opened, self.pad, self.session, self.wheels = (
             [],
             pad_class(script),
@@ -311,11 +311,14 @@ class FakeOpens:
             sys.argv,
             os.environ.get(wheels.SAFE_RUN_ENV),
         )
-        joystick_drive.Pad = lambda path, sensor=None: (
-            self.opened.append("pad"),
-            self.paths.append((path, sensor)),
-            self.pad,
-        )[2]
+        def open_pad(path, sensor=None):
+            if open_error:
+                raise open_error
+            self.opened.append("pad")
+            self.paths.append((path, sensor))
+            return self.pad
+
+        joystick_drive.Pad = open_pad
         joystick_drive.lidar.LidarSession = lambda: (
             self.opened.append("lidar") or self.session
         )
@@ -340,8 +343,8 @@ class MainTest(unittest.TestCase):
         else:
             os.environ[wheels.SAFE_RUN_ENV] = env
 
-    def main(self, argv, script=(), safe_run=True, pad_class=FakePad):
-        self.fakes = FakeOpens(self, script, pad_class)
+    def main(self, argv, script=(), safe_run=True, pad_class=FakePad, open_error=None):
+        self.fakes = FakeOpens(self, script, pad_class, open_error)
         if safe_run:
             os.environ[wheels.SAFE_RUN_ENV] = "1"
         else:
@@ -408,6 +411,13 @@ class MainTest(unittest.TestCase):
         code, _ = self.main(["--yes-owner-at-robot"])
         self.assertTrue(code and code.startswith("REFUSED"), code)
         self.assertEqual(self.fakes.opened, [])  # a lost Bluetooth link could not be noticed
+
+    def test_a_controller_that_is_not_there_is_refused_in_plain_words(self):
+        error = FileNotFoundError(2, "No such file or directory")
+        code, out = self.main(["--yes-owner-at-robot"], open_error=error)
+        self.assertTrue(code and code.startswith("REFUSED"), code)
+        self.assertIn("pair", code)  # says what to do, no traceback
+        self.assertEqual(self.fakes.opened, [])
 
     def test_the_device_option_skips_the_search(self):
         self.addCleanup(setattr, joystick_drive, "devices_text", joystick_drive.devices_text)
