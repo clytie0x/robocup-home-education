@@ -19,7 +19,7 @@ Commands go down the left column; status comes back the same way.
         | dashboard 127.0.0.1:8080 (/command, /status, /control)          |
         | <- Jetson base_bridge, TCP :5604 (voice flow's commands)        |
         | -> Jetson detector :5601 (frames out, people back)              |
-        | -> Jetson slam_bridge :5602 (scans out, map correction back)    |
+        | (slam_bridge :5602: offline only, tools/slam_replay.py)         |
         | -> Jetson front_camera :5606 (bag look)                         |
         | -> plan_server 127.0.0.1:5603 (paths)                           |
         v                                              | starts 8 programs, POST /arm
@@ -34,9 +34,9 @@ Commands go down the left column; status comes back the same way.
 | page, robotctl | console | HTTP JSON | Pi 8081 | every command; GET status | on demand, page polls |
 | console | run_follow | HTTP JSON (127.0.0.1) | Pi 8080 | task buttons, STOP, status | page polls |
 | Jetson base_bridge | run_follow | TCP JSON lines | Pi 5604 | voice flow's follow/wait/return/bag; status back | ping 2 Hz, status 5 Hz |
-| run_follow | detector | TCP length-prefixed JSON + JPEG | Jetson 5601 | frames out, people/bags/pose back | about 30/s |
+| run_follow | detector | TCP length-prefixed JSON + JPEG | Jetson 5601 | frames out, people/bags/pose back | at most 10/s (one frame per 0.1 s cycle, newest only; a ceiling, not measured) |
 | console (Skeleton on, no job) | detector | same | Jetson 5601 | pose for the live view | 5/s |
-| run_follow | slam_bridge | TCP length-prefixed JSON | Jetson 5602 | scans out, map correction back | each LiDAR revolution |
+| tools/slam_replay.py (offline only, run_follow does not use it) | slam_bridge | TCP length-prefixed JSON | Jetson 5602 | recorded scans out, map correction back | 1 per saved scan, real time |
 | run_follow | plan_server | TCP | Pi 5603 (local) | paths, in a second process | 2/s |
 | run_follow (bag look) | front_camera in bag_arm | TCP | Jetson 5606 | bag top from the front camera | once per bag |
 | console | agent | HTTP JSON | Jetson 8090 | programs, /arm, status | on demand, status every 3 s (REFRESH) |

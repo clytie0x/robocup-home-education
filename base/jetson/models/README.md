@@ -100,6 +100,26 @@ done
 
 Engines are tied to this Jetson's TensorRT version; rebuild them after a TensorRT upgrade.
 
+## Engines `server.py` uses by default
+
+The pairs above (`yolo11n_256x320`, `osnet_x0_25`, `yolo11n-pose_256x320`) are the fallbacks. `server.py` (DETECTOR,
+REID, POSE and their `_FALLBACK`) takes the default when it is a non-empty file in `~/hmc-follow/models/`, otherwise
+the fallback. The source, licence and SHA-256 of the default engines are not recorded in this README.
+
+| Role | Default | Fallback |
+|---|---|---|
+| Person detector | `yolo11s_480x640.engine` | `yolo11n_256x320.engine` |
+| Look vectors | `osnet_ain_x1_0_msmt17_256x128.engine` | `osnet_x0_25_msmt17_256x128.engine` |
+| Pose (only when asked) | `yolo11s-pose_480x640.engine` | `yolo11n-pose_256x320.engine` |
+
+If neither pose engine exists the server answers without keypoints. If the look engine fails while running,
+`reid.py` first rebuilds it with a static batch of 1 (needs the matching `.onnx` and `trtexec`), then tries
+`osnet_x1_0_msmt17_256x128.engine`, then the x0_25 fallback, then ONNX, then a clothing histogram.
+
+Speed: the 94.7 frames/s median (`hardware-assessment-2026-11-13.md`, `bench.py`, 300 frames of 320 x 240)
+was measured on 2026-11-13 for the small pair only, `yolo11n_256x320` with `osnet_x0_25`. The default engines
+have no measurement yet.
+
 ## Bench memory figures
 
 `bench.py` reports `gpu_engines_buffers_mib`: engines plus device buffers, excluding the CUDA context (the first

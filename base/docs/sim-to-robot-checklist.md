@@ -21,7 +21,7 @@ a hardware result.
 
 | Need | State today | How to close it |
 |---|---|---|
-| Camera pitch known within 1° | Not measured (estimates 11 to 17° up) | `base/pi/tools/sensor_check.py --wall` with a flat board 1.2 to 1.5 m away |
+| Camera pitch known within 1° | Measured: 12.3° up on the evening of 2026-11-13 (`sensor_check.py --wall`, 30 of 30 frames fitted, spread 12.32 to 12.36; `camera_pitch_deg` in `base/params.json`; `base/docs/hardware-assessment-2026-11-13.md`, "Sensor geometry settled") | Done; measure again after any change to the camera mount |
 | LiDAR front angle settled | 178.7° in use; the robot's own posts suggest 180.3° | `sensor_check.py --yaw` with an object taller than 0.35 m |
 | Depth camera sees a 0.12 m object from 0.6 m | Assumed by `--sensors robot` | Person-follow plan, Task 6 step 3 |
 | Retractable barrier belt (about 0.9 m up) seen as blocked | Not handled: the LiDAR sees only the posts and the 0.24 m robot fits under the belt | Depth image once the pitch is known; check with a real barrier |
