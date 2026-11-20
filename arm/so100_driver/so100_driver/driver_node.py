@@ -218,8 +218,15 @@ class Driver(Node):
         """code: the error_code a running arm goal ends with (task_rules); traj: that goal's trajectory
         when the motion core already let go of it."""
         self.end_traj(code, traj)
-        self.fault = reason
-        self.motion.hold(self.present, keep_gripper=True)   # hold the arm joints, the jaws keep squeezing
+        with self.lock:
+            self.fault = reason
+            self.motion.hold(self.present, keep_gripper=True)   # hold the arm joints, the jaws keep squeezing
+            # Send that hold to the servos NOW: with a fault set, tick() writes nothing, so a joint with torque
+            # would go on to the goal it had (review 2026-11-19: a slow_tick fault left the shoulder moving).
+            try:
+                self.arm.write_goals(names_to_ids(self.motion.fault_goals(self.present)))
+            except Exception as exc:  # noqa: BLE001 - lost contact: the hold cannot be sent, say so
+                self.fault = reason = f"{reason} (hold NOT sent to the servos: {exc})"
         self.get_logger().error(reason)
 
     def end_traj(self, code, traj=None):

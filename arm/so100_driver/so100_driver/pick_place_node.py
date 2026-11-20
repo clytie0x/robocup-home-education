@@ -68,6 +68,8 @@ from . import motion_profile, pick_log
 from .task_rules import (PICK_PLACE, PROBE_JOINTS, Failed, api_code, descent_loads, gripper_camera_calibrated,
                          gripper_load, held_by_weight, probe_contact, settled_load, still_held, top_unknown)
 
+# action_msgs/GoalStatus terminal states (constants here: the pure-Python tests import no ROS messages)
+GOAL_SUCCEEDED, GOAL_CANCELED = 4, 5
 READY = {"shoulder_pan": 0.0, "shoulder_lift": 1.2, "elbow_flex": -1.2, "wrist_flex": 0.3, "wrist_roll": 0.0}
 REST = {"shoulder_pan": 0.0, "shoulder_lift": 0.04, "elbow_flex": -0.04, "wrist_flex": 0.0, "wrist_roll": 0.0}  # SRDF 'rest'
 AT_REST = 0.08     # rad: every joint this close to REST counts as resting
@@ -582,11 +584,17 @@ class PickPlace(Node):
         return fut.result()
 
     def run_action(self, client, goal, timeout, what):
+        """Send one action goal and wait for it. Raises STOPPED when the task was stopped (before sending:
+        no new move after a stop) and FAILED when the goal ended without success and its result carries no
+        error code of its own (a gripper goal the driver aborted: too hot, a fault). Results with an error
+        code (MoveIt, FollowJointTrajectory) are returned for the caller to map (review 2026-11-19, 5)."""
         self.moved = True
         if not client.wait_for_server(timeout_sec=3.0):
             raise Failed(f"{what}: ไม่พบ action server", "FAILED")
         if self.preempt:
             raise Failed(f"{what}: ให้ทางงานใหม่", "STOPPED")
+        if self.cancel_requested:
+            raise Failed(f"{what}: ถูกสั่งหยุดแล้ว ไม่ส่งคำสั่งใหม่", "STOPPED")
         handle = self.wait(client.send_goal_async(goal), 5.0)
         if handle is None or not handle.accepted:
             raise Failed(f"{what}: คำสั่งถูกปฏิเสธ", "FAILED")
@@ -602,6 +610,15 @@ class PickPlace(Node):
         if res is None:
             handle.cancel_goal_async()
             raise Failed(f"{what}: หมดเวลา", "FAILED")
+        status = getattr(res, "status", GOAL_SUCCEEDED)
+        if self.cancel_requested or status == GOAL_CANCELED:
+            raise Failed(f"{what}: ถูกสั่งหยุด", "STOPPED")
+        if status != GOAL_SUCCEEDED:
+            code = getattr(res.result, "error_code", None)
+            code = getattr(code, "val", code)
+            if code not in (None, 0, 1):        # the caller maps its own error code (line, moveit_to)
+                return res.result
+            raise Failed(f"{what}: action จบแบบไม่สำเร็จ (status {status})", "FAILED")
         return res.result
 
     def active_speeds(self):
@@ -720,7 +737,10 @@ class PickPlace(Node):
         goal = GripperCommand.Goal()
         goal.command.position = float(min(pos, self.grip_max))
         goal.command.max_effort = 1.0
-        return self.run_action(self.grip, goal, 10.0, what)
+        res = self.run_action(self.grip, goal, 10.0, what)
+        if not (res.reached_goal or res.stalled):   # the jaws neither got there nor stopped on something
+            raise Failed(f"{what}: ก้ามไม่ถึงที่สั่งและไม่ได้หนีบอะไร (ตำแหน่ง {res.position:.3f} rad)", "FAILED")
+        return res
 
     # ---------------------------------------------------------------------------- task runner
     # Every motion task (panel button, voice topic, API action) runs through run_task(): one at a time,
