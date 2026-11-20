@@ -2,8 +2,9 @@
 
 Since 2026-11-18 the webcam (webcam_view.py, port 8082) is FIXED under the robot's top deck, looking ahead and
 down; it no longer rides on the forearm. Turning the arm does not change its picture, so the old "turn the
-arm until the bag is in the middle of the image" step is gone. The camera's pinhole model comes from the HMC
-team's calibration (front_camera.json, robot frame with its origin at the turning centre).
+arm until the bag is in the middle of the image" step is gone. The camera model comes from the HMC team's
+calibration (front_camera.json, robot frame with its origin at the turning centre): a pinhole, or OpenCV
+fisheye when that file says dist_model "fisheye".
 
   1. where (before EVERY try: a miss or a drop may have pushed the bag): the arm goes to LOOK if it would be
      in the picture, then the bag's centre comes from the image (locate). Two edge estimates, the rim at
@@ -251,10 +252,57 @@ def pick_result(done):
 
 
 # ---------------------------------------------------------------------- geometry (no ROS: unit-tested)
+# The same three helpers are copied in base/jetson/front_camera.py. The two trees do not import each other.
+def _lens(dist_model, dist):
+    """("pinhole" or "fisheye", (k1, k2, k3, k4)). An unknown name is an error, not a silent pinhole."""
+    model = "pinhole" if dist_model is None else str(dist_model)
+    if model not in ("pinhole", "fisheye"):
+        raise ValueError("unknown dist_model %r (expected \"pinhole\" or \"fisheye\")" % model)
+    coeffs = (list(dist) if dist is not None else []) + [0.0, 0.0, 0.0, 0.0]
+    return model, tuple(float(k) for k in coeffs[:4])
+
+
+def _fish_r(theta, k):
+    """OpenCV fisheye radius over f: theta * (1 + k1 theta^2 + k2 theta^4 + k3 theta^6 + k4 theta^8)."""
+    t2 = theta * theta
+    return theta * (1.0 + t2 * (k[0] + t2 * (k[1] + t2 * (k[2] + t2 * k[3]))))
+
+
+def _fish_theta(rd, k, iterations=20):
+    """Ray angle whose fisheye radius over f is rd (rd >= 0). Newton, held inside [0, pi/2].
+
+    OpenCV's model stops at 180 deg, so rd is clipped to pi/2. A derivative near zero, or a step
+    that is not a finite number, stops the loop instead of dividing.
+    """
+    rd = float(rd)
+    if not math.isfinite(rd) or rd <= 0.0:
+        return 0.0
+    rd = min(rd, math.pi / 2.0)
+    theta = rd
+    for _ in range(iterations):
+        t2 = theta * theta
+        f = _fish_r(theta, k) - rd
+        df = 1.0 + t2 * (3.0 * k[0] + t2 * (5.0 * k[1] + t2 * (7.0 * k[2] + t2 * 9.0 * k[3])))
+        if not math.isfinite(df) or abs(df) < 1e-14:
+            break
+        step = f / df
+        if not math.isfinite(step):
+            break
+        theta = theta - step
+        if theta < 0.0:
+            theta = 0.0
+        elif theta > math.pi / 2.0:
+            theta = math.pi / 2.0
+        if abs(step) < 1e-15:
+            break
+    return theta if math.isfinite(theta) else 0.0
+
+
 class FrontCamera:
-    """The fixed front camera from front_camera.json (HMC team, hmc-follow/front_camera.py): pinhole fx = fy,
+    """The fixed front camera from front_camera.json (HMC team, hmc-follow/front_camera.py): fx = fy,
     at (x, y, z) in the robot frame (x ahead, y left, z up from the floor, origin at the turning centre),
-    R = Rz(yaw) Ry(pitch) Rx(roll) R0, R0 = OpenCV camera axes -> robot with all angles zero."""
+    R = Rz(yaw) Ry(pitch) Rx(roll) R0, R0 = OpenCV camera axes -> robot with all angles zero.
+    dist_model "fisheye" (OpenCV k1..k4) is applied in ray and project; otherwise the lens is a plain pinhole."""
 
     R0 = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
 
@@ -266,6 +314,7 @@ class FrontCamera:
         self.width, self.height = int(d.get("width", 640)), int(d.get("height", 480))
         self.pos = np.array([float(d["x"]), float(d["y"]), float(d["z"])])
         self.mirror = bool(d.get("mirror", False))
+        self.dist_model, self.dist = _lens(d.get("dist_model", "pinhole"), d.get("dist"))
         y, p, r = (math.radians(float(d.get(k, 0.0))) for k in ("yaw_deg", "pitch_deg", "roll_deg"))
         cy, sy, cp, sp, cr, sr = math.cos(y), math.sin(y), math.cos(p), math.sin(p), math.cos(r), math.sin(r)
         rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]])
@@ -297,12 +346,29 @@ class FrontCamera:
         return twin
 
     def ray(self, u, v):
-        d = np.array([(u - self.cx) / self.fx * (-1.0 if self.mirror else 1.0), (v - self.cy) / self.fx, 1.0])
+        if self.dist_model == "fisheye":
+            mx = (u - self.cx) / self.fx * (-1.0 if self.mirror else 1.0)
+            my = (v - self.cy) / self.fx
+            rd = math.hypot(mx, my)
+            if rd > 1e-12:
+                scale = math.tan(min(_fish_theta(rd, self.dist), math.radians(89.0))) / rd
+                mx, my = mx * scale, my * scale
+            d = np.array([mx, my, 1.0])
+        else:
+            d = np.array([(u - self.cx) / self.fx * (-1.0 if self.mirror else 1.0), (v - self.cy) / self.fx, 1.0])
         d = self.rot @ d
         return d / np.linalg.norm(d)
 
     def project(self, p):
         pc = (np.asarray(p, float) - self.pos) @ self.rot
+        if self.dist_model == "fisheye":
+            r = math.hypot(float(pc[0]), float(pc[1]))
+            if r > 1e-12:
+                s = _fish_r(math.atan2(r, float(pc[2])), self.dist) / r
+            else:
+                s = 1.0 / float(pc[2])
+            u = self.fx * pc[0] * s
+            return (self.cx - u if self.mirror else self.cx + u), self.cy + self.fx * pc[1] * s
         u = self.fx * pc[0] / pc[2]
         return (self.cx - u if self.mirror else self.cx + u), self.cy + self.fx * pc[1] / pc[2]
 
@@ -662,12 +728,16 @@ class CameraBag:
                 continue                           # (the dry run picks the way; never stop half-way there)
             try:
                 self.tip(pre_r, close_z + pre_z, pitch, roll, "ไปเหนือถุง", sim=sim)
-            except Failed:
+            except Failed as exc:
+                if exc.code != "UNREACHABLE":      # a stop, a driver fault, too hot: end here (review 2026-11-19)
+                    raise
                 continue
             try:
                 self.tip(r, close_z + 0.10, pitch, roll, "เหนือถุง", sim=sim)
                 return
-            except Failed:
+            except Failed as exc:
+                if exc.code != "UNREACHABLE":
+                    raise
                 continue
         raise Failed(f"ไปเหนือผนังหน้าถุงไม่ได้ (ปลายก้าม {r:.3f} ม. จากแกนหมุน)", "UNREACHABLE")
 
@@ -852,7 +922,9 @@ class CameraBag:
             try:
                 self.tip(r, cz + dz, pitch, roll, "ยกถุงตรงขึ้น", pull_in=0.03, speed=self.speed("lift"))
                 lifted_to = dz
-            except Failed:
+            except Failed as exc:
+                if exc.code != "UNREACHABLE":      # only "out of reach" ends the lift early; a stop ends the pick
+                    raise
                 break
         time.sleep(0.5)
         return lifted_to
@@ -870,7 +942,9 @@ class CameraBag:
                     self.tip(r, tz, pitch, roll, "เก็บถุงไว้ด้านข้าง (หลบ LiDAR)", pull_in=0.06,
                              speed=self.speed("held"))
                     held["theta"] = self.theta
-                except Failed:
+                except Failed as exc:
+                    if exc.code != "UNREACHABLE":  # a stop while holding the bag: no swing to the other side
+                        raise
                     moved_ok = False
                     break
             if moved_ok:

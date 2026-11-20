@@ -56,7 +56,8 @@ def _guess(session):
     return fc.FrontCamera(fx=g.get("fx", fc.F_GUESS), x=g.get("x", fc.X_GUESS), y=g.get("y", 0.0),
                           z=g.get("z", fc.Z_GUESS), yaw=math.radians(g.get("yaw_deg", 0.0)),
                           pitch=math.radians(g.get("pitch_deg", 0.0)), roll=math.radians(g.get("roll_deg", 0.0)),
-                          width=g.get("width", fc.WIDTH), height=g.get("height", fc.HEIGHT))
+                          width=g.get("width", fc.WIDTH), height=g.get("height", fc.HEIGHT),
+                          dist_model=g.get("dist_model", "pinhole"), dist=g.get("dist"))
 
 
 def _robot_wall(session, fr, pose):

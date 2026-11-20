@@ -1,0 +1,5 @@
+checkpoints/
+*.pt
+__pycache__/
+.pytest_cache/
+MUJOCO_LOG.TXT
