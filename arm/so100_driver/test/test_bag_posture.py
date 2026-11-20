@@ -1,38 +1,81 @@
-"""Bag pick posture from the 2026-11-19 simulation (bag_camera.py): the small-tilt raise, the outward close first,
-and the hold check from the carry side. No ROS, no arm."""
+"""Bag pick posture (bag_camera.py): the one-move carry, the grip depth, the outward close first and the hold check
+from the carry side (simulation 2026-11-19/20, robot 2026-11-20). No ROS, no arm."""
 import math
 import os
 import sys
 import unittest
+
+import numpy as np
 from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
 from so100_driver import bag_camera as bc  # noqa: E402
 from so100_driver.task_rules import Failed  # noqa: E402
 
 
-class RaiseLadder(unittest.TestCase):
-    def ladder(self, top=0.05, pitch=-60, want=0.16):
+class CarryOneMove(unittest.TestCase):
+    """The held move after the close (2026-11-20 simulation and robot): one move, the bag's bottom over the LiDAR,
+    the least tilt, never dragged on the floor or swung into the deck."""
+
+    @classmethod
+    def setUpClass(cls):
+        from test_bag_pick_continuous import FLOOR, Node
+        from so100_driver.ik import deck_box
+        cls.FLOOR = FLOOR
+        cls.node = Node(bc.LOOK)
+        cls.node.deck = deck_box(cls.node.kin, 0.18, 0.22, 0.18, 0.22, -0.068, FLOOR)
+        cls.cam = bc.CameraBag(cls.node)
+        cls.cam.theta = 0.0
+        cls.cz = FLOOR + 0.22                      # tall paper bag: rim 0.27, 5 cm of wall in the jaws
+        cls.close_q = {j: float(bc.LOOK[j]) for j in bc.ARM}
+        cls.cam.tip(0.26, cls.cz, -60, 180.0, "", sim=cls.close_q)
+
+    def test_one_move_to_the_left_side_with_the_bottom_over_the_lidar(self):
+        path, theta, pitch, reach = self.cam.carry_plan(0.26, self.cz, -60, 180.0, sim=self.close_q)
+        self.assertAlmostEqual(math.degrees(theta), bc.CARRY_SIDES[0])
+        self.assertGreaterEqual(pitch, -60)                          # never steeper than the grasp
+        self.assertLessEqual(abs(pitch - -60), 35)                   # a small tilt (robot: 25 deg)
+        g = self.node.kin.gripper_point(path[-1], (bc.GAP_MID, bc.TIP_Y, 0.0))
+        bottom = g[2] - self.cz                                      # tips minus the grip height, over the floor
+        self.assertGreaterEqual(bottom, bc.LIDAR_Z + 0.02)
+        self.assertEqual(self.cam.theta, 0.0)                        # the bearing of the bag is kept
+
+    def test_dragging_and_the_deck_are_refused(self):
+        grasp = self.node.kin.gripper_point(self.close_q, (bc.GAP_MID, bc.TIP_Y, 0.0))[:2]
+        grip_h = self.cz - self.FLOOR
+        self.assertTrue(self.cam.held_clear([self.close_q], grip_h, grasp))
+        moved = grasp + [0.0, 0.05]                                  # the grip 5 cm away, the bottom still down
+        self.assertFalse(self.cam.held_clear([self.close_q], grip_h, moved))
+        # a deck under the whole hanging bag: refused while the bag's bottom is below the deck top, clear above it
+        real, self.node.deck = self.node.deck, (np.array([-1.0, -1.0, self.FLOOR]), np.array([1.0, 1.0, -0.068]))
+        try:
+            self.assertFalse(self.cam.held_clear([self.close_q], grip_h, (math.inf, math.inf)))
+            self.assertTrue(self.cam.held_clear([self.close_q], grip_h - 0.30, (math.inf, math.inf)))
+        finally:
+            self.node.deck = real
+
+    def test_a_low_bag_must_be_nearer(self):
+        self.assertAlmostEqual(bc.wall_reach(0.13), 0.24)
+        self.assertAlmostEqual(bc.wall_reach(0.16), 0.29)
+        self.assertAlmostEqual(bc.wall_reach(0.22), bc.REACH_WALL)
+        self.assertAlmostEqual(bc.wall_reach(0.10), 0.24)
+
+    def test_the_put_down_lets_go_with_the_bottom_on_the_floor(self):
+        self.assertEqual(bc.PUT_DROP, 0.0)
+
+
+class GripDepth(unittest.TestCase):
+    def cam(self, depth):
+        values = {"bag_cam_grip_depth": depth, "bag_cam_rim_h": 0.27, "bag_cam_close_h": 0.21}
         cam = bc.CameraBag(NS(kin=NS(heading0=0)))
-        return cam.raise_ladder(top, pitch, want)
+        cam.p = lambda k: values[k]
+        return cam
 
-    def test_tilts_only_to_hold_pitch_and_ends_at_the_height(self):
-        steps = self.ladder()
-        self.assertEqual(len(steps), bc.RAISE_STEPS)
-        self.assertAlmostEqual(steps[-1][0], bc.HOLD_PITCH)
-        self.assertAlmostEqual(steps[-1][1], 0.16)
-        pitches = [p for p, _z in steps]
-        self.assertTrue(all(-60 < p <= bc.HOLD_PITCH for p in pitches))    # never flatter than HOLD_PITCH
-        self.assertEqual(pitches, sorted(pitches))                          # a little more tilt each step
-
-    def test_never_goes_down(self):
-        steps = self.ladder(top=0.20, want=0.16)                            # already high: stays there
-        self.assertTrue(all(z >= 0.20 for _p, z in steps))
-
-    def test_bag_bottom_clears_the_lidar_at_the_default_height(self):
-        # tips at bag_carry_bottom + grip height: the bag's bottom (tips - grip height) over LIDAR_Z + 2 cm
-        self.assertGreater(0.28, bc.LIDAR_Z + 0.02)
-
+    def test_under_the_rim(self):
+        self.assertAlmostEqual(self.cam(0.05).close_h(NS(size=(0.1, 0.1, float("nan")))), 0.22)
+        self.assertAlmostEqual(self.cam(0.05).close_h(NS(size=(0.1, 0.1, 0.20))), 0.15)    # the Pi's top
+        self.assertAlmostEqual(self.cam(0.0).close_h(NS(size=(0.1, 0.1, float("nan")))), 0.21)   # old fixed
 
 class OutwardCloseFirst(unittest.TestCase):
     """grasp_pose takes a pose whose closing axis points away from the arm before one pointing back at it,

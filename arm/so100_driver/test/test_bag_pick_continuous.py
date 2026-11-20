@@ -1,14 +1,16 @@
 """Continuous camera-pick plan, the LiDAR outlier gate, the rim height and the motor-temperature wait.
 
+The carry after the close is one held move (carry_plan, 2026-11-20).
+
 The plan is checked against tip(sim=): the same joint targets as the old per-step moves, sent as one
 path down to the handle and one path for the lift. The gripper close is the only pause between them.
 """
 import inspect
+import math
 import unittest
 from pathlib import Path
 
 from so100_driver.bag_camera import (
-    CARRY_THETA,
     DRIVER_TEMP_C,
     FREE_SPEED,
     HELD_SPEED,
@@ -52,8 +54,16 @@ class Node:
         self.table_z = FLOOR
         self.calls = []
 
-    def get_parameter(self, _name):
-        raise KeyError("no override")
+    PARAMS = {"bag_carry_bottom": 0.28, "bag_cam_width": 0.18, "bag_cam_half_depth": 0.055}
+
+    def get_parameter(self, name):
+        if name not in self.PARAMS:
+            raise KeyError("no override")
+
+        class Value:
+            value = self.PARAMS[name]
+
+        return Value()
 
     def line(self, qs, what, speed, step):
         self.calls.append((what, qs, speed, step))
@@ -165,9 +175,11 @@ class Gates(unittest.TestCase):
         src = inspect.getsource(CameraBag._pick_impl)
         self.assertIn("move closer", src)
         self.assertLess(src.index("self.n.line(down_path"), src.index('self.n.gripper(0.0, "หนีบ")'))
-        self.assertLess(src.index('self.n.gripper(0.0, "หนีบ")'), src.index("self.n.line(lift_path"))
+        self.assertLess(src.index('self.n.gripper(0.0, "หนีบ")'), src.index('self.n.line(path, "ยกถุงไปถือ'))
         self.assertIn("_down_stepwise", src)
-        self.assertIn("_swing_stepwise", src)
+        # the held move is planned before the jaws close (a bag that cannot be carried is not picked up)
+        self.assertLess(src.index("self.carry_plan(r, cz, pitch, roll, sim=close_q)"),
+                        src.index('self.n.gripper(0.0, "หนีบ")'))
 
 
 class ContinuousPlan(unittest.TestCase):
@@ -213,26 +225,16 @@ class ContinuousPlan(unittest.TestCase):
         self.assertLessEqual(tip_overshoot(cam.kin, direct), PATH_BOW)
         self.assertAlmostEqual(seconds["down_s"], line_seconds(len(down), FREE_SPEED, JOINT_STEP))
         self.assertAlmostEqual(seconds["lift_s"], line_seconds(len(lift), LIFT_SPEED, JOINT_STEP))
-        # The arm is at the top of the lift when the raise and the swing are planned.
-        node.joints = {j: float(lift[-1][j]) for j in ARM}
-        # raise to the carry height (the bag's bottom 0.28 m up, over the LiDAR), the jaws tilting to HOLD_PITCH
-        want_tz = FLOOR + 0.28 + (close_z - FLOOR)
-        raise_path, top, raise_pitch = cam.raise_path(reach, roll, close_z + lifted, pitch, want_tz)
-        raise_s = line_seconds(len(raise_path), HELD_SPEED)
-        if raise_path:
-            node.joints = {j: float(raise_path[-1][j]) for j in ARM}
-        hold_pitch = pitch if raise_pitch is None else raise_pitch
-        swing_s = 0.0
-        for sign in (1.0, -1.0):
-            path, _end, full = cam.swing_plan(reach, top, hold_pitch, roll, 0.0, sign * CARRY_THETA)
-            if full and path:
-                swing_s = line_seconds(len(path), HELD_SPEED)
-                break
-        total = seconds["down_s"] + seconds["lift_s"] + raise_s + swing_s
-        report = ("down %.2fs (%d pts) lift %.2fs (%d pts, %.0f cm) raise %.2fs swing %.2fs total %.2fs "
-                  "at free %.2f / lift %.2f / held %.2f rad/s, reach %.2f pitch %s roll %s"
-                  % (seconds["down_s"], len(down), seconds["lift_s"], len(lift), lifted * 100, raise_s, swing_s,
-                     total, FREE_SPEED, LIFT_SPEED, HELD_SPEED, reach, pitch, roll))
+        # The carry is ONE held move from the close pose (the end of the way down): up, out to the side and
+        # the jaws tilted, the bag's bottom 0.28 m up (over the LiDAR).
+        carry = cam.carry_plan(reach, close_z, pitch, roll, sim=down[-1])
+        self.assertIsNotNone(carry)
+        carry_s = line_seconds(len(carry[0]), HELD_SPEED)
+        total = seconds["down_s"] + carry_s
+        report = ("down %.2fs (%d pts) carry %.2fs (%d pts, side %.0f deg, pitch %s) total %.2fs at free %.2f / "
+                  "held %.2f rad/s, reach %.2f pitch %s roll %s"
+                  % (seconds["down_s"], len(down), carry_s, len(carry[0]), math.degrees(carry[1]), carry[2],
+                     total, FREE_SPEED, HELD_SPEED, reach, pitch, roll))
         print(report)
         self.assertLess(total, 30.0, report)
         # One line() each for the way down and the lift. Nothing else moves between them.

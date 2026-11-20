@@ -155,6 +155,9 @@ class PickPlace(Node):
         #                                                   27 cm on the test bag: about 6 cm of wall in the jaws;
         #                                                   simulated 2026-11-19: at 0.19 the gripper body cuts the rim
         #                                                   on the way down (pushes the bag), from 0.20 it is clear)
+        # m of wall in the jaws (rim - finger tips at the close). 0 = the fixed bag_cam_close_h above. 5 cm: from 7 cm
+        # the gripper body hits the rim on the way down (simulated 2026-11-20); 5 cm held on the robot that day
+        self.declare_parameter("bag_cam_grip_depth", 0.05)
         # m above the floor the held bag's bottom is lifted to (LiDAR plane 0.245 m + 3.5 cm)
         self.declare_parameter("bag_carry_bottom", 0.28)
         self.declare_parameter("bag_cam_half_depth", 0.055)   # m: bag centre -> its front wall (test bag 11 cm deep)
@@ -170,10 +173,10 @@ class PickPlace(Node):
         # kinematics) came out 1.1-1.4 cm further and 1.3-1.4 cm higher than asked in all 5 picks (wrist roll
         # ~185 deg, tips ~31 cm out), and the inner jaw pushed the bag before the close
         self.declare_parameter("bag_cam_close_bias", [-0.012, -0.014])
-        # rad/s of the fastest joint on the camera pick. Defaults are bag_camera.FREE/HELD/PUT/LIFT_SPEED,
-        # so leaving them unset does not change the motion.
-        self.declare_parameter("bag_cam_free_speed", 0.8)
-        self.declare_parameter("bag_cam_held_speed", 0.4)
+        # rad/s of the fastest joint on the camera pick (0 = bag_camera.FREE/HELD/PUT/LIFT_SPEED). Free and held
+        # 1.2 / 0.6: the 2-move pick tried on the robot 2026-11-20 (the bag held in every pick; driver cap 1.5)
+        self.declare_parameter("bag_cam_free_speed", 1.2)
+        self.declare_parameter("bag_cam_held_speed", 0.6)
         self.declare_parameter("bag_cam_put_speed", 0.6)
         self.declare_parameter("bag_cam_lift_speed", 0.25)
         self.declare_parameter("bag_trial_dir", "~/hmc-follow/runs")  # one JSON per pick (bag_camera.pick)
