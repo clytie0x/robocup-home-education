@@ -174,6 +174,11 @@ def match_discs(discs, layout):
 
 
 # ====================================================================== geometry
+def camera_start(session, x):
+    """The fit's start. x is the tape measurement. A distortion on the session stays fixed: k is not solved."""
+    return fc.FrontCamera(x=x, dist_model=session.get("dist_model", "pinhole"), dist=session.get("dist"))
+
+
 def floor_corners(front_m, left_m, width_m, f_from_lidar=F_FROM_LIDAR, lidar_x=LIDAR_X, z_m=0.0):
     """Robot-frame points (turning centre origin) of the face's lower corners: (robot-left one, robot-right one).
     z_m: how high the detected corner is above the floor (a pale band at the bag's foot is not seen as red)."""
@@ -408,7 +413,7 @@ def main(argv=None):
 
     s = load_session(a.session)
     frames = frames_of(s, a.f_from_lidar, a.lidar_x)
-    guess = fc.FrontCamera(x=a.f_from_lidar + a.lidar_x)  # over the LiDAR, under the top deck: the fit moves it
+    guess = camera_start(s, a.f_from_lidar + a.lidar_x)  # over the LiDAR, under the top deck: the fit moves it
     out = fit_both_mirrors(frames, guess, tuple(a.free.split(",")))
     cam = out["camera"]
     print("rms %.2f px (mirror rms %s), frames %d" % (out["rms_px"], out["mirror_rms"], len(frames)))
