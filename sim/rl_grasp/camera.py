@@ -28,8 +28,31 @@ def nominal_camera(kin):
     }
 
 
-def sample_camera(kin, rng):
-    """A wide draw around the nominal mount. Every range is uncalibrated."""
+def sample_camera(kin, rng, hard=False):
+    """Draw a camera around the placeholder mount.
+
+    The default draw is a few centimetres and 10% of focal length. `hard` is the
+    wide uniform range from PLAN.md 5.3, for before the fisheye is calibrated.
+    """
+    if hard:
+        return _wide_camera(kin, rng)
+    base = nominal_camera(kin)
+    pos = base["pos"] + rng.uniform(-C.CAM_POS_JITTER, C.CAM_POS_JITTER, size=3)
+    target = np.array(kin.from_user(0.35, 0.0))
+    target = np.array((target[0], target[1], C.FLOOR_Z + C.RIM_H))
+    target = target + rng.uniform(-C.CAM_AIM_JITTER, C.CAM_AIM_JITTER, size=3)
+    return {
+        "pos": np.asarray(pos, float),
+        "rotation": look_rotation(pos, target),
+        "f": base["f"] * float(rng.uniform(1.0 - C.CAM_F_FRAC, 1.0 + C.CAM_F_FRAC)),
+        "cx": base["cx"] + float(rng.uniform(-C.CAM_CENTER_PX, C.CAM_CENTER_PX)),
+        "cy": base["cy"] + float(rng.uniform(-C.CAM_CENTER_PX, C.CAM_CENTER_PX)),
+        "k": np.asarray(rng.uniform(-C.CAM_K, C.CAM_K, size=4), float),
+    }
+
+
+def _wide_camera(kin, rng):
+    """PLAN.md 5.3 wide ranges. Kept behind --hard."""
     forward = float(rng.uniform(*C.CAM_FWD_RANGE))
     left = float(rng.uniform(*C.CAM_LEFT_RANGE))
     height = float(rng.uniform(*C.CAM_H_RANGE))
@@ -38,14 +61,13 @@ def sample_camera(kin, rng):
     aim_h = C.RIM_H + float(rng.uniform(-0.08, 0.08))
     target = np.array(kin.from_user(0.35, float(rng.uniform(-0.05, 0.05))))
     target = np.array((target[0], target[1], C.FLOOR_Z + aim_h))
-    k = rng.uniform(-0.08, 0.08, size=4)
     return {
         "pos": pos,
         "rotation": look_rotation(pos, target),
         "f": float(rng.uniform(*C.F_RANGE)),
         "cx": C.IMAGE_W / 2.0 + float(rng.uniform(-40.0, 40.0)),
         "cy": C.IMAGE_H / 2.0 + float(rng.uniform(-30.0, 30.0)),
-        "k": np.asarray(k, float),
+        "k": np.asarray(rng.uniform(-0.08, 0.08, size=4), float),
     }
 
 

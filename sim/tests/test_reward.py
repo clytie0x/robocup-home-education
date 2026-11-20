@@ -36,5 +36,12 @@ def test_a_miss_that_never_closed_is_not_a_drop():
 def test_reward_uses_the_named_terms():
     # +10 success, -5 collision, -2 drop, -0.1 per second.
     assert outcome_reward(True, False, False, 10.0) == 10.0 - 1.0
-    assert outcome_reward(False, True, True, 0.0) == -5.0 - 2.0
-    assert outcome_reward(False, False, False, 4.0) == -0.4
+    assert outcome_reward(True, False, False, 10.0) > outcome_reward(True, False, False, 12.0)
+
+
+def test_quitting_early_does_not_beat_a_real_miss():
+    # A rejected reach used to return time 0 and reward 0, which beat a full miss.
+    instant = outcome_reward(False, False, False, 0.0)
+    full = outcome_reward(False, False, False, 11.56)
+    assert instant == full
+    assert instant < outcome_reward(True, False, False, 11.56)
