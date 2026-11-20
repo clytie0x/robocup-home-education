@@ -31,12 +31,15 @@ fisheye when that file says dist_model "fisheye".
      stretch the wall up (video of 2026-11-18). A miss: open, back off, look again (1.), the next try a
      little further in / out (TRIES) from where the bag is now.
   4. raise, then the side swing: each is one continuous move at the same reach (the swing falls back to
-     10 degree steps when a whole side is out of reach). Then ALWAYS the front camera: the bag must have
-     left its place on the floor, else (it slipped out) open, look again, next try. The result code is
+     10 degree steps when a whole side is out of reach). The raise tilts the jaws only to HOLD_PITCH (a
+     twist pulls the paper wall out) and lifts the bag's bottom to bag_carry_bottom (over the LiDAR plane).
+     Then ALWAYS, from the side (the arm out of the front camera's picture): the bag must have left its
+     place on the floor (spot_left), else (it slipped out) open, look again, next try. The result code is
      SUCCESS_UNVERIFIED when the gripper closed but neither camera confirmed the bag.
 bag_hover_only: stop with the jaws OPEN at the close height and hold still there (a test: hang a plumb line,
 measure how far the gap is from the wall); the log has the asked and the real (forward kinematics) gap middle.
-Put-down: turn towards the target at the hold height, come down along the same tilt steps, open, back off.
+Put-down: turn towards the target at the hold height, the raise backwards (tilt back to the grasp pitch while
+coming down), straight down, open PUT_DROP over the grasp height, back off.
 """
 import copy
 import json
@@ -69,11 +72,16 @@ LOOK = {"shoulder_pan": 0.0, "shoulder_lift": 0.04, "elbow_flex": -0.04, "wrist_
 LIFT_DZ = (0.02, 0.04, 0.06, 0.08, 0.10)
 STRAIGHT_UP = tuple(0.02 * k for k in range(1, 11))   # m: the first lift, straight up to 20 cm
 LIFT_SPEED = 0.25                 # rad/s of the fastest joint on that lift
-UP = [(-52, 0.0), (-45, 0.02), (-38, 0.04), (-30, 0.06), (-22, 0.08), (-15, 0.10), (-8, 0.12), (0, 0.14),
-      (0, 0.17), (0, 0.20), (0, 0.23), (0, 0.26), (0, 0.29), (0, 0.32)]   # (pitch, tip z): raise, small tilt steps
+# Held up: the jaws tilt only from the grasp pitch to HOLD_PITCH (they hold a paper wall by friction; the old
+# tilt to 0 deg twisted it out, video 2026-11-19), in RAISE_STEPS steps, to the height where the bag's bottom is
+# bag_carry_bottom above the floor (clear of the LiDAR plane LIDAR_Z). Simulated 2026-11-19: at -60 deg the tips
+# get no higher than 0.39 m (bag bottom 0.18 m, in the LiDAR plane); at -35 deg about 0.51 m.
+HOLD_PITCH = -35
+RAISE_STEPS = 4
+LIDAR_Z = 0.245                   # m above the floor, the LiDAR scan plane (base/jetson/so100_ik.py LIDAR_Z)
+NEARER = (0.0, 0.015, 0.03)       # m: the gap middle moved nearer for an outward close (grasp_outward)
 HOLD_R = 0.32                     # finger tips from the pan axis while held up
 CARRY_THETA = math.radians(75)    # swing the held bag out to the left side so it clears the front LiDAR and Xtion
-DOWN = [(0, 0.14), (-30, 0.06), (-60, -0.02)]   # put-down: few, longer moves (the task gives it 20 s)
 PUT_DROP = 0.03                   # m above the grasp height the put-down lets go (the bag drops that far)
 JOINT_STEP = 0.03                 # rad between path points
 FREE_SPEED, HELD_SPEED, PUT_SPEED = 0.8, 0.4, 0.6  # rad/s of the fastest joint: empty / lifting / putting down
@@ -87,6 +95,18 @@ RIM_LO, RIM_HI = 0.15, 0.50       # m, a Pi-measured top inside this replaces ba
 PICK_TEMP_C = 55.0                # a pick waits while the hottest motor is at or above this
 DRIVER_TEMP_C = 60.0              # the driver's max_temp: it refuses a move at or above this
 HELD_CODES = ("SUCCESS", "SUCCESS_UNVERIFIED")
+
+
+def spot_left(start, now, min_overlap=0.5, same_rows=25.0):
+    """Has the bag left the place it stood? start = its blob before the grasp (arm out of the picture), now
+    = the bag blob in a picture with the arm turned aside (None: that picture shows no bag; a missing picture
+    must not get here). False when a blob still covers most of the same columns with its top at about the
+    same rows (the bag stayed on the floor); True otherwise."""
+    if now is None:
+        return True
+    w = max(1.0, start["x1"] - start["x0"])
+    overlap = (min(start["x1"], now["x1"]) - max(start["x0"], now["x0"])) / w
+    return not (overlap > min_overlap and abs(now["y0"] - start["y0"]) < same_rows)
 
 
 def tip_overshoot(kin, path):
@@ -834,24 +854,28 @@ class CameraBag:
                    "lift_s": line_seconds(len(lift_path), self.speed("lift"))}
         return down_path, lift_path, lifted_to, planned
 
-    def raise_path(self, r, roll, top):
-        """(path, new_top, pitch) of one raise.
+    def raise_ladder(self, top, pitch, want_tz):
+        """[(pitch, tz)] of the raise: from the grasp pitch to HOLD_PITCH, from top up to want_tz, RAISE_STEPS
+        equal steps (a little tilt and up at a time)."""
+        return [(pitch + (HOLD_PITCH - pitch) * k / RAISE_STEPS, max(top, top + (want_tz - top) * k / RAISE_STEPS))
+                for k in range(1, RAISE_STEPS + 1)]
 
-        The highest hold that is reachable in one move without swinging the tips outward past
-        PATH_BOW. The old pitch ladder when no single move qualifies.
-        """
+    def raise_path(self, r, roll, top, pitch, want_tz):
+        """(path, new_top, pitch) of one raise to want_tz (the bag's bottom over the LiDAR), the jaws tilting
+        only to HOLD_PITCH. One move to the end when that does not swing the tips outward past PATH_BOW;
+        otherwise the ladder's steps, as far as they reach (new_top below want_tz then: the caller warns)."""
         start = {j: float(self.n.joints[j]) for j in ARM}
-        for pt, tz in reversed([pair for pair in UP if pair[1] > top + 1e-6]):
-            sim = dict(start)
-            try:
-                seg = self.tip(r, tz, pt, roll, "", pull_in=0.06, sim=sim)
-            except Failed as exc:
-                if exc.code != "UNREACHABLE":
-                    raise
-                continue
+        ladder = self.raise_ladder(top, pitch, want_tz)
+        end_pt, end_tz = ladder[-1]
+        sim = dict(start)
+        try:
+            seg = self.tip(r, end_tz, end_pt, roll, "", pull_in=0.06, sim=sim)
             if tip_overshoot(self.kin, seg) <= PATH_BOW:
-                return seg, tz, pt
-        steps = [(r, tz, pt, roll, 0.06) for pt, tz in UP if tz > top + 1e-6]
+                return seg, end_tz, end_pt
+        except Failed as exc:
+            if exc.code != "UNREACHABLE":
+                raise
+        steps = [(r, tz, pt, roll, 0.06) for pt, tz in ladder]
         sim = dict(start)
         segs = self.dry_steps(steps, sim)
         path = [q for seg in segs for q in seg]
@@ -961,32 +985,69 @@ class CameraBag:
         a = self.kin.close_axis(sim)
         return float(a @ close_dir / (np.linalg.norm(a) * np.linalg.norm(close_dir)))
 
-    def grasp_pose(self, r, close_z, pitch, close_dir):
-        """(pitch, roll deg, alignment) for a try: the wrist roll that closes the jaws across the wall, or that
-        turned half a turn (the fixed jaw on the far side: near the robot the gripper body would touch the deck);
-        the try's pitch, else steeper, else flatter. Raises UNREACHABLE when nothing gets there."""
+    def grasp_outward(self, r, close_z, pitch, close_dir):
+        """grasp_pose with the closing axis pointing away from the arm, moving the gap middle up to max(NEARER)
+        nearer when that is out of reach at r (the open gap is 7.5 cm: the wall stays between the jaws); only
+        then the other way round. Returns (pitch, roll, align, r used)."""
+        for d in NEARER:
+            try:
+                pt, rl, al = self.grasp_pose(r - d, close_z, pitch, close_dir, allow_inward=False)
+            except Failed:
+                continue
+            if d:
+                self.n.say(f"ท่าแนวหุบชี้ออกจากหุ่นเอื้อมไม่ถึงที่ {r * 100:.1f} ซม.: เลื่อนช่องก้ามเข้ามา {d * 100:.1f} ซม.")
+            return pt, rl, al, r - d
+        pt, rl, al = self.grasp_pose(r, close_z, pitch, close_dir)
+        return pt, rl, al, r
+
+    def grasp_pose(self, r, close_z, pitch, close_dir, allow_inward=True):
+        """(pitch, roll deg, alignment) for a try. The closing axis must point AWAY from the arm (along the
+        wall normal): on the robot, 2026-11-18, every close with it pointing back at the robot came back empty
+        (8 of 8). Among those, the steepest pitch first: the jaws then close more square on the wall (alignment
+        0.94 at -70 against 0.87 at -60; the closed jaws keep a 16 mm gap, so a 1 mm paper wall is held by the
+        jaw tips' friction only). Only when no pitch gets there with the axis pointing away, the other way
+        round (said in the log). Raises UNREACHABLE when nothing gets there."""
         lo, hi = (math.degrees(v) for v in self.kin.limits["wrist_roll"])
         min_align = float(self.p("bag_cam_min_align"))
-        for pt in dict.fromkeys((pitch, pitch - 10, pitch + 10)):
+        cands = []                                 # (pitch, roll, align, closing sign)
+        for pt in sorted(dict.fromkeys((pitch - 10, pitch, pitch + 10))):     # steepest first
             try:
                 roll, align = self.roll_for(r, close_z, pt, close_dir)
             except Failed:
                 continue
             if align < min_align:                  # the jaws would pinch the wall slanted (a flatter pitch)
                 continue
-            # the jaws' closing axis pointing AWAY from the arm (along the wall normal) first: on the robot,
-            # 2026-11-18, every close with it pointing back at the robot (roll ~+20) came back empty (8 of 8),
-            # both closes with it pointing away (roll ~+200..209) held the wall
-            rolls = [rl for rl in (roll, roll + 180.0, roll - 180.0) if lo <= rl <= hi]
-            rolls.sort(key=lambda rl: -self.closing_sign(r, close_z, pt, rl, close_dir))
-            for rl in rolls:
-                if self.feasible(r, close_z, pt, rl):
-                    if self.closing_sign(r, close_z, pt, rl, close_dir) < 0:
+            for rl in (roll, roll + 180.0, roll - 180.0):
+                if lo <= rl <= hi:
+                    cands.append((pt, rl, align, self.closing_sign(r, close_z, pt, rl, close_dir)))
+        for outward in ((True, False) if allow_inward else (True,)):
+            for pt, rl, align, sign in cands:
+                if (sign > 0) == outward and self.feasible(r, close_z, pt, rl):
+                    if not outward:
                         self.n.say(f"ท่าแนวหุบชี้ออกจากหุ่นไปไม่ได้ที่ปลายก้าม {r * 100:.1f} ซม.: ใช้แนวกลับด้าน "
                                    "(เคยหุบเปล่า)")
                     return pt, rl, align
         raise Failed(f"เอื้อมไปหนีบขวางผนังหน้าถุงไม่ได้ (ปลายก้าม {r:.3f} ม. จากแกนหมุน สูง "
                      f"{close_z - self.n.table_z:.2f} ม. จากพื้น)", "UNREACHABLE")
+
+    def place_left(self, start):
+        """With the arm at the side: True = the place the bag stood is empty (the bag is in the jaws), False =
+        the bag is still there (it slipped out), None = cannot tell (no calibration, no picture before or now,
+        or the arm still in the picture). A missing picture is no evidence either way."""
+        if start is None:
+            return None
+        try:
+            cam = FrontCamera.load(str(self.p("bag_front_cam_file")))
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if self.in_view(cam, self.n.joints):
+            return None
+        time.sleep(0.4)
+        im = self.web()
+        if im is None:
+            return None
+        model, path = self.vision_model()
+        return spot_left(start, bv.find_bag(im, model=model, tuned_engine=path))
 
     # ------------------------------------------------------------------ where is the bag
     def in_view(self, cam, q):
@@ -1278,7 +1339,7 @@ class CameraBag:
             bias_f, bias_up = (float(v) for v in self.p("bag_cam_close_bias"))
             r, cz = r + bias_f, close_z + bias_up
             try:
-                pitch, roll, align = self.grasp_pose(r, cz, pitch, close_dir)
+                pitch, roll, align, r = self.grasp_outward(r, cz, pitch, close_dir)
             except Failed as exc:
                 if i + 1 < len(tries):
                     self.n.say(f"ลองที่ {i + 1}: {exc} — ข้าม")
@@ -1352,32 +1413,25 @@ class CameraBag:
             self._phase("raise")
             self.n.progress(5, 5, "raise", "ยกถุงขึ้นสูง...")
             top = cz + lifted_to
-            path, top, pt = self.raise_path(r, roll, top)
+            grip_h = cz - self.n.table_z           # the bag's bottom hangs this far below the tips
+            want_tz = self.n.table_z + float(self.p("bag_carry_bottom")) + grip_h
+            held["hold"] = (pitch, top)
+            path, top, pt = self.raise_path(r, roll, top, pitch, want_tz)
             self._remember_plan(self.last_motion["mode"] if getattr(self, "last_motion", None) else "stepwise",
                                 raise_s=line_seconds(len(path), self.speed("held")))
             if path:
                 self.n.line(path, "ยกถุงขึ้นสูง", self.speed("held"), JOINT_STEP)
                 held["hold"] = (pt, top)
-            else:
-                self.n.say(f"ยกได้สูงสุดแค่ปลายก้าม {top - self.n.table_z:.2f} ม. จากพื้นที่ทิศนี้")
-            # held up: the bag must have left its place on the floor (ALWAYS checked: a slip in the raise)
-            time.sleep(0.2)
-            gone = bv.fixed_lifted(start, self.seen(), min_up=20.0)
-            self.n.get_logger().info(f"front camera hold check {i + 1}: {gone}")
-            if gone["lifted"] is False:
-                self.n.holding = None
-                why = "ยกขึ้นแล้วถุงหลุด (ยังอยู่ที่เดิมบนพื้น)"
-                self.n.say(f"ลองที่ {i + 1}: ถุงยังอยู่ที่เดิมบนพื้น (หลุด) — อ้าก้าม ดูกล้องใหม่แล้วลองอีกครั้ง")
-                self.n.gripper(0.9, "อ้าก้าม")
-                continue
-            verified = held["verified"] = verified or bool(gone["lifted"])
+            bottom = top - self.n.table_z - grip_h
+            if bottom < LIDAR_Z + 0.02:
+                self.n.say(f"ยกได้แค่ก้นถุงสูง {bottom:.2f} ม. จากพื้น: ต่ำกว่าระดับ LiDAR ({LIDAR_Z:.3f} ม.) + 2 ซม.")
             # Swing the held bag out to the side so it does not hang in front of the LiDAR (x ~0.37 m) while driving.
             # One line() when a whole side is in reach; otherwise the old 10 degree steps.
             self._phase("carry")
             phase_log = getattr(self.n, "phase_log", None)
             if phase_log is not None:
                 phase_log.mark("carry")
-            hold_pt, hold_tz = held.get("hold", (0, top))
+            hold_pt, hold_tz = held["hold"]
             swung = False
             for side_sign in (1.0, -1.0):
                 path, end, full = self.swing_plan(r, hold_tz, hold_pt, roll, self.theta, side_sign * CARRY_THETA)
@@ -1391,6 +1445,18 @@ class CameraBag:
             if not swung:
                 self.n.get_logger().info("continuous swing plan failed; using the stepwise path")
                 self._swing_stepwise(r, hold_tz, hold_pt, roll, held)
+            # Held up at the side: the bag must have left its place on the floor (ALWAYS checked: a slip in the
+            # raise). Checked from here, the arm out of the front camera's picture: in front it hides that place
+            # and the old check read "nothing to compare" (2026-11-19), or saw only the wall stretched up.
+            gone = self.place_left(start)
+            self.n.get_logger().info(f"front camera hold check {i + 1}: bag left its place: {gone}")
+            if gone is False:
+                self.n.holding = None
+                why = "ยกขึ้นแล้วถุงหลุด (ยังอยู่ที่เดิมบนพื้น)"
+                self.n.say(f"ลองที่ {i + 1}: ถุงยังอยู่ที่เดิมบนพื้น (หลุด) — อ้าก้าม ดูกล้องใหม่แล้วลองอีกครั้ง")
+                self.n.gripper(0.9, "อ้าก้าม")
+                continue
+            verified = held["verified"] = verified or bool(gone)
             note = "" if verified else " (ยังไม่ได้ยืนยันด้วยกล้อง)"
             text = f"ถือถุงไว้ด้านข้าง ปลายก้ามสูงจากพื้น {top - self.n.table_z:.2f} ม. (ลองที่ {i + 1}){note}"
             code = "SUCCESS" if verified else "SUCCESS_UNVERIFIED"
@@ -1424,14 +1490,16 @@ class CameraBag:
             self.tip(held.get("hold_r", HOLD_R), tz, pt, roll, "หันถุงไปทางจุดวาง", pull_in=0.06,
                      speed=self.speed("put"))
         self.n.progress(2, 3, "lower", "วางลง...")
-        for p2, z2 in DOWN:
-            if z2 < tz or p2 < pt:
-                self.tip(held.get("hold_r", HOLD_R) if p2 >= 0 else r, z2, p2, roll, "วางถุงลง", pull_in=0.06,
-                         speed=self.speed("put"))
+        # the pick's raise backwards: tilt back to the grasp pitch while coming down to 10 cm over the release
+        # height (and to the put-down reach), then straight down: no jaw twist on the way down either
+        gp, hold_r = held.get("pitch", -60), held.get("hold_r", HOLD_R)
+        for k in range(1, RAISE_STEPS + 1):
+            self.tip(hold_r + (r - hold_r) * k / RAISE_STEPS, tz + (put_z + 0.10 - tz) * k / RAISE_STEPS,
+                     pt + (gp - pt) * k / RAISE_STEPS, roll, "วางถุงลง", pull_in=0.06, speed=self.speed("put"))
         placed_r = r
         for cand_r in (r, held.get("r", r), r + 0.03, r + 0.06):
             try:
-                self.tip(cand_r, put_z, -60, roll, "วางถุงลงพื้น", pull_in=0.05, speed=self.speed("held"))
+                self.tip(cand_r, put_z, gp, roll, "วางถุงลงพื้น", pull_in=0.05, speed=self.speed("held"))
                 placed_r = cand_r
                 break
             except Failed as exc:
@@ -1442,5 +1510,5 @@ class CameraBag:
         self.n.gripper(0.9, "ปล่อย")
         self.n.holding = self.n.grasped = None
         self.n.progress(3, 3, "retreat", "ถอยออกแล้วกลับท่า ready...")
-        self.tip(placed_r - 0.03, put_z + 0.13, -60, roll, "ถอยขึ้น", pull_in=0.05)
+        self.tip(placed_r - 0.03, put_z + 0.13, gp, roll, "ถอยขึ้น", pull_in=0.05)
         return "วางถุงแล้ว"
