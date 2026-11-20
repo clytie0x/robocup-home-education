@@ -7,12 +7,13 @@ from torch import optim
 from .policy import Actor, QNet, seed_all
 
 
-def train(env, steps, seed, act_dim, hidden=64, batch=64, lr=3e-4, alpha=0.05, warmup=64):
+def train(env, steps, seed, act_dim, hidden=64, batch=64, lr=3e-4, alpha=0.05, warmup=64,
+          zero_mean=False, log_std_init=None):
     """`steps` environment transitions. Returns the actor and each episode's return."""
     seed_all(seed)
     obs, _info = env.reset(seed)
     obs_dim = int(np.asarray(obs).shape[0])
-    actor = Actor(obs_dim, act_dim, hidden)
+    actor = Actor(obs_dim, act_dim, hidden, zero_mean=zero_mean, log_std_init=log_std_init)
     q1, q2 = QNet(obs_dim, act_dim, hidden), QNet(obs_dim, act_dim, hidden)
     q1_t, q2_t = QNet(obs_dim, act_dim, hidden), QNet(obs_dim, act_dim, hidden)
     q1_t.load_state_dict(q1.state_dict())

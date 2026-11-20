@@ -109,14 +109,43 @@ NOMINAL_CAM_FWD = -0.05
 CAM_H_RANGE = (0.45, 1.10)
 CAM_FWD_RANGE = (-0.15, 0.10)
 CAM_LEFT_RANGE = (-0.08, 0.08)
-# PLACEHOLDER pixel noise and the chance a frame is dropped.
+# Default camera noise: a few centimetres and 10% on the placeholder focal length.
+# The mount is one fixed camera, not a new pose every episode. `--hard` uses the
+# wide ranges above (PLAN.md 5.3, until a calibration exists).
+# Tuned so a back-projected bag centre stays within about 1.5 cm (p90) of the truth.
+# The scripted close collides when the estimated wall is under about 0.28 m and is
+# rejected past REACH_WALL (0.32 m), so a wider draw empties the grasp.
+CAM_POS_JITTER = 0.01
+CAM_AIM_JITTER = 0.0
+CAM_F_FRAC = 0.02
+CAM_CENTER_PX = 4.0
+CAM_K = 0.0
 PIXEL_NOISE_PX = 1.5
-DROPOUT_P = 0.15
+DROPOUT_P = 0.10
+HARD_PIXEL_NOISE_PX = 3.0
+HARD_DROPOUT_P = 0.15
 
-# Grasp-parameter bounds. Offsets cover TRIES (-0.015..0.03 m, -60 and -50 deg)
-# with room around them. The speed scale multiplies FREE_SPEED and LIFT_SPEED.
-ACTION_LOW = (-0.04, -0.05, 0.12, -80.0, -30.0, 0.5)
-ACTION_HIGH = (0.04, 0.05, 0.28, -40.0, 30.0, 1.5)
+# Mass, friction and actuator scales. The wide side is `--hard` (mass was never
+# weighed; PLAN.md's ±30% actuator band is around a sysid fit we do not have).
+MASS_SCALE = (0.8, 1.2)
+HARD_MASS_SCALE = (0.4, 2.0)
+FRICTION_SCALE = (0.8, 1.2)
+HARD_FRICTION_SCALE = (0.5, 1.5)
+ACTUATOR_SCALE = (0.9, 1.1)
+HARD_ACTUATOR_SCALE = (0.7, 1.3)
+BEND_SCALE = (0.8, 1.0)
+HARD_BEND_SCALE = (0.3, 1.0)
+
+# Grasp-parameter bounds. The centre of each interval is the scripted pick
+# (offset 0, close height 0.19 m, pitch -60 deg, roll 0, speed scale 1), so a
+# network output of 0 is that pick. TRIES offsets and the -50 deg retry sit inside.
+ACTION_LOW = (-0.04, -0.05, 0.15, -80.0, -30.0, 0.5)
+ACTION_HIGH = (0.04, 0.05, 0.23, -40.0, 30.0, 1.5)
+
+# Measured sim time of one nominal scripted try (approach, close, lift, 3 s hold).
+# A miss is charged at least this long, so quitting before the arm moves does not
+# outscore a real attempt. Success still uses the actual time, so faster wins.
+MINIMUM_TRY_S = 11.56
 
 ARM_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
 ALL_JOINTS = ARM_JOINTS + ("gripper",)
@@ -128,6 +157,16 @@ OBS_NAMES = (
     "bag_forward", "bag_left",
     "handle_forward", "handle_left", "handle_up", "handle_valid",
     "rim_width", "standing", "confidence", "source_camera",
+)
+
+# Fixed scales so a 100% jaw load does not drown the bag pose. Not a learned norm.
+OBS_SCALE = (
+    math.pi, math.pi, math.pi, math.pi, math.pi, math.pi,
+    2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
+    math.pi, 100.0,
+    1.0, 1.0,
+    1.0, 1.0, 1.0, 1.0,
+    1.0, 1.0, 1.0, 1.0,
 )
 
 # Jaw gap at 0.10 rad is 2.26 cm (ik.jaw_gap). The plate is this thick along the

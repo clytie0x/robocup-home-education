@@ -22,7 +22,7 @@ Evaluate the scripted pick (today's offsets: 0, +1.5 cm, -1.5 cm at -60 deg, the
 python -m rl_grasp evaluate --policy scripted --episodes 8 --seed 0 --tries 4 --nominal
 ```
 
-Train. `--steps` is the number of grasp tries, not physics steps. `--nominal` keeps one paper bag in one place. Without it, pose, mass, friction, actuator gains, handle stiffness, floor height and the fisheye camera are randomised. `--workers` is CPU processes for PPO. SAC updates in this process.
+Train. `--steps` is the number of grasp tries, not physics steps. `--nominal` keeps one paper bag in one place. Without it, the bag pose, a narrow mass and friction band, and a few centimetres of camera error are randomised. `--hard` is the wide camera and dynamics range. `--workers` is CPU processes for the physics. A network output of 0 is the scripted pick.
 
 ```bash
 python -m rl_grasp train --algo ppo --steps 200 --workers 4 --seed 0 --nominal --out checkpoints/ppo.pt
@@ -56,4 +56,6 @@ MuJoCo 4.0.1 has no `<composite>` cable. Handles are `flexcomp dim="1"` rods: ro
 
 ## A full tier-1 run
 
-On this machine, 200 nominal PPO tries with 4 workers took 40.0 s, about 5 tries/s. At that rate 200k tries is about 11 hours and the plan's 50k-try budget is about 2 hours 47 minutes. That is slower than the 10–20 tries/s guessed from the physics-only bench, because each try includes the 3 s hold and the Python executor. Train without `--nominal` for that run, and compare to the scripted policy on the same seeds. The numbers are in `WORKLOG.md`.
+A full try is about 11 s of simulation, including the 3 s hold. A rejected reach used to return in one step and score 0, which was better than a real miss, so a long PPO run collapsed onto that and reported hundreds of tries per second. A miss is now charged at least the scripted try's duration.
+
+On the narrowed default ranges, 50k PPO tries took 5455 s (9.17 tries/s) and 50k SAC tries took 6307 s (7.93 tries/s), 4 workers. On the same 100 seeds, scripted was 75/100 and 80/100 (1 and 4 tries, median 11.580 s). PPO was 77/100 and 89/100 (median 8.920 s). SAC was 80/100 and 94/100 (median 9.620 s). Details are in `WORKLOG.md`.

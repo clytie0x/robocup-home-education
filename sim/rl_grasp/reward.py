@@ -22,7 +22,16 @@ def judge(grasped, bottom, held_s, slip, collision):
 
 
 def outcome_reward(success, collision, dropped, sim_time_s):
-    reward = -C.TIME_PENALTY_PER_S * float(sim_time_s)
+    """Score one try.
+
+    Time is -0.1 per second (the tier-2 -0.01 per 10 Hz step). On a miss the
+    clock is at least MINIMUM_TRY_S, because a rejected reach returns in one
+    step and would otherwise score 0, which is better than a real miss.
+    """
+    elapsed = float(sim_time_s)
+    if not success:
+        elapsed = max(elapsed, C.MINIMUM_TRY_S)
+    reward = -C.TIME_PENALTY_PER_S * elapsed
     if success:
         reward += C.SUCCESS_BONUS
     if collision:

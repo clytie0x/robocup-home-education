@@ -7,12 +7,13 @@ from torch import optim
 from .policy import ActorCritic, seed_all
 
 
-def train(env, steps, seed, act_dim, hidden=64, batch=64, epochs=8, clip=0.2, lr=3e-4):
+def train(env, steps, seed, act_dim, hidden=64, batch=64, epochs=8, clip=0.2, lr=3e-4,
+          zero_mean=False, log_std_init=-0.5):
     """`steps` environment transitions. Returns the network and each episode's return."""
     seed_all(seed)
     obs, _info = env.reset(seed)
     obs_dim = int(np.asarray(obs).shape[0])
-    net = ActorCritic(obs_dim, act_dim, hidden)
+    net = ActorCritic(obs_dim, act_dim, hidden, zero_mean=zero_mean, log_std_init=log_std_init)
     optimizer = optim.Adam(net.parameters(), lr=lr)
     episode_returns = []
     running = 0.0
@@ -54,7 +55,12 @@ def _update(net, optimizer, buffer, epochs, clip):
     done = torch.as_tensor([float(row[5]) for row in buffer], dtype=torch.float32)
     returns = _discount(reward, done)
     advantage = returns - value
-    advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+    # One-step tries often share a reward. Dividing by a tiny std turns that
+    # noise into a huge step and walks the mean off the scripted action.
+    spread = advantage.std()
+    advantage = advantage - advantage.mean()
+    if float(spread) > 1e-3:
+        advantage = advantage / (spread + 1e-8)
     for _ in range(epochs):
         log_prob, entropy, new_value = net.log_prob(obs, action)
         ratio = torch.exp(log_prob - old_log)
