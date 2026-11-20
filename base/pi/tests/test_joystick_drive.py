@@ -126,6 +126,19 @@ class FakeSession:
         self.closed = True
 
 
+class SequenceSession(FakeSession):
+    """The scan changes from one call to the next: the base moves, or something moves in front of it."""
+
+    def __init__(self, scans):
+        super().__init__(scans[0])
+        self.scans, self.calls = scans, 0
+
+    def latest(self):
+        self.scan = self.scans[min(self.calls, len(self.scans) - 1)]
+        self.calls += 1
+        return super().latest()
+
+
 class FakePad:
     """Applies one scripted (axes, buttons) state per poll(); "gone" raises OSError. After the script it keeps the
     last state, as a held stick does (a js device sends events only when something changes)."""
@@ -162,8 +175,12 @@ REAR_WALL = room_scan(
 SIDE_WALL = room_scan((0.0, 2.0 - 0.20 - 0.05, 0.0), half=2.0)  # 0.05 m from the left wall: a turn swings a corner into it
 
 
-def run(script, scan=OPEN_ROOM, seconds=2.0, max_speed=0.08, error=None):
-    clock, w, session, log = Clock(), FakeWheels(), FakeSession(scan), []
+def wall_at(gap):
+    return room_scan(((2.0 - 0.20 - gap), 0.0, 0.0), half=2.0)  # the front edge `gap` m from the wall ahead
+
+
+def run(script, scan=OPEN_ROOM, seconds=2.0, max_speed=0.08, error=None, session=None):
+    clock, w, session, log = Clock(), FakeWheels(), session or FakeSession(scan), []
     session.error = error
     result = joystick_drive.drive(
         FakePad(script),
@@ -240,6 +257,14 @@ class DriveTest(unittest.TestCase):
         rest, held = ({3: -32767}, {}), ({3: -32767}, HELD)  # an axis that rests at the end of its travel
         _, calls, _ = run([rest] * 2 + [held] * 10)
         self.assertEqual(moves(calls), [])  # a wrong axis number must not turn pressing R1 into a full spin
+
+    def test_a_turn_right_after_forward_still_checks_the_forward_roll(self):
+        scans = [wall_at(0.20)] * 3 + [wall_at(0.15)]  # three forward ticks are clear; then the wall is closer
+        turn = ({3: 32767}, HELD)
+        _, calls, log = run([RELEASED] + [UP] * 3 + [turn] * 10, session=SequenceSession(scans), seconds=0.45)  # inside the roll's 0.27 s stop_delay and a little after
+        self.assertEqual(len([c for c in calls if c[0] == "send" and c[1] > 0]), 3)
+        self.assertEqual([c for c in calls if c[0] == "send" and c[1] == 0.0], [])  # no turn while the base still rolls at the wall
+        self.assertIn("front blocked", " ".join(log))
 
     def test_a_held_stick_keeps_driving_without_new_events(self):
         _, calls, _ = run(
@@ -330,12 +355,17 @@ class MainTest(unittest.TestCase):
 
     def test_dry_run_opens_only_the_pad_and_prints_what_it_would_send(self):
         code, out = self.main(
-            ["--dry", "--seconds", "0.2"], script=[UP], safe_run=False
+            ["--dry", "--seconds", "0.2"], script=[RELEASED, UP], safe_run=False
         )
         self.assertIsNone(code)
         self.assertEqual(self.fakes.opened, ["pad"])
         self.assertIn("forward", out)
         self.assertTrue(self.fakes.pad.closed)
+
+    def test_dry_run_shows_stop_until_the_deadman_has_been_released(self):
+        code, out = self.main(["--dry", "--seconds", "0.2"], script=[UP], safe_run=False)  # R1 held since the start
+        self.assertIsNone(code)
+        self.assertNotIn("forward", out)
 
     def test_a_drive_opens_pad_lidar_wheels_and_closes_all_of_them(self):
         code, out = self.main(["--yes-owner-at-robot"], script=[RELEASED, UP, "gone"])

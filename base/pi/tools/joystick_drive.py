@@ -40,7 +40,8 @@ AXIS_TURN = 3  # right stick X, right is positive
 AXIS_FULL = 32767
 DEAD_ZONE = 0.15  # of the stick's travel
 REAR_SPEED = 0.04  # m/s backward, as tools/back_up.py (wheels.REVERSE_MAX is 0.06)
-REAR_LOOK = 0.30  # m of backing the LiDAR must show clear (as back_up.MAX_METRES), on top of the run-on
+REAR_LOOK = 0.30  # m of backing the LiDAR must show clear (as back_up.MAX_METRES), on top of the run-on and the
+# margin: backing is refused with a wall within about 0.40 m behind the back edge, even when the stick asks for a little
 PERIOD = 0.05  # s between two commands; the wheels' watchdog stops the base after 0.3 s of silence
 SECONDS, SECONDS_MAX = 300.0, 600.0
 DEVICE = "/dev/input/js0"
@@ -107,9 +108,20 @@ def _terminate(signum, frame):
     raise KeyboardInterrupt("signal %d" % signum)
 
 
-def blocked(kind, v, w, points, p):
+def released(pad, p, max_speed):
+    """True when the deadman is up and both sticks are centred: the only state that arms the tool. A button held
+    since start-up, or an axis number that is really a trigger resting off centre, never moves the base."""
+    return (
+        not pad.buttons.get(DEADMAN)
+        and command(pad.axes, {DEADMAN: 1}, p, max_speed)[0] == "stop"
+    )
+
+
+def blocked(kind, v, w, points, p, coast=None, now=0.0):
     """Why this move is not safe now, else None. No points is never "nothing there": safety.must_stop says
-    False for an empty scan, so a dead or stale LiDAR must stop the base here."""
+    False for an empty scan, so a dead or stale LiDAR must stop the base here. coast (safety.Coast, with the time
+    `now`): what the base may still be doing after the commands it got, as run_follow checks it, so a turn right
+    after forward driving is also checked with the forward roll that is not over yet."""
     if not len(points):
         return "no LiDAR points"
     if kind == "reverse":
@@ -118,12 +130,18 @@ def blocked(kind, v, w, points, p):
             if safety.rear_clear(points, REAR_SPEED, p, REAR_LOOK)
             else "rear blocked"
         )
-    return "front blocked" if safety.must_stop(points, v, w, p) else None
+    motions = coast.motions(v, w, now) if coast else [(v, w)]
+    return (
+        "front blocked"
+        if any(safety.must_stop(points, v2, w2, p) for v2, w2 in motions)
+        else None
+    )
 
 
 def drive(pad, wheels_, session, p, max_speed, seconds, clock, sleep, log):
     """Drive from the controller for `seconds`; S# however it ends. The result: {"stop": why, "seconds": s}."""
     start, armed, last, shown = clock(), False, "stop", None
+    coast = safety.Coast(p)
     result = {"stop": "time"}
     try:
         while clock() - start < seconds:
@@ -132,12 +150,7 @@ def drive(pad, wheels_, session, p, max_speed, seconds, clock, sleep, log):
             except OSError:
                 result["stop"] = "controller gone"
                 break
-            # Armed once the deadman is seen released with the sticks centred: a button held since start-up, or an axis
-            # number that is really a trigger resting off centre, never moves the base.
-            if (
-                not pad.buttons.get(DEADMAN)
-                and command(pad.axes, {DEADMAN: 1}, p, max_speed)[0] == "stop"
-            ):
+            if released(pad, p, max_speed):
                 armed = True
             kind, v, w = (
                 command(pad.axes, pad.buttons, p, max_speed)
@@ -151,11 +164,12 @@ def drive(pad, wheels_, session, p, max_speed, seconds, clock, sleep, log):
                 except Exception:
                     result["stop"] = "lidar error"
                     break
-                reason = blocked(kind, v, w, points, p)
+                reason = blocked(kind, v, w, points, p, coast, clock() - start)
                 if reason:
                     kind = "stop"
             if kind == "forward":
                 wheels_.send(v, w)
+                coast.sent(v, w, clock() - start)
             elif kind == "reverse":
                 wheels_.send_reverse(REAR_SPEED, 0.0)
             elif last != "stop":
@@ -178,19 +192,22 @@ def drive(pad, wheels_, session, p, max_speed, seconds, clock, sleep, log):
 
 def dry(pad, p, max_speed, seconds, clock, sleep, log):
     """Print the buttons held, the sticks (to the nearest eighth of their travel) and what drive() would send."""
-    start, shown = clock(), None
+    start, shown, armed = clock(), None, False
     while clock() - start < seconds:
         try:
             pad.poll()
         except OSError:
             return {"stop": "controller gone"}
+        armed = armed or released(pad, p, max_speed)  # as drive(): a held deadman at start shows stop
         held = sorted(n for n, value in pad.buttons.items() if value)
         sticks = {
             n: round(value / AXIS_FULL * 8) / 8
             for n, value in sorted(pad.axes.items())
             if abs(value) > 0.1 * AXIS_FULL
         }
-        asked = command(pad.axes, pad.buttons, p, max_speed)
+        asked = (
+            command(pad.axes, pad.buttons, p, max_speed) if armed else ("stop", 0.0, 0.0)
+        )
         if (held, sticks, asked[0]) != shown:
             log("buttons %s axes %s -> %s v=%.2f w=%+.2f" % (held, sticks, *asked))
             shown = (held, sticks, asked[0])
