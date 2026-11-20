@@ -5,16 +5,21 @@ import os
 import signal
 import struct
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 import lidar
 import params
+import replay
+import run_follow
+import telemetry
 import wheels
 from test_scanmatch import room_scan
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import joystick_drive  # noqa: E402
+import slam_replay  # noqa: E402
 
 P = params.load()
 HELD = {5: 1}  # R1, the deadman
@@ -112,6 +117,11 @@ class FakeWheels:
     def close(self):
         self.calls.append("close")
 
+    def cached_odom(self):
+        if getattr(self, "odom_error", None):
+            raise self.odom_error
+        return (0.0, 0.0, 0.0)
+
 
 class FakeSession:
     def __init__(self, scan):
@@ -137,6 +147,18 @@ class SequenceSession(FakeSession):
         self.scan = self.scans[min(self.calls, len(self.scans) - 1)]
         self.calls += 1
         return super().latest()
+
+
+class NewScanSession(FakeSession):
+    """A new revolution at every read (LidarSession hands back the same list until the next one is complete)."""
+
+    def __init__(self, scan):
+        super().__init__(scan)
+        self.calls = 0
+
+    def latest(self):
+        self.calls += 1
+        return list(super().latest())
 
 
 class FakePad:
@@ -263,7 +285,7 @@ class DriveTest(unittest.TestCase):
         self.assertEqual(moves(calls), [])  # a wrong axis number must not turn pressing R1 into a full spin
 
     def test_a_turn_right_after_forward_still_checks_the_forward_roll(self):
-        scans = [wall_at(0.20)] * 3 + [wall_at(0.15)]  # three forward ticks are clear; then the wall is closer
+        scans = [wall_at(0.20)] * 4 + [wall_at(0.15)]  # the idle tick and three forward ticks are clear; then the wall is closer
         turn = ({3: 32767}, HELD)
         _, calls, log = run([RELEASED] + [UP] * 3 + [turn] * 10, session=SequenceSession(scans), seconds=0.45)  # inside the roll's 0.27 s stop_delay and a little after
         self.assertEqual(len([c for c in calls if c[0] == "send" and c[1] > 0]), 3)
@@ -283,6 +305,66 @@ class DriveTest(unittest.TestCase):
             [RELEASED] * 2 + [UP]
         )  # one event, then nothing new for the rest of the 2 s
         self.assertGreater(len(moves(calls)), 20)
+
+    def test_the_lidar_is_read_every_tick_even_standing_still(self):
+        # Read only when a move was asked, the serial backlog of the idle time would be parsed then and stamped fresh.
+        session, clock, ticks = NewScanSession(OPEN_ROOM), Clock(), []
+        sleep = lambda s: (ticks.append(s), clock.sleep(s))
+        joystick_drive.drive(FakePad([RELEASED]), FakeWheels(), session, P, 0.08, 1.0, clock, sleep, [].append)
+        self.assertGreater(len(ticks), 10)
+        self.assertEqual(session.calls, len(ticks))
+
+
+class RecordTest(unittest.TestCase):
+    """A joystick session in run_follow's log format, read by replay.py, the telemetry import and slam_replay.py."""
+
+    def drive(self, folder, script, wheels_=None, log_class=run_follow.Log):
+        recording = joystick_drive.Recording(log_class(folder), P)
+        clock, w, out = Clock(), wheels_ or FakeWheels(), []
+        result = joystick_drive.drive(FakePad(script), w, NewScanSession(OPEN_ROOM), P, 0.08, 2.0, clock, clock.sleep,
+                                      out.append, recording)
+        return recording, result, w.calls, out
+
+    def test_a_session_reads_as_a_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "20261120-120000"
+            recording, result, _, _ = self.drive(folder, [RELEASED] * 2 + [UP] * 30 + [RELEASED])
+            recording.end(9.0, result["stop"])
+            recording.log.close()
+            records = replay.read_log(folder)
+            summary = replay.summary(records)
+            run, samples = telemetry._summary(folder.name, (folder / "log.jsonl").read_text().splitlines())
+            plan = slam_replay.load_plan(folder)
+        cycles = [r for r in records if "pose" in r]
+        self.assertGreater(len(cycles), 30)  # one record per new revolution
+        self.assertEqual(summary["cycles"], len(cycles))
+        self.assertEqual(run[4], "time")  # end_reason, from the end record
+        self.assertIn(0.08, [s[5] for s in samples])  # v_cmd in run_samples
+        self.assertEqual(len(plan), len(range(0, len(cycles), run_follow.SAVE_EVERY)))  # every 10th scan beside the log
+        sticks = [c["joystick"] for c in cycles]
+        self.assertFalse(sticks[0]["deadman"])
+        self.assertIn({"axes": {"1": -32767}, "deadman": True, "armed": True}, sticks)
+        self.assertEqual({len(c["measured"]) for c in cycles}, {5})
+        self.assertIn("latency", cycles[-1]["estimates"])
+
+    def test_a_recording_that_fails_never_changes_the_drive(self):
+        script = [RELEASED] * 2 + [UP] * 10 + [RELEASED]
+        _, plain, _ = run(script)
+
+        class FullCard(run_follow.Log):
+            def write(self, record):
+                raise OSError(28, "No space left on device")
+
+        dead = FakeWheels()
+        dead.odom_error = ValueError("odometry stale (0.80 s > 0.50 s; no valid frame)")
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, log_class, wheels_ in (("card", FullCard, None), ("odometry", run_follow.Log, dead)):
+                recording, result, calls, out = self.drive(Path(tmp) / name, script, wheels_, log_class)
+                recording.log.close()
+                self.assertEqual(calls, plain, name)  # the same sends and stops as a drive with no recording
+                self.assertEqual(result["stop"], "time")
+                self.assertTrue(recording.off, name)
+                self.assertIn("recording off", " ".join(out))
 
 
 class TermPad(FakePad):
@@ -322,13 +404,25 @@ class FakeOpens:
         joystick_drive.lidar.LidarSession = lambda: (
             self.opened.append("lidar") or self.session
         )
-        joystick_drive.wheels.Wheels = lambda p: (
-            self.opened.append("wheels") or self.wheels
-        )
+        def open_wheels(p, **kwargs):
+            self.opened.append("wheels")
+            self.wheels_kwargs = kwargs
+            return self.wheels
+
+        joystick_drive.wheels.Wheels = open_wheels
         joystick_drive.base_check.first_full_scan = lambda *args: OPEN_ROOM
 
 
 class MainTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.logs = Path(tmp.name)
+        self.addCleanup(setattr, run_follow, "LOG_ROOT", run_follow.LOG_ROOT)
+        run_follow.LOG_ROOT = self.logs  # a drive records its session: never into the repository's logs/
+        self.addCleanup(setattr, joystick_drive, "devices_text", joystick_drive.devices_text)
+        joystick_drive.devices_text = lambda: USB_TEXT  # the DS4 on USB with its sensor stream, unless a test says else
+
     def tearDown(self):
         (
             joystick_drive.Pad,
@@ -422,8 +516,44 @@ class MainTest(unittest.TestCase):
     def test_the_device_option_skips_the_search(self):
         self.addCleanup(setattr, joystick_drive, "devices_text", joystick_drive.devices_text)
         joystick_drive.devices_text = lambda: USB_TEXT
-        self.main(["--yes-owner-at-robot", "--device", "/dev/input/js3"], script=[RELEASED, "gone"])
+        self.main(["--dry", "--seconds", "0.1", "--device", "/dev/input/js3"], script=[RELEASED], safe_run=False)
         self.assertEqual(self.fakes.paths, [("/dev/input/js3", None)])
+
+    def test_no_heartbeat_on_a_link_not_known_to_be_usb_is_refused(self):
+        # Pad.silent_for() is 0.0 without a sensor stream: a dropped link with R1 held would read as held for good.
+        for found, argv in (("", []), (USB_TEXT, ["--device", "/dev/input/js3"])):  # the js0 fallback, and --device
+            joystick_drive.devices_text = lambda found=found: found
+            code, _ = self.main(["--yes-owner-at-robot", "--seconds", "0.2"] + argv)  # one not refused ends soon
+            self.assertTrue(code and code.startswith("REFUSED"), (argv, code))
+            self.assertEqual(self.fakes.opened, [], argv)
+            self.tearDown()
+
+    def test_a_usb_controller_without_its_sensor_stream_may_drive(self):
+        joystick_drive.devices_text = lambda: USB_TEXT.split("\n\n")[0] + "\n"  # unplugging ends it: a read error
+        code, _ = self.main(["--yes-owner-at-robot"], script=[RELEASED, "gone"])
+        self.assertIsNone(code)
+        self.assertEqual(self.fakes.paths, [("/dev/input/js0", None)])
+
+    def test_a_drive_records_its_session_where_run_follow_keeps_its_runs(self):
+        code, out = self.main(["--yes-owner-at-robot"], script=[RELEASED, UP, UP, "gone"])
+        self.assertIsNone(code)
+        self.assertEqual(self.fakes.wheels_kwargs, {"poll_odom": True})  # cached_odom, never a wait on the port
+        (folder,) = self.logs.iterdir()
+        self.assertIsNotNone(telemetry._run_start(folder.name))  # <YYYYMMDD-HHMMSS>, the name the import takes
+        records = replay.read_log(folder)
+        self.assertTrue([r for r in records if "pose" in r])
+        self.assertEqual(records[-1]["end"], "controller gone")
+        self.assertEqual(json.loads(out.strip().splitlines()[-1])["log"], str(folder))
+
+    def test_a_log_that_cannot_be_opened_leaves_the_drive_as_it_was(self):
+        blocker = self.logs / "a-file"
+        blocker.write_text("")
+        run_follow.LOG_ROOT = blocker  # no folder can be made under a file
+        code, out = self.main(["--yes-owner-at-robot"], script=[RELEASED, UP, "gone"])
+        self.assertIsNone(code)
+        self.assertIn("recording off", out)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1])["stop"], "controller gone")
+        self.assertTrue(moves(self.fakes.wheels.calls))
 
     def test_a_drive_opens_pad_lidar_wheels_and_closes_all_of_them(self):
         code, out = self.main(["--yes-owner-at-robot"], script=[RELEASED, UP, "gone"])

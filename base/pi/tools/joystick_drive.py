@@ -11,13 +11,19 @@ Nothing moves until the deadman has been seen released with both sticks centred 
 that rests off centre, is not a go). SIGTERM from the console's STOP ends it cleanly. It stops on: the
 deadman released, a stick in its dead zone, no or stale LiDAR points, a blocked front (safety.must_stop) or rear
 (safety.rear_clear), the controller going away, the time limit. Backward is straight, at REAR_SPEED, and the LiDAR does
-not see the power cable: the person driving watches it. Prints one JSON line at the end.
+not see the power cable: the person driving watches it. Prints one JSON line at the end ("log": the recording).
+
+Recording: a drive is logged as run_follow logs a run, in logs/<start time>/ next to run_follow.py (log.jsonl, one
+record per new LiDAR revolution: odometry pose, the command sent, measured motion, online estimates, the sticks and
+R1; every 10th scan beside it), so replay.py, tools/runs_to_db.py and tools/slam_replay.py read it unchanged. A log
+that cannot be opened or written, or dead odometry, ends the recording and says so; the drive and its guards go on.
 
 Heartbeat: a js device sends an event only when a value changes, so a lost Bluetooth link could leave R1 reading
 held. The tool therefore also reads the motion-sensor device of the same controller (found by itself in
 /proc/bus/input/devices; about 170 reports a second, also at rest, measured on USB on 2026-11-20). No report for
 HEARTBEAT_S stops the base and it must be armed again (R1 seen released). A Bluetooth controller without that
-stream is refused; --device skips the search and the heartbeat (a repair option, not allowed through the console).
+stream is refused, and so is a drive with no heartbeat on a link not known to be USB (the js0 fallback, --device);
+--device skips the search, so it serves --dry only (a repair option, not allowed through the console).
 """
 
 import argparse
@@ -33,9 +39,13 @@ import sys
 import time
 from pathlib import Path
 
+import numpy
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import base_check  # noqa: E402
+import calib  # noqa: E402
 import lidar  # noqa: E402
+import motion  # noqa: E402
 import params  # noqa: E402
 import run_follow  # noqa: E402
 import safety  # noqa: E402
@@ -202,13 +212,48 @@ def blocked(kind, v, w, points, p, coast=None, now=0.0):
     )
 
 
-def drive(pad, wheels_, session, p, max_speed, seconds, clock, sleep, log):
-    """Drive from the controller for `seconds`; S# however it ends. The result: {"stop": why, "seconds": s}."""
+class Recording:
+    """The drive in run_follow's log format (run_follow.Log): one record per new LiDAR revolution, every SAVE_EVERY-th
+    scan saved beside it, motion.MotionEstimator and calib.BaseEstimates fed as run_follow feeds them. off: why the
+    recording ended early (a write or the odometry failed), else None."""
+
+    def __init__(self, log, p):
+        self.log, self.motion, self.estimates = log, motion.MotionEstimator(p), calib.BaseEstimates(p)
+        self.n, self.scan, self.at, self.off = 0, None, None, None
+
+    def cycle(self, now, wheels_, scan, points, sent, sent_at, stop, pad, armed, cycle_time):
+        if not scan or scan is self.scan:  # LidarSession hands back the same list until the next revolution is complete
+            return
+        pose = wheels_.cached_odom()
+        m = self.motion.update(now, pose, scan, sent)
+        self.estimates.observe(m, sent, sent_at)
+        if self.n % run_follow.SAVE_EVERY == 0:
+            self.log.save_scan(self.n, scan, None)
+        names = ("speed_gain", "turn_gain", "drift_per_m", "latency", "decel", "stop_delay")
+        self.log.write({
+            "time": now, "pose": list(pose), "v": sent[0], "w": sent[1], "locked": False, "stop": stop,
+            "nearest": float(numpy.hypot(points[:, 0], points[:, 1]).min()) if len(points) else None,
+            "cycle_time": cycle_time, "period": None if self.at is None else now - self.at, "phase": "joystick",
+            "measured": [round(m.v, 4), round(m.w, 4), m.trusted, round(m.agree, 2), round(m.span, 3)],
+            "estimates": {n: [round(getattr(self.estimates, n)[0], 4), getattr(self.estimates, n)[2]] for n in names},
+            "joystick": {"axes": pad.axes, "deadman": bool(pad.buttons.get(DEADMAN)), "armed": armed},
+        })
+        self.scan, self.at, self.n = scan, now, self.n + 1
+
+    def end(self, now, why):
+        self.log.write({"time": now, "stop": why, "end": why})
+
+
+def drive(pad, wheels_, session, p, max_speed, seconds, clock, sleep, log, recording=None):
+    """Drive from the controller for `seconds`; S# however it ends. The result: {"stop": why, "seconds": s}.
+    recording: a Recording, fed after each loop's command has gone out, or None."""
     start, armed, last, shown = clock(), False, "stop", None
     coast = safety.Coast(p)
+    sent, sent_at = (0.0, 0.0), start  # what the wheels were last told, and since when (for the recording)
     result = {"stop": "time"}
     try:
         while clock() - start < seconds:
+            tick = clock()
             try:
                 pad.poll()
             except OSError:
@@ -224,13 +269,14 @@ def drive(pad, wheels_, session, p, max_speed, seconds, clock, sleep, log):
                 if armed
                 else ("stop", 0.0, 0.0)
             )
+            try:  # every loop, moving or not: a backlog left unread is parsed later and stamped as a fresh scan
+                scan = session.latest()
+                points = run_follow.scan_points(scan, p)
+            except Exception:
+                result["stop"] = "lidar error"
+                break
             reason = "controller silent" if quiet else None
             if kind != "stop":
-                try:
-                    points = run_follow.scan_points(session.latest(), p)
-                except Exception:
-                    result["stop"] = "lidar error"
-                    break
                 reason = blocked(kind, v, w, points, p, coast, clock() - start)
                 if reason:
                     kind = "stop"
@@ -250,7 +296,16 @@ def drive(pad, wheels_, session, p, max_speed, seconds, clock, sleep, log):
                 )
                 shown = (kind, reason)
             last = kind
-            sleep(PERIOD)
+            told = (v, w) if kind == "forward" else (-REAR_SPEED, 0.0) if kind == "reverse" else (0.0, 0.0)
+            if told != sent:
+                sent, sent_at = told, clock()
+            if recording is not None and recording.off is None:
+                try:
+                    recording.cycle(clock(), wheels_, scan, points, sent, sent_at, reason, pad, armed, clock() - tick)
+                except Exception as error:  # a full SD card or dead odometry ends the recording, never the drive
+                    recording.off = "%s: %s" % (type(error).__name__, error)
+                    log("recording off: " + recording.off)
+            sleep(max(0.0, PERIOD - (clock() - tick)))
     finally:
         wheels_.stop()
     result["seconds"] = round(clock() - start, 2)
@@ -299,7 +354,7 @@ def main():
         default=SECONDS,
         help="how long to run, at most %g" % SECONDS_MAX,
     )
-    ap.add_argument("--device", help="the js device; skips the search for the controller and the heartbeat")
+    ap.add_argument("--device", help="the js device; skips the search for the controller and the heartbeat (--dry only)")
     ap.add_argument(
         "--dry",
         action="store_true",
@@ -330,12 +385,15 @@ def main():
         js, sensor, bus = locate(devices_text()) or (DEVICE, None, None)
     if bus == "bluetooth" and not sensor:
         sys.exit("REFUSED: the Bluetooth controller shows no motion-sensor stream, so a lost link could not be noticed")
+    if not args.dry and not sensor and bus != "usb":
+        sys.exit("REFUSED: no heartbeat from %s (no motion-sensor stream, not known to be USB), so a lost link could not"
+                 " be noticed: run --dry to see what was found" % js)
     print("controller %s (%s), heartbeat from %s" % (js, bus or "bus unknown", sensor or "nothing"), flush=True)
     try:
         pad = Pad(js, sensor)
     except OSError as error:
         sys.exit("REFUSED: cannot open the controller %s (%s): plug it in, or pair and connect it" % (js, error.strerror or error))
-    session = wheels_ = None
+    session = wheels_ = recording = None
     signal.signal(signal.SIGTERM, _terminate)  # the console's STOP: end through the finally blocks, like Ctrl+C
     try:
         try:
@@ -348,7 +406,12 @@ def main():
                 base_check.first_full_scan(
                     session, {"scans": []}, time.monotonic, time.sleep
                 )  # the first revolution is partial
-                wheels_ = wheels.Wheels(p)
+                wheels_ = wheels.Wheels(p, poll_odom=True)  # cached_odom for the recording: never a wait on the port
+                try:
+                    wheels_.cached_odom()  # the first pose, read standing still: without one cached_odom waits on read_odom
+                    recording = Recording(run_follow.Log(run_follow.LOG_ROOT / time.strftime("%Y%m%d-%H%M%S")), p)
+                except (OSError, ValueError) as error:
+                    print("recording off: %s" % error, flush=True)
                 result = drive(
                     pad,
                     wheels_,
@@ -359,6 +422,7 @@ def main():
                     time.monotonic,
                     time.sleep,
                     print,
+                    recording,
                 )
         except KeyboardInterrupt:
             result = {"stop": "terminated"}
@@ -369,6 +433,14 @@ def main():
         if session is not None:
             session.close()
         pad.close()
+    if recording is not None:  # after S# and every close: the end record never delays the stop
+        try:
+            if recording.off is None:
+                recording.end(time.monotonic(), result["stop"])
+            recording.log.close()
+        except OSError as error:
+            recording.off = recording.off or "%s: %s" % (type(error).__name__, error)
+        result["log"] = str(recording.log.folder) if recording.off is None else "off: " + recording.off
     print(json.dumps(result), flush=True)
 
 
