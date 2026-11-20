@@ -6,10 +6,13 @@ Ours is what they need as input:
   - where: the bag's x, y from the Pi (robot frame, LiDAR after the approach), refined by the gripper
     camera when it is calibrated (floor_pick.py --calibrate-self);
   - how high its top is: measured by the Pi from a distance ("top": Xtion depth or the front camera,
-    base/docs/bag-sensing.md), else triangulated from 3 gripper camera views (gripper_camera.triangulate), else
-    found by touch (z NaN: their pick_bag lowers its closed jaws until the joint loads change; PROBE_UNKNOWN),
-    or, with probe=False, DEFAULT_TOP: too low is safe (the jaws close lower on the handles or the gathered
-    mouth), too high closes on air (MISSED), so that fallback is just above the LiDAR plane the bag crossed.
+    base/docs/bag-sensing.md), else triangulated from 3 gripper camera views (gripper_camera.triangulate).
+    When gripper_camera.json exists (a CameraModel was loaded) the 0.02 m/s touch probe is not used:
+    a failed triangulation falls back to DEFAULT_TOP. With no calibration file, an unknown top is
+    found by touch (z NaN: their pick_bag lowers its closed jaws until the joint loads change;
+    PROBE_UNKNOWN), or, with probe=False, DEFAULT_TOP: too low is safe (the jaws close lower on the
+    handles or the gathered mouth), too high closes on air (MISSED), so that fallback is just above
+    the LiDAR plane the bag crossed.
   - which way its handles run: the Pi's "yaw" (robot frame, the long axis of its LiDAR points), turned into the
     arm frame by arm_yaw; without it their default (the part across the arm's view).
 Before anything moves, /arm/home (an API task) restarts the arm team's idle timer: their auto rest
@@ -20,7 +23,8 @@ is the measured -0.331 itself, so no offset of ours is added); x, y go through M
 /robot/command (JSON {"action", "params"}):
   pick_bag {"x", "y"[, "top", "yaw"]}  robot frame, metres, rad -> grab_success | grab_failed|CODE|message
                                  (with their grasp reading: grab_success|SUCCESS|gripper_pos=R gripper_load=L,
-                                 grab_failed|CODE|message [gripper_pos=R gripper_load=L])
+                                 or grab_success|SUCCESS_UNVERIFIED|... when the gripper closed but the camera
+                                 did not confirm; grab_failed|CODE|message [gripper_pos=R gripper_load=L])
   drop_bag {"x", "y"}            floor point, robot frame -> drop_done | drop_failed|CODE|message
   stop                           while a job runs: /arm/stop (the arm holds where it is)
   look_bags                      every bag in the front camera now (bag_choice.py), the arm does not move ->
@@ -68,7 +72,9 @@ import bag_choice
 import console_gate
 import front_camera
 import gripper_camera as gc
+import pick_log
 import ports
+import speed_profile
 from floor_pick import JAW_OPEN, READY, Failure, FloorPick, Planner, Result
 from so100_ik import ARM, JOINTS, Kinematics, Mount, Unreachable, load_limits
 
@@ -80,9 +86,33 @@ ARM_FLOOR_Z = -0.331      # floor in the arm frame = their launch floor_z for mo
 TOP_RANGE = (0.15, 0.50)  # a triangulated top outside this is a wrong match
 MAX_SPREAD = 0.02         # m, RMS distance of the triangulated point from the view rays
 MAX_SHIFT = 0.08          # m, the camera may move the grasp point this far from the LiDAR's bag centre
+GRIPPER_CONF_AT_LIMIT = 0.55  # confidence at MAX_SPREAD; 1 at spread 0; 0 past a hard limit (gripper_gate)
 LOOK_CLEAR = 0.08         # m, the gripper stays this far above the assumed top while it looks
+
+
+def gripper_gate(spread, z, shift, max_spread=MAX_SPREAD, top_range=TOP_RANGE, max_shift=MAX_SHIFT):
+    """Confidence of one triangulated bag top. 1 at spread 0, GRIPPER_CONF_AT_LIMIT at max_spread, else 0.
+
+    Hard limits, unchanged: spread above max_spread, height outside top_range, or a shift from the
+    requested x, y above max_shift. Inside them the confidence falls in a straight line with the spread.
+    """
+    if spread > max_spread or not top_range[0] <= z <= top_range[1] or shift > max_shift:
+        return 0.0
+    if max_spread <= 0:
+        return 1.0
+    return 1.0 - (1.0 - GRIPPER_CONF_AT_LIMIT) * (spread / max_spread)
+
+
+def top_source(measured, probe):
+    """Where the bag top came from: "camera" when measured, else "probe" or "default"."""
+    if measured:
+        return "camera"
+    return "probe" if probe else "default"
+
+
 HOME_TIMEOUT = 60.0
-PICK_TIMEOUT = 150.0      # their pick: up to 3 tries, slow carry (bag_speed 0.08)
+PICK_TIMEOUT = 150.0      # their pick: up to 3 tries, slow carry (bag_speed 0.08 on the safe profile)
+PICK_LOG_DIR = os.path.expanduser("~/hmc-follow/picks")  # one JSON per pick, with phase timings
 PLACE_TIMEOUT = 120.0
 ARM_CMD_PORT = ports.ARM_CMD  # TCP on 127.0.0.1: the console's arm commands from agent.py (ArmCommands)
 CENTER_HOME_TIMEOUT = 30.0  # center's steps fit in agent.py's ARM_TIMEOUT (90 s)
@@ -133,14 +163,19 @@ def look_poses(plan, kin, target, count=3):
 class BagArm:
     """Pick and place jobs over a transport with arm_task / arm_state / moving / stop (floor_pick.RosArm)."""
 
-    def __init__(self, kin, transport, camera=None, detector=None, log=print, event=None, probe=PROBE_UNKNOWN):
+    def __init__(self, kin, transport, camera=None, detector=None, log=print, event=None, probe=PROBE_UNKNOWN,
+                 profile=speed_profile.SAFE, pick_log_dir=None, clock=time.monotonic):
         self.k, self.t = kin, transport
         self.probe = probe
+        self.profile = profile
+        self.pick_log_dir = pick_log_dir
+        self.clock = clock
         self.fp = FloorPick(kin, transport, Planner(kin), log=log)
         self.camera, self.detector = camera, detector or gc.BagHandleDetector()
         self.log = log
         self.event = event or getattr(transport, "event", lambda _e: None)
         self.reading = {}          # the last API result's grasp reading (gripper_pos rad, gripper_load %)
+        self.last_pick = None      # the per-pick JSON of the last pick (phases included)
 
     def _ready(self):
         st = self.t.arm_state()
@@ -158,6 +193,7 @@ class BagArm:
         res = self.t.arm_task(name, timeout, **goal)
         ok, code, msg = res[:3]
         self.reading = res[3] if len(res) > 3 else {}     # their grasp reading (pick_bag), if they send one
+        self._arm_code = code or ("SUCCESS" if ok else "FAILED")
         if not ok:
             raise Failure(code or "FAILED", "/arm/%s: %s" % (name, msg))
         return msg
@@ -185,9 +221,11 @@ class BagArm:
             self.log("bag seen from %d look(s): top not measured" % len(views))
             return None
         p, spread = gc.triangulate(self.k, self.camera, views)
-        self.log("bag point (%.3f, %.3f, %.3f), spread %.3f m from %d views" % (p[0], p[1], p[2], spread, len(views)))
-        if spread > MAX_SPREAD or not TOP_RANGE[0] <= p[2] <= TOP_RANGE[1] \
-                or math.hypot(p[0] - x, p[1] - y) > MAX_SHIFT:
+        shift = math.hypot(p[0] - x, p[1] - y)
+        confidence = gripper_gate(spread, p[2], shift)
+        self.log("bag point (%.3f, %.3f, %.3f), spread %.3f m, shift %.3f m, confidence %.2f from %d views"
+                 % (p[0], p[1], p[2], spread, shift, confidence, len(views)))
+        if confidence <= 0:
             self.log("bag point rejected (spread, height or shift out of range)")
             return None
         return p
@@ -199,41 +237,73 @@ class BagArm:
             return ""
         return "gripper_pos=%.3f gripper_load=%.1f" % (pos, load)
 
+    def _record(self, phases, result, top):
+        probed = isinstance(top, float) and math.isnan(top)
+        body = phases.finish(profile=self.profile, probe=probed, ok=result.ok, code=result.code,
+                             speeds=speed_profile.get(self.profile))
+        self.last_pick = body
+        if self.pick_log_dir:
+            try:
+                pick_log.write_pick(self.pick_log_dir, body, time.strftime("%Y%m%d-%H%M%S"), "bag")
+            except OSError as exc:
+                self.log("pick log not written: %s" % exc)
+        return result
+
     def pick(self, x, y, top=None, yaw=None):
         """Pick the bag at robot (x, y); top (m above the floor) and yaw (robot frame rad, the handles' line)
         when the Pi measured them. Sends grab_success or grab_failed|CODE|message (with their grasp
         reading when they send one, for the flow log)."""
         self.reading = {}
+        phases = pick_log.PhaseLog(self.clock)
+        chosen = top  # the height we actually sent; stays the argument if we refuse before measuring
         try:
+            setter = getattr(self.t, "set_speed_profile", None)
+            if setter is not None:
+                setter(self.profile)
             self._ready()
+            phases.mark("home")
             self._task("home", HOME_TIMEOUT)
             where = np.array([x, y], float)
             if top is None:
+                phases.mark("measure")
                 p = self.measure_top(x, y)
                 if p is not None:
                     where, top = p[:2], float(p[2])
+                    self.log("touch probe skipped: gripper camera measured the top (%s)" % top_source(True, self.probe))
                     self.fp._goto("back to ready", READY, JAW_OPEN)
+                elif self.camera is not None:
+                    # gripper_camera.json loaded: do not spend the pick on the 0.02 m/s touch probe
+                    top = DEFAULT_TOP
+                    self.log("gripper camera is calibrated: touch probe skipped, top %.3f m" % top)
                 elif self.probe:
                     top = math.nan  # their pick_bag lowers its closed jaws until they touch the top
+                    self.log("touch probe: no gripper camera measurement")
                 else:
                     top = DEFAULT_TOP
+                    self.log("touch probe skipped: probe off, top %.2f m (%s)" % (top, top_source(False, False)))
+            chosen = top
             grasp = np.array([*self.k.mount.to_arm([where[0], where[1], 0.0])[:2], ARM_FLOOR_Z + top])
-            self.log("pick_bag at robot (%.3f, %.3f), top %s -> arm (%.3f, %.3f, %s)"
+            self.log("pick_bag at robot (%.3f, %.3f), top %s -> arm (%.3f, %.3f, %s) profile %s"
                      % (where[0], where[1], "unknown (found by touch)" if math.isnan(top) else "%.3f m" % top,
-                        grasp[0], grasp[1], "NaN" if math.isnan(grasp[2]) else "%.3f" % grasp[2]))
+                        grasp[0], grasp[1], "NaN" if math.isnan(grasp[2]) else "%.3f" % grasp[2], self.profile))
             ayaw = None if yaw is None else arm_yaw(yaw, self.k.mount)
             if ayaw is not None:
                 self.log("yaw %.1f deg robot -> %.1f deg arm" % (math.degrees(yaw), math.degrees(ayaw)))
+            phases.mark("pick_bag")
             msg = self._task("pick_bag", PICK_TIMEOUT, grasp=tuple(grasp), yaw=ayaw)
         except Failure as exc:
             self.log("FAILED %s: %s" % (exc.code, exc.message))
             note = self._reading()
             self.event("grab_failed|%s|%s%s" % (exc.code, exc.message.replace("|", "/"),
                                                 " [%s]" % note if note else ""))
-            return Result(False, exc.code, exc.message)
+            return self._record(phases, Result(False, exc.code, exc.message), chosen)
         note = self._reading()
-        self.event("grab_success|SUCCESS|%s" % note if note else "grab_success")
-        return Result(True, "SUCCESS", msg)
+        code = getattr(self, "_arm_code", "SUCCESS") or "SUCCESS"
+        if code == "SUCCESS":
+            self.event("grab_success|SUCCESS|%s" % note if note else "grab_success")
+        else:
+            self.event("grab_success|%s|%s" % (code, note) if note else "grab_success|%s" % code)
+        return self._record(phases, Result(True, code, msg), chosen)
 
     def place(self, x, y):
         """Put the held bag down at robot floor point (x, y). Sends drop_done or drop_failed|CODE|message."""
@@ -712,6 +782,8 @@ def parse(argv=None):
     ap.add_argument("--pick", nargs=2, type=float, metavar=("X", "Y"))
     ap.add_argument("--place", nargs=2, type=float, metavar=("X", "Y"))
     ap.add_argument("--top", type=float, help="pick: the bag top above the floor (m), skip the camera")
+    ap.add_argument("--speed-profile", choices=("safe", "fast"), default="safe",
+                    help="safe = today's speeds (default); fast after a supervised arm test")
     ap.add_argument("--camera-file", default=gc.DEFAULT_FILE)
     ap.add_argument("--snap-url", default="http://127.0.0.1:%d/snap.jpg" % ports.WEBCAM)
     ap.add_argument("--front-camera-file", default=front_camera.DEFAULT_FILE)
@@ -730,7 +802,7 @@ def main(argv=None):
         camera = None
         print("no gripper camera calibration at %s: the bag top is not measured" % a.camera_file)
     t = RosArm(a.snap_url)
-    arm = BagArm(kin, t, camera)
+    arm = BagArm(kin, t, camera, profile=a.speed_profile, pick_log_dir=PICK_LOG_DIR)
     try:
         if a.pick or a.place:
             res = arm.pick(*a.pick, a.top) if a.pick else arm.place(*a.place)

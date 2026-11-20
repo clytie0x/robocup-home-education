@@ -1,13 +1,15 @@
-// Robot Console page: polls /api/state once a second, the run's status 3 times a second while a task runs
-// (only while this tab is in view: that read is the run's page heartbeat), the LiDAR while it is on screen,
-// the power bank estimate and the 21V motor battery's use every 15 s, and the Data tab's charts when it is open. Plain JS, no libraries.
+// Robot Console page. Operate is the default workspace (Preact islands in robot.js). Engineer keeps
+// Jetson, checks, data, logs and help. /api/state is polled once a second only while the tab is visible.
+// The run's status is polled 3 times a second while a task runs and this tab is visible (that read is the
+// run's page heartbeat). The LiDAR is drawn while it is on screen. The power bank and the 21V battery
+// refresh every 15 s. The Data charts load when Engineer > ข้อมูล is open.
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const TABS = ["overview", "live", "task", "data", "more", "jetson", "checks", "logs", "help"];
+const TABS = ["robot", "overview", "live", "task", "data", "more", "jetson", "checks", "logs", "help"];
 const PHONE_ONLY_TABS = ["live", "more"]; // on a desktop the overview shows the camera and the LiDAR
 const MORE_TABS = ["jetson", "checks", "logs", "help"];
-const TITLES = { overview: "HMC Robot", live: "ภาพสด", task: "งาน", data: "ข้อมูล", more: "อื่นๆ", jetson: "Jetson",
+const TITLES = { robot: "Robot", overview: "HMC Robot", live: "ภาพสด", task: "งาน", data: "ข้อมูล", more: "อื่นๆ", jetson: "Jetson",
   checks: "ตรวจระบบ", logs: "Log", help: "วิธีใช้" };
 const PROGRAM_TEXT = {
   detector: "ตัวตรวจจับคน (server.py) TCP 5601",
@@ -24,14 +26,23 @@ const STOP_TEXT = { // run_follow's stop reasons
 };
 const DOT = { ok: "", warn: "ring", bad: "bad", idle: "idle" };
 function dotOf(level) { return level in DOT ? DOT[level] : "idle"; }
-const DESK = window.matchMedia("(min-width: 900px)");
+const DESK = window.matchMedia("(min-width: 800px)");
+const ENGINEER_TABS = ["jetson", "checks", "data", "logs", "help"];
 
 let state = null;      // the newest /api/state
-let run = null;        // the newest /api/run while a task runs
+let run = null;        // the newest run status, from /api/state while a task runs
+let localEvents = [];  // lines this page saw itself (a dead console never reaches the server list)
 let bank = null;       // the newest /api/bank
-let arm = null;        // the newest /api/arm while the Jetson tab is open
-let tab = "overview";
-let choice = { mode: "dry", speed: null, minutes: 5, virtual: false };
+let arm = null;        // the newest /api/arm while Operate or the Jetson tab is open
+let workspace = "operate";
+let tab = "jetson";
+let ackedBanner = storeGet("hmc-banner-ack");
+let selectedLight = null;
+let seenBanner = null;
+const seenLights = {};
+let snapBackoff = 0;
+const MISSION_TEXT = { follow_only: "ตามคนอย่างเดียว", bag_only: "หาและหยิบถุง", full: "โจทย์จริง HMC" };
+let choice = { mode: "dry", mission: "full", speed: null, minutes: 5, virtual: false };
 
 // ------------------------------------------------------------ helpers
 
@@ -53,7 +64,8 @@ async function getJSON(url, headers) {
   return body;
 }
 
-async function post(url, body) {
+async function post(url, body, options) {
+  options = options || {};
   const headers = { "Content-Type": "application/json", "X-HMC-Console": "1" }; // the console takes no other POST
   if (session()) headers["X-HMC-Session"] = session();
   const pin = storeGet("console-pin");
@@ -72,7 +84,15 @@ async function post(url, body) {
     if (askPin()) return post(url, body);
     return null;
   }
-  if (data && data.error) toast(data.error, true);
+  if (data && data.error) {
+    const explained = window.HmcRobot ? HmcRobot.explainMessage(data.error) : null;
+    if (!(explained && explained.noise)) {
+      if (!options.quiet) toast(explained ? explained.th : data.error, true);
+      if (explained && window.HmcRobot) {
+        HmcRobot.pushEvent({ t: Date.now() / 1000, level: explained.level || "warn", th: explained.th, fix: explained.fix || "", key: explained.key || data.error });
+      }
+    }
+  }
   return data;
 }
 
@@ -85,13 +105,21 @@ function askPin() {
 }
 
 let toastTimer = null;
+function remember(text, bad) {
+  const line = String(text);
+  if (localEvents.length && localEvents[0].text === line) return;
+  localEvents.unshift({ time: Date.now() / 1000, level: bad ? "error" : "info", text: line });
+  if (localEvents.length > 40) localEvents.pop();
+}
 function toast(text, bad) {
+  remember(text, bad);
   const el = $("toast");
   el.textContent = text;
   el.className = bad ? "bad" : "";
   el.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.hidden = true; }, bad ? 6000 : 3000);
+  if (window.HmcRobot) window.HmcRobot.update({ state, localEvents, onStop: stop, onArm: sendArm });
 }
 
 function confirmBox(title, text, yes, drive) {
@@ -146,21 +174,36 @@ function tagHTML(text, dot, bad) {
 // ------------------------------------------------------------ tabs
 
 function showTab(name) {
-  if (!TABS.includes(name)) name = "overview";
-  if (DESK.matches && PHONE_ONLY_TABS.includes(name)) name = "overview";
-  tab = name;
-  for (const t of TABS) $(`tab-${t}`).hidden = t !== name;
-  const phoneTab = MORE_TABS.includes(name) ? "more" : name;
-  for (const a of document.querySelectorAll("#tabbar a")) a.classList.toggle("here", a.dataset.tab === phoneTab);
-  for (const a of document.querySelectorAll("#desk-tabs a")) a.classList.toggle("here", a.dataset.tab === name);
-  if (name === "logs") loadLogs();
-  if (name === "jetson") fetchArm();
-  if (name === "data") loadData();
+  name = String(name || "").replace(/^#/, "");
+  if (name === "engineer") {
+    workspace = "engineer";
+    if (!ENGINEER_TABS.includes(tab)) tab = "jetson";
+  } else if (ENGINEER_TABS.includes(name)) {
+    workspace = "engineer";
+    tab = name;
+  } else {
+    workspace = "operate";
+  }
+  document.body.classList.toggle("ws-operate", workspace === "operate");
+  document.body.classList.toggle("ws-engineer", workspace === "engineer");
+  const operate = $("operate"), engineer = $("engineer");
+  if (operate) operate.hidden = workspace !== "operate";
+  if (engineer) engineer.hidden = workspace !== "engineer";
+  for (const t of TABS) {
+    const el = $(`tab-${t}`);
+    if (el) el.hidden = !(workspace === "engineer" && t === tab);
+  }
+  $("ws-operate").classList.toggle("on", workspace === "operate");
+  $("ws-engineer").classList.toggle("on", workspace === "engineer");
+  for (const a of document.querySelectorAll(".eng-nav a")) a.classList.toggle("here", workspace === "engineer" && a.dataset.tab === tab);
+  if (workspace === "engineer" && tab === "logs") loadLogs();
+  if (workspace === "operate" || (workspace === "engineer" && tab === "jetson")) fetchArm();
+  if (workspace === "engineer" && tab === "data") loadData();
   window.scrollTo(0, 0);
   render();
 }
 window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
-DESK.addEventListener("change", () => showTab(tab));
+DESK.addEventListener("change", () => showTab(workspace === "operate" ? "operate" : tab));
 let resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
@@ -189,11 +232,23 @@ function taskRunning(s) { const j = jobOf(s); return jobRunning(s) && j && j.kin
 function card(id) { return state && (state.cards || []).find((c) => c.id === id); }
 
 async function pollState() {
+  if (document.visibilityState !== "visible") {
+    setTimeout(pollState, 1000);
+    return;
+  }
+  const missionOn = !!(state && state.mission && state.mission.active);
+  const beat = taskRunning(state) || missionOn;
+  const headers = {};
+  if (beat && session()) headers["X-HMC-Session"] = session();
   try {
-    state = await getJSON("/api/state");
+    state = await getJSON("/api/state" + (beat ? "?heartbeat=1" : ""), headers);
+    run = state && state.run && state.run.state !== "idle" ? state.run : null;
+    if (state && state.bank) bank = state.bank;
+    if (state && state.jetson && state.jetson.arm) arm = state.jetson.arm;
     $("offline").hidden = true;
   } catch (e) {
     $("offline").hidden = false;
+    remember("console did not answer", true);
   }
   render();
   setTimeout(pollState, 1000);
@@ -208,30 +263,30 @@ async function fetchRun() {
 }
 
 async function pollRun() {
-  if (taskRunning(state) && document.visibilityState === "visible") {
-    await fetchRun();
-  } else if (!taskRunning(state)) {
-    run = null;
-  }
-  setTimeout(pollRun, 333);
+  // The run's status rides on the 1s /api/state poll. fetchRun() is only the read right after a command.
 }
 
 async function pollBank() {
-  try { bank = await getJSON("/api/bank"); } catch (e) { bank = null; }
-  renderBank();
+  if (document.visibilityState === "visible" && !(state && state.bank)) {
+    try { bank = await getJSON("/api/bank"); } catch (e) { bank = null; }
+    if (state) render();
+    else renderBank();
+  }
   setTimeout(pollBank, 15000);
 }
 
 function render() {
-  if (!state) return;
+  if (!state) { place(); return; }
   renderJob();
   renderOverview();
   renderBank();
   renderRunParts();
-  if (tab === "live") renderLive();
-  if (tab === "task") renderTask();
-  if (tab === "jetson") { renderJetson(); renderArm(); }
-  if (tab === "checks") renderChecks();
+  if (workspace === "engineer" && tab === "live") renderLive();
+  if (workspace === "operate" || (workspace === "engineer" && tab === "task")) { renderTask(); renderArm(); }
+  if (workspace === "engineer" && tab === "jetson") { renderJetson(); renderArm(); }
+  if (workspace === "engineer" && tab === "checks") renderChecks();
+  updateOperate();
+  if (window.HmcRobot && HmcRobot.update) HmcRobot.update({ state, localEvents, onStop: stop, onArm: sendArm });
   place();
 }
 
@@ -249,6 +304,10 @@ function runFigures() {
 
 function stateWord() {
   if (!state) return ["-", ""];
+  if (window.HmcRobot) {
+    const model = HmcRobot.viewModel(state, { run: run, bank: bank, arm: arm, ack: ackedBanner });
+    return [model.status.text, model.status.level === "bad" ? "bad" : ""];
+  }
   const j = jobOf(state), running = jobRunning(state);
   if (running && j.stopping) return ["กำลังหยุด", "bad"];
   if (running && j.kind === "task") {
@@ -280,8 +339,8 @@ function renderJob() {
   const j = jobOf(state), running = jobRunning(state);
   document.body.classList.toggle("job", running);
   const bar = $("stopbar"), desk = $("btn-stop-desk");
-  bar.hidden = !running;
-  desk.disabled = !running;
+  bar.hidden = true;
+  desk.disabled = false;
   const stopping = running && !!j.stopping;
   bar.classList.toggle("stopping", stopping);
   desk.classList.toggle("stopping", stopping);
@@ -321,7 +380,10 @@ function renderRunParts() {
   setHTML($("task-kv3"), [["ระยะคน", f && f.op != null ? fixed(f.op, 2) : "-", "m"],
     ["ความเร็ว", f && f.v != null ? fixed(f.v, 2) : "-", "m/s"], ["ใกล้สุด", f && f.near != null ? fixed(f.near, 2) : "-", "m"]]
     .map(([k, v, u]) => `<div><span>${k}</span><b>${v}<small>${u}</small></b></div>`).join(""));
-  $("cmds").hidden = !task;
+  const job = jobOf(state);
+  const activeMission = (task && job && job.meta && job.meta.mission) || "full";
+  $("cmds").hidden = !task || activeMission === "bag_only";
+  $("bag-cmds").hidden = !task || activeMission === "follow_only";
   $("idle-cmds").hidden = task;
   for (const b of $("idle-cmds").querySelectorAll("button")) b.disabled = jobRunning(state);
   const ready = !!(f && f.r);
@@ -564,7 +626,8 @@ function liveStreams() {
   if (cam.dataset.on && cam.dataset.on !== source) { delete cam.dataset.on; delete cam.dataset.shown; cam.removeAttribute("src"); }
   const waiting = Date.now() < Number(cam.dataset.retry || 0); // after an error: try again a few seconds later
   if (source && !cam.dataset.on && !waiting) { cam.dataset.on = source; cam.src = `/stream?t=${Date.now()}`; }
-  const webOpen = onScreen("webcam-box") && state;
+  const webUp = !!(state && state.jetson && state.jetson.webcam === true);
+  const webOpen = onScreen("webcam-box") && webUp && document.visibilityState === "visible";
   if (webOpen && !web.dataset.on && Date.now() >= Number(web.dataset.retry || 0)) { web.dataset.on = "1"; web.src = `/usb-stream?t=${Date.now()}`; }
   if (!webOpen && web.dataset.on) { delete web.dataset.on; delete web.dataset.shown; web.removeAttribute("src"); }
   renderCamState();
@@ -592,6 +655,58 @@ $("img-webcam").addEventListener("error", () => {
 });
 $("img-webcam").addEventListener("load", () => { delete $("img-webcam").dataset.failed; $("img-webcam").dataset.shown = "1"; });
 
+function refreshSnap() {
+  const img = $("img-snap");
+  if (!img) return;
+  const show = tab === "robot" && document.visibilityState === "visible";
+  if (!show) {
+    if (img.getAttribute("src")) { img.removeAttribute("src"); delete img.dataset.shown; }
+    return;
+  }
+  img.src = "/usb-snap?t=" + Date.now();
+}
+
+function measuredBag() {
+  const b = state && state.bag;
+  if (b && typeof b.x === "number" && typeof b.y === "number") return b;
+  const bt = run && run.record && run.record.bag_task && run.record.bag_task.result;
+  if (bt && bt.ok && typeof bt.x === "number" && typeof bt.y === "number") {
+    return { x: bt.x, y: bt.y, top: bt.top, yaw: bt.yaw, source: "run" };
+  }
+  return null;
+}
+
+function pickBody() {
+  const b = measuredBag();
+  if (!b) return null;
+  const body = { cmd: "pick_bag", x: b.x, y: b.y };
+  if (typeof b.top === "number") body.top = b.top;
+  if (typeof b.yaw === "number") body.yaw = b.yaw;
+  return body;
+}
+
+function dropBody() {
+  const b = measuredBag();
+  if (b) return { cmd: "drop_bag", x: b.x, y: b.y };
+  const d = state && state.drop;
+  if (d && typeof d.x === "number") return { cmd: "drop_bag", x: d.x, y: d.y };
+  return null;
+}
+
+function reachableDropBody() {
+  const d = state && state.drop;
+  if (d && typeof d.x === "number") return { cmd: "drop_bag", x: d.x, y: d.y };
+  return null;
+}
+
+async function sendArm(body) {
+  const word = body.cmd === "pick_bag" ? "Pick the bag" : "Drop the bag";
+  if (!(await confirmBox(word + "?", "Send " + body.cmd + " at x=" + body.x + " y=" + body.y + ". The arm will move.", "Send", true))) return null;
+  const r = await post("/api/arm", body);
+  fetchArm();
+  return r;
+}
+
 // The skeleton: COCO keypoints from the Jetson's pose detector, drawn over the console's own camera (not during a task:
 // then run_follow has the detector).
 const SKELETON = [[5, 7], [7, 9], [6, 8], [8, 10], [5, 6], [5, 11], [6, 12], [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
@@ -600,7 +715,7 @@ const KP_SEEN = 0.3; // a keypoint's visibility must reach this to be drawn
 
 function drawSkeleton(s) {
   const svg = $("cam-skel");
-  if (!s || !s.on || !s.w || !$("img-camera").dataset.shown || liveFromRun(state)) { svg.innerHTML = ""; return; }
+  if (!s || !s.on || !s.w || !$("img-camera").dataset.shown) { svg.innerHTML = ""; return; }
   svg.setAttribute("viewBox", `0 0 ${s.w} ${s.h}`);
   let out = "";
   for (const p of s.people) {
@@ -624,12 +739,18 @@ $("btn-skel").addEventListener("click", async () => {
   if (!r || r.error) return;
   skeletonOn = r.on;
   $("btn-skel").setAttribute("aria-pressed", String(skeletonOn));
-  drawSkeleton(r);
+  if (!skeletonOn) drawSkeleton(null);
+  else if (liveFromRun(state) && run && run.skeleton) drawSkeleton(Object.assign({ on: true }, run.skeleton));
+  else drawSkeleton(r);
 });
 setInterval(async () => {
   if (!skeletonOn || !onScreen("cam-box") || document.visibilityState !== "visible") return;
+  if (liveFromRun(state)) {
+    drawSkeleton(run && run.skeleton ? Object.assign({ on: true }, run.skeleton) : null);
+    return;
+  }
   try { drawSkeleton(await getJSON("/api/skeleton")); } catch (e) { /* the next poll tries again */ }
-}, 200);
+}, 1000);
 
 const DEVICE_WORD = { live: "สด", stale: "ไม่มีข้อมูลใหม่", off: "ไม่พบ", held: "หยุดชั่วคราว" };
 
@@ -644,6 +765,7 @@ function renderCamState() {
   const wt = web && !failed ? "สด" : web == null ? "กำลังตรวจ" : "ปิดอยู่";
   setText($("badge-webcam"), wt);
   setText($("badge-webcam-desk"), wt);
+  if ($("badge-webcam-task")) setText($("badge-webcam-task"), wt);
 }
 
 let scanLive = false; // the newest /scan answered and was fresh
@@ -767,7 +889,7 @@ async function pollScan() {
     drawScan($("scan"), { points: [] });
     $("scan").dataset.blank = "1";
   }
-  setTimeout(pollScan, fromRun ? 200 : 100); // a run's page shares its process with the control loop: ask less often
+  setTimeout(pollScan, 1000); // once a second, and only while the LiDAR piece is on screen
 }
 
 // ------------------------------------------------------------ Task
@@ -780,6 +902,7 @@ function segment(id, onPick) {
     onPick(b.dataset.value);
   });
 }
+segment("seg-mission", (v) => { choice.mission = v; updateStartButton(); });
 segment("seg-mode", (v) => { choice.mode = v; updateStartButton(); });
 segment("seg-speed", (v) => { choice.speed = Number(v); });
 segment("seg-minutes", (v) => { choice.minutes = Number(v); });
@@ -787,9 +910,11 @@ segment("seg-person", (v) => { choice.virtual = v === "virtual"; $("virtual-fiel
 $("virtual-host").value = storeGet("virtual-host") || "";
 
 function updateStartButton() {
-  $("btn-start-task").textContent = (choice.mode === "drive" ? "เริ่มงาน (ขับจริง" : "เริ่มงาน (ทดลอง") +
+  const m = MISSION_TEXT[choice.mission] || "เริ่มงาน";
+  $("btn-start-task").textContent = `${m} (${choice.mode === "drive" ? "ขับจริง" : "ทดลอง"}` +
     (choice.virtual ? " คนเสมือน)" : ")");
 }
+updateStartButton();
 
 function renderSpeeds() {
   const el = $("seg-speed");
@@ -810,6 +935,12 @@ function renderTask() {
   const running = jobRunning(state), task = taskRunning(state), j = jobOf(state);
   $("task-start").hidden = running;
   $("task-running").hidden = !task;
+  const actions = document.querySelector(".task-actions");
+  if (actions) actions.hidden = !!task;
+  const activeMission = (task && j && j.meta && j.meta.mission) || "full";
+  const showArm = task && activeMission !== "follow_only";
+  $("task-webcam-panel").hidden = !showArm;
+  $("task-arm-panel").hidden = !showArm;
   $("btn-start-task").disabled = running;
   const services = card("services");
   $("task-start-note").hidden = !!(services && services.level === "ok");
@@ -826,7 +957,7 @@ $("btn-start-task").addEventListener("click", async () => {
   const drive = choice.mode === "drive";
   if (!choice.speed) { toast("params.json ไม่อนุญาตความเร็วใดเลย", true); return; }
   if (drive && !(await confirmBox("เริ่มขับจริงไหม", "หุ่นจะเคลื่อนที่ พื้นที่โล่งและสายไฟปลอดภัยแล้วใช่ไหม", "ใช่ เริ่มเลย", true))) return;
-  const body = { drive, speed: choice.speed, minutes: choice.minutes };
+  const body = { drive, mission: choice.mission, speed: choice.speed, minutes: choice.minutes };
   if (choice.virtual) {
     const host = $("virtual-host").value.trim();
     body.virtual = true;
@@ -834,7 +965,66 @@ $("btn-start-task").addEventListener("click", async () => {
     storeSet("virtual-host", host);
   }
   const r = await post("/api/task/start", body);
-  if (r && !r.error) toast(drive ? "เริ่มงานแล้ว หุ่นรอ Follow" : "เริ่มทดลองแล้ว");
+  if (r && !r.error) {
+    if (window.HmcRobot) HmcRobot.clearEvents();
+    ackedBanner = null;
+    seenBanner = null;
+    storeSet("hmc-banner-ack", "");
+    const msg = choice.mission === "bag_only" ? "เริ่มหาและหยิบถุงแล้ว"
+      : choice.mission === "follow_only" ? "เริ่มเดินตามคนอย่างเดียวแล้ว"
+      : (drive ? "เริ่มโจทย์จริงแล้ว หุ่นรอ Follow" : "เริ่มทดลองแล้ว");
+    toast(msg);
+  }
+});
+
+async function waitForCheckDone(timeoutMs) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    await new Promise((res) => setTimeout(res, 600));
+    let s;
+    try { s = await getJSON("/api/state"); } catch (e) { continue; }
+    if (s && s.job && !s.job.running) return s.job.job ? s.job.job.code : 0;
+  }
+  return -1;
+}
+
+$("btn-move-bag-60").addEventListener("click", async () => {
+  if (!(await confirmBox("ทดสอบย้ายถุง 60 ซม. ไหม",
+    "หุ่นจะ: 1) หยิบถุงหน้าหุ่น 2) เดินหน้า 60 ซม. 3) วางถุง 4) ถอยกลับ 60 ซม. พื้นที่หน้า-หลังโล่งและสายไฟปลอดภัยแล้วใช่ไหม",
+    "ใช่ เริ่มเลย", true))) return;
+  const btn = $("btn-move-bag-60"), st = $("move-bag-status");
+  btn.disabled = true;
+  st.hidden = false;
+  const say = (msg, bad) => { setText(st, msg); toast(msg, bad); };
+  try {
+    say("1/4 กำลังหยิบถุงหน้าหุ่น...");
+    const pick = pickBody();
+    if (!pick) { say("หยุด: ยังไม่มีตำแหน่งถุงที่วัดได้", true); return; }
+    const p1 = await post("/api/arm", pick);
+    if (!p1 || p1.error) { say(`หยุดที่ขั้น 1/4: ${(p1 && p1.error) || "หยิบถุงไม่สำเร็จ"}`, true); return; }
+
+    say("2/4 หยิบแล้ว กำลังเดินหน้า 60 ซม....");
+    const p2 = await post("/api/check/start", { check: "base_check", args: ["--line", "0.08", "--metres", "0.60", "--yes-owner-at-robot"] });
+    if (!p2 || p2.error) { say(`หยุดที่ขั้น 2/4: ${(p2 && p2.error) || "เดินหน้าไม่สำเร็จ"}`, true); return; }
+    const c2 = await waitForCheckDone(30000);
+    if (c2 !== 0) { say(`หยุดที่ขั้น 2/4: เดินหน้าจบด้วย code ${c2}`, true); return; }
+
+    say("3/4 ถึงจุดวางแล้ว กำลังวางถุง...");
+    const drop = reachableDropBody();
+    if (!drop) { say("หยุดที่ขั้น 3/4: ยังไม่มีจุดวางที่แขนเอื้อมถึง", true); return; }
+    const p3 = await post("/api/arm", drop);
+    if (!p3 || p3.error) { say(`หยุดที่ขั้น 3/4: ${(p3 && p3.error) || "วางถุงไม่สำเร็จ"}`, true); return; }
+
+    say("4/4 วางถุงแล้ว กำลังถอยกลับ 60 ซม....");
+    const p4 = await post("/api/check/start", { check: "back_up", args: ["--metres", "0.60", "--yes-back-up"] });
+    if (!p4 || p4.error) { say(`หยุดที่ขั้น 4/4: ${(p4 && p4.error) || "ถอยหลังไม่สำเร็จ"}`, true); return; }
+    const c4 = await waitForCheckDone(30000);
+    if (c4 !== 0) { say(`หยุดที่ขั้น 4/4: ถอยหลังจบด้วย code ${c4}`, true); return; }
+
+    say("ทดสอบย้ายถุง 60 ซม. และถอยกลับจุดเดิม เสร็จสมบูรณ์!");
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 for (const b of document.querySelectorAll("[data-command]")) {
@@ -844,15 +1034,102 @@ for (const b of document.querySelectorAll("[data-command]")) {
   });
 }
 
+for (const b of document.querySelectorAll("[data-arm-cmd]")) {
+  b.addEventListener("click", async () => {
+    const cmd = b.dataset.armCmd;
+    let payload;
+    if (cmd === "drop_bag") payload = dropBody();
+    else if (cmd === "pick_bag") payload = pickBody();
+    else payload = { cmd };
+    if ((cmd === "pick_bag" || cmd === "drop_bag") && !payload) { toast("no measured bag position", true); return; }
+    b.disabled = true;
+    toast(`กำลังสั่ง${b.textContent.trim()}...`);
+    const r = await post("/api/arm", payload);
+    if (r && !r.error) toast(`สั่ง${b.textContent.trim()}สำเร็จ`);
+    fetchArm();
+    b.disabled = false;
+  });
+}
+$("btn-task-arm-stop").addEventListener("click", async () => {
+  const r = await post("/api/arm/stop", {});
+  if (r && !r.error) toast("ส่งคำสั่งหยุดแขนแล้ว");
+  fetchArm();
+});
+
 async function stop() {
-  const r = await post("/api/stop", {});
-  if (r && !r.error) toast(r.note ? "ไม่มีงานของคอนโซลอยู่ ส่งหยุดไปที่หน้าของงานและส่ง S# ให้ล้อแล้ว" : "กำลังหยุด");
+  const desk = $("btn-stop-desk");
+  desk.classList.add("stopping");
+  const r = await post("/api/stop", {}, { quiet: true });
+  const armStop = await post("/api/arm/stop", {}, { quiet: true });
+  desk.classList.remove("stopping");
+  if (window.HmcRobot) {
+    HmcRobot.pushEvent({ t: Date.now() / 1000, level: "warn", th: "กด STOP หยุดการเคลื่อนที่",
+      fix: "หยุดงานบน Pi และสั่งหยุดแขน ไม่ได้ปิดโปรแกรมบน Jetson", key: "stop:" + Date.now() });
+    if (armStop && armStop.error) {
+      const ex = HmcRobot.explainMessage(armStop.error);
+      if (ex && !ex.noise) HmcRobot.pushEvent({ t: Date.now() / 1000, level: ex.level, th: ex.th, fix: ex.fix, key: ex.key + ":" + Date.now() });
+    }
+  }
+  if (r && r.error) toast(r.error, true);
+  else toast(r && r.note ? "ไม่มีงานของคอนโซลอยู่ ส่งหยุดไปที่หน้าของงานและส่ง S# ให้ล้อแล้ว" : "กำลังหยุดการเคลื่อนที่");
+  render();
+}
+
+async function startPrograms() {
+  const r = await post("/api/jetson/start-all", {});
+  if (r && !r.error && window.HmcRobot) {
+    HmcRobot.pushEvent({ t: Date.now() / 1000, level: "info", th: "กำลังเปิดโปรแกรมบน Jetson",
+      fix: "รอจนไฟ Jetson ครบ แล้วค่อยเริ่มงาน", key: "start-programs:" + Date.now() });
+  }
+  render();
+}
+
+function updateOperate() {
+  if (!window.HmcRobot || !state || !$("operate")) return;
+  const model = HmcRobot.viewModel(state, { run: run, bank: bank, arm: arm, ack: ackedBanner });
+  if (model.banner && model.banner.key !== seenBanner) {
+    seenBanner = model.banner.key;
+    HmcRobot.pushEvent({ t: Date.now() / 1000, level: model.banner.level, th: model.banner.title, fix: model.banner.fix, key: "banner:" + model.banner.key });
+  }
+  if (!model.banner) seenBanner = null;
+  model.lights.forEach((l) => {
+    const prev = seenLights[l.id];
+    seenLights[l.id] = l.level;
+    if (prev && prev !== l.level && l.level !== "ok") {
+      HmcRobot.pushEvent({ t: Date.now() / 1000, level: l.level, th: l.detail, fix: l.fix, key: "light:" + l.id + ":" + l.level + ":" + l.label });
+    }
+  });
+  HmcRobot.renderOperate(model, {
+    events: HmcRobot.getEvents(),
+    selected: selectedLight,
+    startPrograms: startPrograms,
+    ack: (key) => { ackedBanner = key; storeSet("hmc-banner-ack", key); updateOperate(); },
+    select: (id) => { selectedLight = selectedLight === id ? null : id; updateOperate(); },
+  });
+  refreshJetsonSnap(model);
+}
+
+function refreshJetsonSnap(model) {
+  const img = $("img-jetson-snap");
+  if (!img) return;
+  const url = model && model.cameras.jetson.url;
+  if (!url || workspace !== "operate" || document.visibilityState !== "visible" || Date.now() < snapBackoff) {
+    img.hidden = true;
+    if (!url) img.removeAttribute("src");
+    return;
+  }
+  img.hidden = false;
+  img.src = url + (url.indexOf("?") >= 0 ? "&" : "?") + "t=" + Date.now();
 }
 $("stopbar").addEventListener("click", stop);
 $("btn-stop-desk").addEventListener("click", stop);
 $("pin-tag").addEventListener("click", () => { if (state && state.pin) askPin(); });
-$("btn-go-task").addEventListener("click", () => { location.hash = "#task"; });
-$("btn-go-task-desk").addEventListener("click", () => { location.hash = "#task"; });
+$("btn-go-task").addEventListener("click", () => { location.hash = "#operate"; });
+$("btn-go-task-desk").addEventListener("click", () => { location.hash = "#operate"; });
+$("ws-operate").addEventListener("click", () => { if (location.hash !== "#operate") location.hash = "#operate"; else showTab("operate"); });
+$("ws-engineer").addEventListener("click", () => { if (!location.hash.endsWith("engineer") && !ENGINEER_TABS.includes(location.hash.slice(1))) location.hash = "#engineer"; else showTab("engineer"); });
+$("btn-start-programs").addEventListener("click", startPrograms);
+$("img-jetson-snap").addEventListener("error", () => { snapBackoff = Date.now() + 15000; $("img-jetson-snap").hidden = true; });
 
 // ------------------------------------------------------------ Jetson
 
@@ -918,9 +1195,11 @@ $("btn-start-all").addEventListener("click", async () => {
   if (r && !r.error) toast("กำลังเปิดทุกโปรแกรมตามลำดับ");
 });
 $("btn-stop-all").addEventListener("click", async () => {
-  if (taskRunning(state) && !(await confirmBox("ปิดโปรแกรมบน Jetson ไหม", "งานกำลังวิ่งอยู่ ถ้าไม่มี detector และ bridge หุ่นจะตามใครไม่ได้และหยุดนิ่ง", "ปิดทั้งหมด"))) return;
+  if (!(await confirmBox("ปิดโปรแกรมบน Jetson ทั้งหมดไหม",
+    "จะปิดครบทุกโปรแกรมบน Jetson รวมตัวตรวจจับ กล้องแขน และแขน หุ่นจะมองไม่เห็นและหยิบไม่ได้ จนกว่าจะกดเปิดโปรแกรมหุ่น ปุ่ม STOP สีแดงไม่ทำแบบนี้",
+    "ปิดทั้งหมด"))) return;
   const r = await post("/api/jetson/stop-all", {});
-  if (r && !r.error) toast("ปิด flow bridge และ detector แล้ว");
+  if (r && !r.error) toast("ปิดโปรแกรมบน Jetson แล้ว");
 });
 
 // ------------------------------------------------------------ the arm (Jetson tab)
@@ -936,8 +1215,7 @@ async function fetchArm() {
 }
 
 async function pollArm() {
-  if (tab === "jetson" && document.visibilityState === "visible") await fetchArm();
-  setTimeout(pollArm, 2000);
+  // jetson.arm arrives on the 1s /api/state poll. fetchArm() runs right after an arm button.
 }
 
 function renderArm() {
@@ -948,11 +1226,30 @@ function renderArm() {
   if (arm && arm.error) line = `<span class="val bad">${esc(arm.error)}</span>`;
   else if (arm && !s) line = "ยังไม่มี /arm/state จากแขน";
   else if (s) {
-    line = [`สถานะ ${esc(s.state)}`, `torque ${s.torque_on ? "on" : "off"}`, arm.busy ? "ทำงานอยู่" : "ว่าง"]
-      .concat(s.task ? [`${esc(s.task)} ${esc(s.step || "")}`] : []).join(" · ") +
+    const bits = [`สถานะ ${esc(s.state)}`, `torque ${s.torque_on ? "on" : "off"}`, arm.busy ? "ทำงานอยู่" : "ว่าง"];
+    if (s.holding) bits.push("ถือถุงอยู่");
+    if (s.task) bits.push(`${esc(s.task)} ${esc(s.step || "")}`.trim());
+    if (s.voltage_min != null) bits.push(`${fixed(s.voltage_min, 1)}V`);
+    if (s.temp_max != null) bits.push(`${fixed(s.temp_max, 0)}°C`);
+    line = bits.join(" · ") + (s.last_message ? ` · ${esc(s.last_message)}` : "") +
       (s.fault ? ` · <span class="val bad">fault ${esc(s.fault)}</span>` : "");
   }
   setHTML($("arm-line"), line);
+  // Also render arm + bag status on the Task tab
+  if ($("task-arm-word")) {
+    setText($("task-arm-word"), s ? (s.holding ? "ถือถุงอยู่" : s.state) : "-");
+    const bt = run && run.record && run.record.bag_task;
+    const bagStr = !bt ? "ยังไม่เริ่มหาถุง"
+      : bt.result ? (bt.result.ok ? `ถึงถุงแล้ว (${fixed(bt.result.x, 2)}, ${fixed(bt.result.y, 2)})` : `ไม่สำเร็จ: ${bt.result.code || bt.result.message || "-"}`)
+      : `กำลังทำงาน (${bt.state || "-"})`;
+    const items = [
+      ["สถานะถุง", bagStr, bt && bt.result && !bt.result.ok ? "bad" : "ok", null],
+      ["แขน", s ? `${s.state}${s.task ? " · " + s.task + (s.step ? " (" + s.step + ")" : "") : ""}` : (arm && arm.error ? arm.error : "-"), s && s.fault ? "bad" : "ok", null],
+      ["ข้อความล่าสุด", s && s.last_message ? s.last_message : "-", "ok", null],
+      ["ไฟ / อุณหภูมิ", s ? `${fixed(s.voltage_min, 1)} V · ${fixed(s.temp_max, 0)} °C` : "-", "ok", null],
+    ];
+    setHTML($("task-arm-kv"), rows(items));
+  }
   $("arm-held").hidden = !hold;
   if (hold) setText($("arm-held"), `คอนโซลถูกจองโดย ${hold.who} ปุ่มขยับแขนใช้ไม่ได้จนกว่าจะปล่อย (Stop ใช้ได้)`);
   for (const b of document.querySelectorAll("[data-arm]")) {
@@ -969,7 +1266,11 @@ for (const b of document.querySelectorAll("[data-arm]")) {
       "แขนจะยื่นออกไปและก้มลงถึงพื้นหน้าหุ่นเพื่อหยิบถุง ไม่มีคน มือ หรือของอื่นอยู่หน้าหุ่นแล้วใช่ไหม", "ใช่ หยิบถุง", true))) return;
     armSending = true;
     renderArm();
-    const r = await post("/api/arm", ARM_MOVES[name]);
+    let body = ARM_MOVES[name];
+    if (name === "pick-front") body = pickBody();
+    if (name === "drop-front") body = dropBody();
+    if (!body) { armSending = false; renderArm(); toast("no measured bag position", true); return; }
+    const r = await post("/api/arm", body);
     armSending = false;
     if (r && !r.error) toast(`แขน ${b.textContent} เสร็จแล้ว`);
     fetchArm();
@@ -1047,7 +1348,7 @@ async function loadLogs() {
     </div>`;
   }).join("");
 }
-setInterval(() => { if (tab === "logs") loadLogs(); }, 10000);
+setInterval(() => { if (tab === "logs" && document.visibilityState === "visible") loadLogs(); }, 10000);
 
 // the console's command log: one line per POST, and console_gate's maintenance lines (what, reason, user)
 async function loadCommands() {
@@ -1279,9 +1580,7 @@ function unhover(el) {
 // ------------------------------------------------------------ start
 
 updateStartButton();
-showTab(location.hash.slice(1) || "overview");
+showTab(location.hash.slice(1) || "operate");
 pollState();
-pollRun();
 pollScan();
 pollBank();
-pollArm();

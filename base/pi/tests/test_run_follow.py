@@ -297,6 +297,9 @@ class Loop(Logged):
         self.assertEqual((record["v"], record["w"], record["stop"]), (0.0, 0.0, "obstacle"))
         self.assertEqual(base.sent[-1], (0.0, 0.0))
         self.assertEqual(state.body.robot.speed, 0.0)
+        self.assertEqual(record["stop_cause"]["sensor"], "lidar")
+        self.assertTrue(record["stop_cause"]["blocking"])
+        self.assertLess(abs(record["stop_cause"]["bearing_deg"]), 15)
 
     def search_state(self, base, people, scan=WALL_ONLY):
         """Not locked yet, the Jetson link up, the camera answering `people` (bearings in degrees)."""
@@ -346,6 +349,17 @@ class Loop(Logged):
         scan = scan_of([(r * math.cos(deg) - P["lidar_x"], r * math.sin(deg))])
         record = self.cycle(self.search_state(FakeBase(), [], scan=scan), 0.0)
         self.assertEqual((record["v"], record["w"], record["stop"]), (0.0, 0.0, "obstacle"))
+
+    def test_the_robots_own_arm_is_not_the_obstacle(self):
+        # 18 Nov: every cycle stopped for a return ~0.26 m away. This one is the front-left corner,
+        # outside the 0.18 m body box the LiDAR already drops, inside the arm sector.
+        lx, ly = 0.22 - P["lidar_x"], 0.17
+        scan = [(math.degrees(math.atan2(ly, lx)), math.hypot(lx, ly))]
+        record = self.cycle(self.state(FakeBase(), scan=scan), 0.0)
+        self.assertIsNone(record["stop"])
+        self.assertGreater(record["v"], 0.0)
+        self.assertGreater(record["self_mask"]["lidar"]["count"], 0)
+        self.assertEqual(record["self_mask"]["lidar"]["nearest"]["sensor"], "lidar")
 
     def test_after_two_full_turns_it_stands_and_waits(self):
         base = FakeBase()

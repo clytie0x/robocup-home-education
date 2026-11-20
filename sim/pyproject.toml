@@ -1,0 +1,16 @@
+[project]
+name = "rl-grasp"
+version = "0.1.0"
+description = "Tier-1 MuJoCo bag-grasp training for the SO-100. PPO and SAC are ours."
+requires-python = ">=3.10"
+dependencies = ["mujoco", "numpy", "torch"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["rl_grasp*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

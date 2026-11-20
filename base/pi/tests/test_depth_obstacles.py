@@ -80,6 +80,21 @@ class DepthObstacleTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             depth_obstacles.points(scene_depth(P), dict(P, camera_height=None))
 
+    def test_retractable_barrier_belt_is_seen_with_real_robot_height(self):
+        real = params.load()
+        # A 7 cm tall retractable barrier belt 0.85..0.92 m above the floor at x = 1.8 m
+        belt = depth_obstacles.points(scene_depth(real, [(1.8, -0.4, 0.4, 0.85, 0.92)]), real)
+        self.assertIsNotNone(belt)
+        self.assertGreater(len(belt), 5)
+        self.assertTrue(np.all(np.abs(belt[:, 0] - 1.8) < 0.08), belt[:, 0])
+
+    def test_isolated_flying_depth_pixels_are_dropped(self):
+        depth = scene_depth(P)
+        depth[100, 160] = 1200  # 1 stray pixel in mid-air
+        depth[100, 161] = 1200  # 2 stray pixels (< MIN_CELL_PIXELS)
+        pts = depth_obstacles.points(depth, P)
+        self.assertEqual(len(pts), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

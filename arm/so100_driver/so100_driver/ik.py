@@ -451,7 +451,8 @@ class GraspPlanner:
             q = sols[0]
             roll, align = self.k.roll_for(q, close_dir, prefer_roll)
             if roll is None or align < 0.95:
-                raise PlanError("หมุนข้อมือให้ก้ามตรงกับของไม่ได้", 3)
+                # e.g. jaws tilted 20 deg from vertical closing along that tilt: alignment cos 20 = 0.94
+                raise PlanError(f"หมุนข้อมือให้ก้ามตรงกับของไม่ได้ (แนวหุบตรงได้ {align:.2f} ต้อง ≥ 0.95)", 3)
             q["wrist_roll"] = roll
             prefer_roll = roll   # stick to this jaw side (+90 vs -90 can tie and flip every iteration)
             point = np.asarray(centre, float) - x_off * self.k.close_axis(q)

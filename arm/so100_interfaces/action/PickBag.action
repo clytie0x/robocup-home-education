@@ -9,7 +9,7 @@ float32 thickness           # across the jaws, m (0 = 0.02); at most 0.065
 float32 length              # along the part, m (0 = 0.05)
 ---
 bool success
-string error_code           # SUCCESS UNREACHABLE TOO_WIDE MISSED COLLISION BUSY HOLDING HOT STOPPED REPLACED FAILED
+string error_code           # SUCCESS SUCCESS_UNVERIFIED UNREACHABLE TOO_WIDE MISSED COLLISION BUSY HOLDING HOT STOPPED REPLACED FAILED
 string message              # English, can be spoken
 float32 gripper_pos         # rad, gripper angle right after the (last) grasp closed; NaN = no grasp
 float32 gripper_load        # %, gripper servo load (present load register) at that moment; NaN = no grasp

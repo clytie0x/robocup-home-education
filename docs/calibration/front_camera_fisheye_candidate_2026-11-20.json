@@ -1,0 +1,71 @@
+{
+  "calibrated": false,
+  "fx": 522.7004622679294,
+  "cx": 296.70882730620366,
+  "cy": 241.09751641118947,
+  "width": 640,
+  "height": 480,
+  "x": 0.33,
+  "y": 0.0,
+  "z": 0.7933,
+  "yaw_deg": 0.7606571023798528,
+  "pitch_deg": 46.954749902416516,
+  "roll_deg": 0.9615972633301483,
+  "mirror": false,
+  "dist_model": "fisheye",
+  "dist": [
+    -0.12000174022745945,
+    0.05392880504627527,
+    0.0,
+    0.0
+  ],
+  "info": {
+    "camera": "HD USB Camera 32e4:9320 serial 2020032001 (/dev/video0), swapped in about 12:00 ICT 2026-11-20; frames 640x480 from webcam_view /snap.jpg",
+    "method": "no person, no board: plumb-line + square floor-tile grid fit (OpenCV fisheye model, 12 grout lines, 456 ridge points, median of 12 frames 12:14-12:17 ICT); scale from the tile size measured on the 2026-11-18 disc frames",
+    "date": "2026-11-20",
+    "status": "CANDIDATE, not checked by the owner; calibrated stays false until a person confirms lens height and tile size (and ideally a board session)",
+    "rms_px": 0.4884491539164714,
+    "holdout_rms_px": [
+      0.615964482853983,
+      0.5452591330739601
+    ],
+    "std": {
+      "fx_px": 7.2,
+      "cx_px": 2.2,
+      "cy_px": 3.6,
+      "k1": 0.013,
+      "k2": 0.013,
+      "pitch_deg": 0.48,
+      "roll_deg": 0.27,
+      "yaw_deg_vs_floor_grid": 0.39,
+      "z_m": 0.02
+    },
+    "tile_m": {
+      "value": 0.296,
+      "std": 0.007,
+      "source": "homography of the 13 red discs (2026-11-18 d1/d2) mapped onto 3 grout spacings 0.309/0.284/0.295 m; nominal 0.300 not confirmed"
+    },
+    "z_in_tiles": 2.6801067658983113,
+    "unknown": {
+      "x": "NOT measured: 0.33 m copied from the old AX1080P mount (owner 2026-11-18); nothing robot-fixed on the floor to re-measure it",
+      "y": "NOT measured: 0.0 copied; the tape centre line is 0.013 m left of the lens ground point (robot placement on the tape not known)",
+      "yaw": "measured against the floor grout, not the robot: valid only if the robot stands square to the tiles (on 2026-11-18 it was within about 0.4 deg)",
+      "z": "0.793 m from the tile scale disagrees with the owner's 0.89 m for the old camera: tape-measure the lens height and one tile"
+    },
+    "previous": {
+      "camera": "AX1080P 1b17:0211",
+      "fx": 805.66,
+      "cx": 319.5,
+      "cy": 239.5,
+      "x": 0.33,
+      "y": 0.0,
+      "z": 0.89,
+      "yaw_deg": 1.4,
+      "pitch_deg": 61.37,
+      "roll_deg": 0.0,
+      "dist_model": "pinhole"
+    },
+    "needs_code": "base/jetson/front_camera.py and arm/so100_driver/so100_driver/bag_camera.py read dist_model and dist. This file is a candidate, calibrated false: do not copy it over the robot's front_camera.json.",
+    "reference": "docs/calibration/front_camera_fisheye_candidate_2026-11-20.md"
+  }
+}

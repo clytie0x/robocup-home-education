@@ -7,7 +7,7 @@
   <title>HMC Robot Console</title>
   <link rel="stylesheet" href="/style.css">
 </head>
-<body>
+<body class="ws-operate">
   <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
     <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11l8-6 8 6v9H4z" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
@@ -20,24 +20,25 @@
     <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
   </defs></svg>
 
-  <!-- desktop: top bar and status strip -->
-  <header id="top" class="desk-only">
-    <div class="brand"><b>H</b>HMC Robot Console</div>
-    <nav id="desk-tabs" aria-label="ส่วนต่างๆ">
-      <a href="#overview" data-tab="overview">ภาพรวม</a>
-      <a href="#task" data-tab="task">งาน</a>
-      <a href="#jetson" data-tab="jetson">Jetson</a>
-      <a href="#checks" data-tab="checks">ตรวจระบบ</a>
-      <a href="#data" data-tab="data">ข้อมูล</a>
-      <a href="#logs" data-tab="logs">Log</a>
-      <a href="#help" data-tab="help">วิธีใช้</a>
+  <header id="top">
+    <div class="brand"><b>H</b><span>HMC Robot</span></div>
+    <nav class="ws" aria-label="พื้นที่ทำงาน">
+      <button type="button" id="ws-operate" class="on">Operate</button>
+      <button type="button" id="ws-engineer">Engineer</button>
     </nav>
+    <div class="ws-status">
+      <span><span class="k">สถานะ</span><b id="op-status">กำลังตรวจ</b></span>
+      <span><span class="k">งาน</span><b class="mono" id="op-mission">IDLE</b></span>
+      <span><span class="k">เวลา</span><b class="mono" id="op-clock">—</b></span>
+      <span><span class="k">แบต</span><b class="mono" id="op-battery">—</b></span>
+      <span><span class="k">โค้ด</span><b class="mono" id="op-code">—</b></span>
+    </div>
     <div class="right">
       <button type="button" class="tag" id="pin-tag">PIN</button>
-      <button type="button" class="dstop" id="btn-stop-desk" disabled>STOP</button>
+      <button type="button" class="dstop" id="btn-stop-desk" title="หยุดการเคลื่อนที่เท่านั้น ไม่ปิดโปรแกรมบน Jetson และไม่ใช่สวิตช์ตัดไฟมอเตอร์">STOP</button>
     </div>
   </header>
-  <div id="statusline" class="desk-only">
+  <div id="statusline" class="retired" hidden>
     <span><span class="k">สถานะ</span><b id="sl-state">-</b></span>
     <span><span class="k">เวลา</span><span class="v num" id="sl-time">-</span></span>
     <span><span class="k">ระยะคน</span><span class="v num" id="sl-op">-</span></span>
@@ -58,9 +59,91 @@
     <div class="act">ดูว่า Pi เปิดอยู่ และมือถือต่อ Wi-Fi ของหุ่นอยู่</div>
   </div>
 
-  <main>
+  <main id="shell">
+    <section id="operate" aria-label="Operate">
+      <div id="op-banner"></div>
+      <div id="op-lights"></div>
+      <div id="op-steps"></div>
+      <div class="op-stage">
+        <div class="op-tile tile-xtion">
+          <div class="ph">Xtion (กล้องล่าง)<span class="num">สด /stream</span></div>
+          <div class="slot" data-slot="cam"></div>
+        </div>
+        <div class="op-tile tile-arm">
+          <div class="ph">กล้องแขน<span class="num">webcam_view :8082 · /usb-stream</span></div>
+          <div class="slot" data-slot="webcam"></div>
+          <p class="tile-reason" id="arm-reason" hidden></p>
+        </div>
+        <div class="op-tile tile-jetson">
+          <div class="ph">ภาพนิ่ง Jetson<span class="num" id="jetson-snap-src">ไม่มีภาพกล้องแยก</span></div>
+          <img id="img-jetson-snap" alt="ภาพนิ่งจาก Jetson ไม่ใช่กล้องแขน" hidden>
+          <p class="tile-reason" id="jetson-snap-reason">พอร์ต 8082 และ /usb-snap คือกล้องแขน (ช่องกล้องแขน) ไม่มีภาพนิ่งคนละตัวให้ช่องนี้</p>
+        </div>
+        <div class="op-tile tile-lidar">
+          <div class="ph">LiDAR มุมบน<span class="num">วงละ 1 m · /scan</span></div>
+          <div class="slot" data-slot="lidar"></div>
+        </div>
+        <div class="op-task">
+          <div class="ph">งานและคำสั่ง<span id="op-task-note">STOP หยุดการเคลื่อนที่ ไม่ปิดโปรแกรม Jetson และไม่ใช่สวิตช์ตัดไฟมอเตอร์</span></div>
+          <div class="slot" data-slot="cmds"></div>
+          <div id="robot-root"></div>
+          <div id="task-start" class="panel form">
+            <label class="field-label">ประเภทภารกิจ</label>
+            <div class="seg" id="seg-mission">
+              <button type="button" data-value="follow_only">ตามคนอย่างเดียว<small>เดินตามเท่านั้น ไม่หยิบถุง</small></button>
+              <button type="button" data-value="bag_only">หาและหยิบถุง<small>ไปหาถุงหน้าหุ่นแล้วหยิบ</small></button>
+              <button type="button" data-value="full" class="on">ทำโจทย์จริง (HMC)<small>จำคน → ตาม → หยิบ → กลับ</small></button>
+            </div>
+            <label class="field-label">โหมดการขับ</label>
+            <div class="seg" id="seg-mode">
+              <button type="button" data-value="dry" class="on">ทดลอง<small>ล้อไม่หมุน</small></button>
+              <button type="button" data-value="drive">ขับจริง<small>หุ่นเคลื่อนที่</small></button>
+            </div>
+            <label class="field-label">คนที่ตาม</label>
+            <div class="seg" id="seg-person">
+              <button type="button" data-value="real" class="on">คนจริง<small>กล้องและ Jetson</small></button>
+              <button type="button" data-value="virtual">คนเสมือน<small>จาก PC ต้องมี PIN</small></button>
+            </div>
+            <div class="virtual-host" id="virtual-fields" hidden>
+              <label class="field-label" for="virtual-host">ที่อยู่ PC ที่ส่งคนเสมือน</label>
+              <input type="text" id="virtual-host" inputmode="decimal" autocomplete="off" spellcheck="false"
+                     placeholder="ว่างไว้ ใช้เครื่องที่กดเริ่ม">
+              <p class="note">PC เปิด base/pc/virtual_operator/app.py ส่งตำแหน่งคนมาที่ UDP 5610 ของ Pi กล้องจริงจะไม่ใช้หาคน</p>
+            </div>
+            <label class="field-label">ความเร็วสูงสุด</label>
+            <div class="seg" id="seg-speed"></div>
+            <label class="field-label">ระยะเวลา</label>
+            <div class="seg" id="seg-minutes">
+              <button type="button" data-value="2">2<small>นาที</small></button>
+              <button type="button" data-value="5" class="on">5<small>นาที</small></button>
+              <button type="button" data-value="10">10<small>นาที</small></button>
+              <button type="button" data-value="20">20<small>นาที</small></button>
+            </div>
+            <button type="button" class="btn big" id="btn-move-bag-60">ทดสอบย้ายถุง: หยิบ → เดินหน้า 60 ซม. → วาง → ถอยกลับ</button>
+            <p class="note" id="move-bag-status" hidden></p>
+            <p class="note" id="task-start-note">เปิดโปรแกรมหุ่นก่อน (ปุ่มเปิดโปรแกรมหุ่น) ไม่อย่างนั้นหุ่นจะตามใครไม่ได้</p>
+          </div>
+          <div class="task-actions">
+            <button type="button" class="btn pri big" id="btn-start-task">เริ่มงาน</button>
+            <button type="button" class="btn" id="btn-start-programs">เปิดโปรแกรมหุ่น</button>
+            <button type="button" class="btn" data-check="wheel">ทดสอบล้อ</button>
+          </div>
+        </div>
+      </div>
+      <div id="op-events" class="events"></div>
+    </section>
+
+    <div id="engineer" hidden>
+      <section class="tab" id="tab-robot" hidden></section>
+      <nav class="eng-nav" aria-label="วิศวกร">
+        <a href="#jetson" data-tab="jetson">Jetson</a>
+        <a href="#checks" data-tab="checks">ตรวจระบบ</a>
+        <a href="#data" data-tab="data">ข้อมูล</a>
+        <a href="#logs" data-tab="logs">Log</a>
+        <a href="#help" data-tab="help">วิธีใช้</a>
+      </nav>
     <!-- Overview -->
-    <section class="tab" id="tab-overview">
+    <section class="tab" id="tab-overview" hidden>
       <div class="ov-grid">
         <div class="ov-main">
           <div class="panel phone-only" id="ov-state">
@@ -157,38 +240,8 @@
       </div>
     </section>
 
-    <!-- Task -->
+    <!-- Task details stay in the DOM for the run readout; the form itself lives on Operate. -->
     <section class="tab" id="tab-task" hidden>
-      <div id="task-start" class="panel form">
-        <div class="ph">เริ่มงาน<span>เดินตามคน แล้วกลับจุดเริ่ม</span></div>
-        <label class="field-label">โหมด</label>
-        <div class="seg" id="seg-mode">
-          <button type="button" data-value="dry" class="on">ทดลอง<small>ล้อไม่หมุน</small></button>
-          <button type="button" data-value="drive">ขับจริง<small>หุ่นเคลื่อนที่</small></button>
-        </div>
-        <label class="field-label">คนที่ตาม</label>
-        <div class="seg" id="seg-person">
-          <button type="button" data-value="real" class="on">คนจริง<small>กล้องและ Jetson</small></button>
-          <button type="button" data-value="virtual">คนเสมือน<small>จาก PC ต้องมี PIN</small></button>
-        </div>
-        <div class="virtual-host" id="virtual-fields" hidden>
-          <label class="field-label" for="virtual-host">ที่อยู่ PC ที่ส่งคนเสมือน</label>
-          <input type="text" id="virtual-host" inputmode="decimal" autocomplete="off" spellcheck="false"
-                 placeholder="ว่างไว้ ใช้เครื่องที่กดเริ่ม">
-          <p class="note">PC เปิด base/pc/virtual_operator/app.py ส่งตำแหน่งคนมาที่ UDP 5610 ของ Pi กล้องจริงจะไม่ใช้หาคน</p>
-        </div>
-        <label class="field-label">ความเร็วสูงสุด</label>
-        <div class="seg" id="seg-speed"></div>
-        <label class="field-label">ระยะเวลา</label>
-        <div class="seg" id="seg-minutes">
-          <button type="button" data-value="2">2<small>นาที</small></button>
-          <button type="button" data-value="5" class="on">5<small>นาที</small></button>
-          <button type="button" data-value="10">10<small>นาที</small></button>
-          <button type="button" data-value="20">20<small>นาที</small></button>
-        </div>
-        <button type="button" class="btn pri big" id="btn-start-task">เริ่มงาน</button>
-        <p class="note" id="task-start-note">เปิดโปรแกรมบน Jetson ก่อน (แท็บ Jetson) ไม่อย่างนั้นหุ่นจะตามใครไม่ได้</p>
-      </div>
       <div id="task-running" class="task-grid" hidden>
         <div class="panel">
           <div class="slot" data-slot="cam"></div>
@@ -197,6 +250,14 @@
         <div class="panel">
           <div class="ph">LiDAR<span class="num" id="scan-info-task">4 m</span></div>
           <div class="slot" data-slot="lidar"></div>
+        </div>
+        <div class="panel" id="task-webcam-panel" hidden>
+          <div class="ph">เว็บแคมหน้า (แขน)<span id="badge-webcam-task">-</span></div>
+          <div class="slot" data-slot="webcam"></div>
+        </div>
+        <div class="panel rows" id="task-arm-panel" hidden>
+          <div class="ph">สถานะแขนและถุง<span class="num" id="task-arm-word">-</span></div>
+          <div id="task-arm-kv"></div>
         </div>
         <div class="slot span" data-slot="cmds"></div>
         <div class="panel rows span">
@@ -274,7 +335,8 @@
           <button type="button" class="btn" data-arm="home">Home</button>
           <button type="button" class="btn" data-arm="rest">Rest</button>
           <button type="button" class="btn" data-arm="center">Center</button>
-          <button type="button" class="btn" data-arm="bagpick" title="แขนหาและหยิบถุงหน้าหุ่นด้วยกล้องแขน (bagpick.py)">Bagpick</button>
+          <button type="button" class="btn pri" data-arm="pick-front" title="Pick the bag at the measured front-camera position">หยิบถุงหน้าหุ่น</button>
+          <button type="button" class="btn" data-arm="drop-front" title="Drop the bag at the measured position, or the reachable default">วางถุง</button>
           <button type="button" class="btn" data-arm="torque-on">Torque on</button>
           <button type="button" class="btn" data-arm="torque-off" title="ปิดแรงบิดได้เฉพาะตอนแขนพัก (resting)">Torque off</button>
           <button type="button" class="btn" id="btn-arm-stop">Stop</button>
@@ -328,23 +390,24 @@
       <div class="cols help">
         <div class="panel">
           <div class="ph">เปิดหน้านี้</div>
-          <p>ต่อมือถือหรือโน้ตบุ๊กเข้า Wi-Fi เดียวกับหุ่น แล้วเปิด <b class="num">http://192.168.31.21:8081</b></p>
-          <p>ถ้าใช้สาย LAN เปิด <b class="num">http://10.0.0.1:8081</b></p>
+          <p>จากนอกแล็บ เปิดชื่อ Tailscale MagicDNS ของ Pi: <b class="num">http://raspberrypi4.tail09b237.ts.net:8081</b></p>
+          <p>ในแล็บ ใช้ Wi-Fi เดียวกับหุ่นที่ <b class="num">http://192.168.31.21:8081</b> หรือสาย LAN ที่ <b class="num">http://10.0.0.1:8081</b></p>
+          <p>หน้านี้เป็น HTTP ถ้า Chrome บังคับ HTTPS (Always use secure connections) หน้าจะไม่ขึ้น ให้ปิดตัวเลือกนั้นแล้วเปิดที่อยู่ที่ขึ้นต้นด้วย http://</p>
           <p>ถ้าหน้าไม่ขึ้น ให้ดูว่า Pi เปิดอยู่ และ console.py ทำงานอยู่ (ดู base/docs/robot-console.md)</p>
         </div>
         <div class="panel">
           <div class="ph">ลำดับปกติ</div>
           <ol class="steps">
-            <li>ชาร์จพาวเวอร์แบงก์ (จ่ายไฟ Pi) และแบต 21V (จ่ายไฟมอเตอร์) ให้เต็มก่อน แล้วกด <b>ชาร์จเต็มแล้ว</b> ของแต่ละก้อนที่ภาพรวม</li>
-            <li>เปิด <b>ภาพรวม</b> ดูว่าทุกแถวเป็นจุดดำ ไม่มีกล่องเส้นแดง</li>
-            <li><b>ตรวจระบบ</b> กด <b>ทดสอบล้อ</b> (หุ่นเดินหน้า 4 ซม.) ต้องได้ผ่าน</li>
-            <li><b>Jetson</b> กด <b>เปิดทั้งหมด</b> รอจนทั้งสามตัวขึ้นว่าทำงาน</li>
-            <li><b>งาน</b> เลือกขับจริง ความเร็ว และเวลา แล้วกด <b>เริ่มงาน</b></li>
+            <li>ชาร์จพาวเวอร์แบงก์ (จ่ายไฟ Pi) และแบต 21V (จ่ายไฟมอเตอร์) ให้เต็มก่อน แล้วกด <b>ชาร์จเต็มแล้ว</b> ของแต่ละก้อนที่ Engineer</li>
+            <li>อยู่ที่ <b>Operate</b> ดูแถบไฟ ต้องไม่มีจุดแดง และคำว่าสถานะไม่ใช่ "ยังไม่พร้อม" ก่อนเริ่มงานจริง</li>
+            <li>กด <b>ทดสอบล้อ</b> (หุ่นเดินหน้า 4 ซม.) ต้องได้ผ่าน</li>
+            <li>กด <b>เปิดโปรแกรมหุ่น</b> รอจนไฟ Jetson เป็นครบ 8 โปรแกรม (detector, whisper, voice, bridge, armstack, webcam, arm, flow)</li>
+            <li>เลือกโจทย์ ความเร็ว และเวลา แล้วกด <b>เริ่มงาน</b></li>
             <li>ยืนหน้าหุ่นห่างไม่เกิน 2.5 ม. พูด "follow me" หรือกด <b>Follow</b></li>
             <li>ถึงที่หมาย กด <b>Back</b> (หรือพูด "go back") หุ่นจะกลับจุดเริ่ม</li>
-            <li>เสร็จหรือมีอะไรผิด กด <b>STOP</b> สีแดงได้ทุกหน้า</li>
+            <li>เสร็จหรือมีอะไรผิด กด <b>STOP</b> สีแดง STOP หยุดการเคลื่อนที่และแขน ไม่ได้ปิดแปดโปรแกรมบน Jetson</li>
           </ol>
-          <p class="note">STOP หยุดงานและส่ง S# ให้ล้อ แต่ไม่ใช่ปุ่มฉุกเฉิน ถ้า Wi-Fi หลุดหน้านี้ทำอะไรไม่ได้ ให้ใช้สวิตช์ตัดไฟมอเตอร์ที่ตัวหุ่น</p>
+          <p class="note">STOP ไม่ใช่ปุ่มฉุกเฉิน ถ้าเน็ตหลุดหน้านี้ทำอะไรไม่ได้ ให้ใช้สวิตช์ตัดไฟมอเตอร์ที่ตัวหุ่น การปิดแปดโปรแกรมอยู่ที่ Engineer ปุ่มปิดทั้งหมด และต้องยืนยันก่อน</p>
         </div>
         <div class="panel">
           <div class="ph">สัญลักษณ์และวิธีแก้</div>
@@ -362,10 +425,13 @@
             <dt>Pi ร้อน</dt><dd>ให้ Pi มีลมผ่าน อย่าวางของทับ</dd>
             <dt>แบต (ประมาณ)</dt><dd>คำนวณจากไฟที่ใช้ ไม่ได้วัดจริง power bank จ่ายไฟเฉพาะ Pi กับอุปกรณ์ USB หลังชาร์จเต็มกด ชาร์จเต็มแล้ว และกรอกค่าจากจอแบตเป็นระยะ ค่าจะแม่นขึ้น แบต 21V ของมอเตอร์ยังไม่รู้ความจุ จึงบอกเป็น Wh ที่ใช้ไปและเวลาที่ขับ ไม่ใช่เปอร์เซ็นต์</dd>
             <dt>หยุดภาพสดชั่วคราว</dt><dd>ปกติ ระหว่างตรวจระบบ กล้องกับ LiDAR ถูกงานใช้อยู่ (เปิดได้ทีละโปรแกรม) ระหว่างงานวิ่ง ภาพสดมาจากงานเอง</dd>
+            <dt>Operate / Engineer</dt><dd>Operate คือหน้าทำงาน กล้อง ไฟสถานะ ลำดับงาน และปุ่มเริ่มอยู่ที่นี่ Engineer คือ Jetson, ตรวจระบบ, ข้อมูล, Log และวิธีใช้</dd>
+            <dt>กล้องแขนกับภาพ Jetson</dt><dd>ช่องกล้องแขนคือ webcam_view พอร์ต 8082 ทาง /usb-stream ช่องภาพนิ่ง Jetson ไม่ใช้พอร์ตนั้น ถ้าไม่มีภาพแยก ช่องนั้นจะบอกตรงๆ ว่าไม่มี</dd>
           </dl>
         </div>
       </div>
     </section>
+    </div>
   </main>
 
   <!-- the pieces that move to the open tab's slot (one camera stream at a time) -->
@@ -386,6 +452,13 @@
         <button type="button" class="btn" data-command="resume"><svg width="15" height="15"><use href="#i-run"/></svg>Resume</button>
         <button type="button" class="btn" data-command="return"><svg width="15" height="15"><use href="#i-back"/></svg>Back</button>
       </div>
+      <div class="cmds" id="bag-cmds" hidden>
+        <button type="button" class="btn" data-command="bag_near">หาถุงใกล้สุด</button>
+        <button type="button" class="btn" data-command="bag">หาถุง (ชี้)</button>
+        <button type="button" class="btn pri" data-arm-cmd="pick_bag">หยิบถุง</button>
+        <button type="button" class="btn" data-arm-cmd="drop_bag">วางถุง</button>
+        <button type="button" class="btn" id="btn-task-arm-stop">หยุดแขน</button>
+      </div>
       <div class="btnrow" id="idle-cmds">
         <button type="button" class="btn pri" id="btn-go-task-desk"><svg width="16" height="16"><use href="#i-run"/></svg>เริ่มงาน</button>
         <button type="button" class="btn" data-check="wheel">ทดสอบล้อ</button>
@@ -396,6 +469,7 @@
 
   <button type="button" id="stopbar" class="phone-only" hidden><i></i><span id="stopbar-text">STOP</span></button>
   <nav id="tabbar" class="phone-only" aria-label="แท็บ">
+    <a href="#robot" data-tab="robot"><svg width="20" height="20"><use href="#i-home"/></svg>Robot</a>
     <a href="#overview" data-tab="overview"><svg width="20" height="20"><use href="#i-home"/></svg>ภาพรวม</a>
     <a href="#live" data-tab="live"><svg width="20" height="20"><use href="#i-eye"/></svg>ภาพสด</a>
     <a href="#task" data-tab="task"><svg width="20" height="20"><use href="#i-run"/></svg>งาน</a>
@@ -415,6 +489,8 @@
   </div>
   <div id="toast" hidden></div>
 
+  <script src="/preact-htm.js"></script>
+  <script src="/robot.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

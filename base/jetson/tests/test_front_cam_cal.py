@@ -44,6 +44,16 @@ def write_session(folder, turns_deg, backs=(0.0, 0.66), edge=True, world_wall=Tr
 
 
 class Tool(unittest.TestCase):
+    def test_a_session_guess_keeps_its_distortion(self):
+        cam = front_cam_cal._guess({"camera_guess": {"fx": 520, "x": 0.33, "y": 0.0, "z": 0.8,
+                                                     "dist_model": "fisheye", "dist": [-0.12, 0.05]}})
+        self.assertEqual(cam.dist_model, "fisheye")
+        self.assertEqual(cam.dist, (-0.12, 0.05, 0.0, 0.0))
+        self.assertAlmostEqual(cam.fx, 520.0)
+        plain = front_cam_cal._guess({"camera_guess": {"fx": 480, "x": 0.2, "z": 0.25}})
+        self.assertEqual(plain.dist_model, "pinhole")
+        self.assertEqual(plain.dist, (0.0, 0.0, 0.0, 0.0))
+
     def test_a_full_session_is_fitted_and_written(self):
         with tempfile.TemporaryDirectory() as d:
             path = write_session(d, (-15, -7, 0, 7, 15), world_wall=False)

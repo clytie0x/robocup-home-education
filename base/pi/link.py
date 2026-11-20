@@ -17,10 +17,19 @@ from dataclasses import dataclass, field
 class Seen:
     bearing_deg: float  # positive = robot's left
     conf: float
-    look: tuple  # appearance numbers used to recognise the same person again
+    look: tuple  # appearance numbers, or None when the Jetson sent none (a failed re-id is not enrolled)
     box: list  # [x1, y1, x2, y2] in image pixels
     kp: list = None  # 17 COCO keypoints [x, y, visibility] in image pixels; only on frames sent with pose=True
     light: float = None  # mean luma (0-255) in the box, from the Jetson's light gate; None from a server without it
+    colour: tuple = None  # clothing hue-saturation histogram; None from a server that does not send it
+
+
+def _look(raw):
+    """A look vector, or None. An empty list must not become (): LookMemory.add of an empty vector
+    drops the next real 512-d look."""
+    if not raw:
+        return None
+    return tuple(raw)
 
 
 @dataclass
@@ -38,6 +47,7 @@ class Answer:
     objects: list = field(default_factory=list)  # Thing per bag seen; empty from a server that sends none
     good: bool = True  # False: the Jetson judged the frame too dark, saturated or a flash (light.FrameGate)
     why: str = None  # "dark", "saturated" or "flash" when not good
+    empty: str = None  # why people is empty ("the frame could not be decoded", a detector score, ...)
 
 
 def bearing_deg(box, width, hfov_deg):
@@ -240,14 +250,16 @@ class JetsonLink:
         quality = reply.get("quality") or {}
         good = quality.get("ok", True) is not False
         people = [  # keypoints from a frame judged bad are dropped: pointing waits for the next good one
-            Seen(bearing_deg(p["box"], width, self._hfov), p["conf"], tuple(p["look"]), p["box"],
-                 p.get("kp") if good else None, p.get("light"))
+            Seen(bearing_deg(p["box"], width, self._hfov), p["conf"], _look(p.get("look")), p["box"],
+                 p.get("kp") if good else None, p.get("light"),
+                 tuple(p["colour"]) if p.get("colour") else None)
             for p in reply["people"]
         ]
         objects = [Thing(o["cls"], bearing_deg(o["box"], width, self._hfov), o["conf"], o["box"])
                    for o in reply.get("objects", [])]
         with self._lock:
-            self._answer = Answer(reply["t"], people, objects, good, None if good else quality.get("why"))
+            self._answer = Answer(reply["t"], people, objects, good, None if good else quality.get("why"),
+                                  reply.get("empty"))
             self._last_reply = self._clock()
             self.reply_times.append(self._last_reply)
             while self.reply_times and self.reply_times[0] <= self._last_reply - REPLY_WINDOW_S:

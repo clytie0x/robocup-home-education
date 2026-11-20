@@ -347,5 +347,181 @@ class Service(unittest.TestCase):
         self.assertEqual(taken, [])
 
 
+class FrameSize(unittest.TestCase):
+    def test_the_calibration_size_is_unchanged(self):
+        image = np.zeros((TRUE.height, TRUE.width, 3), np.uint8)
+        self.assertIs(fc.for_image(TRUE, image), TRUE)
+
+    def test_a_uniform_scale_doubles_fx_and_the_optical_centre(self):
+        scaled = fc.for_image(TRUE, np.zeros((TRUE.height * 2, TRUE.width * 2, 3), np.uint8))
+        self.assertAlmostEqual(scaled.fx, TRUE.fx * 2)
+        self.assertAlmostEqual(scaled.cx, (TRUE.cx + 0.5) * 2 - 0.5)
+        self.assertAlmostEqual(scaled.cy, (TRUE.cy + 0.5) * 2 - 0.5)
+
+    def test_a_16_by_9_frame_is_not_measured(self):
+        self.assertIsNone(fc.for_image(TRUE, np.zeros((720, 1280, 3), np.uint8)))
+        got = fc.measure_bag(TRUE, np.zeros((720, 1280, 3), np.uint8), [[1.0, 0.0]])
+        self.assertFalse(got["ok"])
+        self.assertIn("not %dx%d" % (TRUE.width, TRUE.height), got["why"])
+
+
+# The 2026-11-20 HD USB Camera candidate (docs/calibration). calibrated stays false in the file.
+OLD_PINHOLE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "calibration", "front-camera-2026-11-18", "front_camera.json")
+CANDIDATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))), "docs", "calibration", "front_camera_fisheye_candidate_2026-11-20.json")
+FISH_K = (-0.12000174022745945, 0.05392880504627527, 0.0, 0.0)
+
+
+def candidate():
+    """The candidate lens, marked calibrated so project and ray can be checked."""
+    return fc.FrontCamera(fx=522.7004622679294, x=0.33, y=0.0, z=0.7933,
+                          yaw=RAD(0.7606571023798528), pitch=RAD(46.954749902416516),
+                          roll=RAD(0.9615972633301483), cx=296.70882730620366, cy=241.09751641118947,
+                          dist_model="fisheye", dist=FISH_K, calibrated=True)
+
+
+class Fisheye(unittest.TestCase):
+    def test_an_unknown_lens_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            fc.FrontCamera(dist_model="brown")
+        self.assertIn("unknown dist_model", str(caught.exception))
+        self.assertIn("brown", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            fc.FrontCamera.from_dict({"fx": 500.0, "x": 0.2, "y": 0.0, "z": 0.3, "dist_model": "brown"})
+        self.assertIn("unknown dist_model", str(caught.exception))
+
+    def test_an_old_pinhole_file_matches_the_plain_projection(self):
+        with open(OLD_PINHOLE) as f:
+            raw = json.load(f)
+        self.assertNotIn("dist_model", raw)
+        cam = fc.FrontCamera.from_dict(raw)
+        plain = fc.FrontCamera(fx=raw["fx"], x=raw["x"], y=raw["y"], z=raw["z"],
+                               yaw=RAD(raw["yaw_deg"]), pitch=RAD(raw["pitch_deg"]), roll=RAD(raw["roll_deg"]),
+                               cx=raw["cx"], cy=raw["cy"], width=raw["width"], height=raw["height"],
+                               mirror=raw["mirror"], calibrated=True)
+        self.assertEqual(cam.dist_model, "pinhole")
+        self.assertEqual(cam.dist, (0.0, 0.0, 0.0, 0.0))
+        pts = np.array([[0.8, -0.2, 0.0], [1.2, 0.15, 0.05], [1.6, 0.0, 0.3], [1.0, 0.4, 0.1]])
+        got = cam.project_many(pts)
+        pc = (pts - cam.position) @ cam.rotation()
+        want = np.column_stack([cam.cx + cam.fx * pc[:, 0] / pc[:, 2], cam.cy + cam.fx * pc[:, 1] / pc[:, 2]])
+        self.assertTrue(np.array_equal(got, want))
+        self.assertTrue(np.array_equal(got, plain.project_many(pts)))
+        for u, v in ((10.0, 10.0), (320.0, 240.0), (600.0, 400.0)):
+            d = np.array([(u - cam.cx) / cam.fx, (v - cam.cy) / cam.fx, 1.0])
+            d = cam.rotation() @ d
+            d = d / np.linalg.norm(d)
+            self.assertTrue(np.array_equal(cam.ray(u, v), d))
+            self.assertTrue(np.array_equal(cam.ray(u, v), plain.ray(u, v)))
+        mirrored = plain.copy(mirror=True)
+        u, v = 180.0, 300.0
+        d = np.array([(u - mirrored.cx) / mirrored.fx * -1.0, (v - mirrored.cy) / mirrored.fx, 1.0])
+        d = mirrored.rotation() @ d
+        d = d / np.linalg.norm(d)
+        self.assertTrue(np.array_equal(mirrored.ray(u, v), d))
+
+    def test_stored_coefficients_do_nothing_on_a_pinhole(self):
+        plain = fc.FrontCamera(fx=500.0, x=0.2, y=0.0, z=0.3, calibrated=True)
+        held = plain.copy(dist=(-0.3, 0.2, 0.1, -0.05))
+        self.assertEqual(held.dist_model, "pinhole")
+        pts = np.array([[1.2, 0.4, 0.0], [2.0, -0.3, 0.2]])
+        self.assertTrue(np.array_equal(plain.project_many(pts), held.project_many(pts)))
+
+    def test_to_dict_round_trips_the_lens(self):
+        cam = candidate()
+        back = fc.FrontCamera.from_dict(cam.to_dict())
+        self.assertEqual(back.dist_model, "fisheye")
+        self.assertEqual(back.dist, FISH_K)
+        self.assertEqual(back.to_dict()["dist"], list(FISH_K))
+        full = fc.FrontCamera(fx=500.0, x=0.2, y=0.0, z=0.3, calibrated=True)
+        raw = full.to_dict()
+        self.assertEqual(raw["dist_model"], "pinhole")
+        del raw["dist_model"], raw["dist"]
+        pts = np.array([[1.5, 0.1, 0.0], [1.1, -0.2, 0.05]])
+        self.assertTrue(np.array_equal(fc.FrontCamera.from_dict(raw).project_many(pts), full.project_many(pts)))
+
+    def test_for_image_keeps_the_lens(self):
+        cam = candidate()
+        scaled = fc.for_image(cam, np.zeros((cam.height * 2, cam.width * 2, 3), np.uint8))
+        self.assertEqual(scaled.dist_model, "fisheye")
+        self.assertEqual(scaled.dist, FISH_K)
+        u, v = 120.0, 360.0
+        uu, vv = (u + 0.5) * 2 - 0.5, (v + 0.5) * 2 - 0.5
+        self.assertTrue(np.allclose(cam.ray(u, v), scaled.ray(uu, vv), atol=1e-12))
+
+    def test_pixels_round_trip_across_the_frame(self):
+        for mirror in (False, True):
+            cam = candidate().copy(mirror=mirror)
+            err = 0.0
+            for v in np.linspace(0, cam.height - 1, 25):
+                for u in np.linspace(0, cam.width - 1, 33):
+                    uv = cam.project(cam.position + cam.ray(float(u), float(v)))
+                    err = max(err, abs(uv[0] - u), abs(uv[1] - v))
+            self.assertLess(err, 1e-6)
+
+    def test_the_projection_matches_opencv_fisheye(self):
+        import cv2
+        cam = candidate()
+        pts = np.array([[x, y, z] for x in np.linspace(0.45, 2.2, 7) for y in np.linspace(-0.8, 0.8, 7)
+                        for z in (0.0, 0.25)])
+        uv = cam.project_many(pts)
+        rvec, _ = cv2.Rodrigues(cam.rotation().T)
+        tvec = -cam.rotation().T @ cam.position
+        k = np.array([[cam.fx, 0.0, cam.cx], [0.0, cam.fx, cam.cy], [0.0, 0.0, 1.0]])
+        cvp = cv2.fisheye.projectPoints(pts.reshape(-1, 1, 3), rvec, tvec.reshape(3, 1), k,
+                                        np.array(cam.dist, float))[0].reshape(-1, 2)
+        ok = np.isfinite(uv).all(axis=1)
+        self.assertGreater(int(ok.sum()), 10)
+        self.assertLess(float(np.abs(uv[ok] - cvp[ok]).max()), 1e-9)
+
+    def test_the_ray_matches_opencv_undistort(self):
+        import cv2
+        cam = candidate()
+        pixels = np.array([[0.0, 0.0], [639.0, 479.0], [320.0, 240.0], [100.0, 400.0], [500.0, 50.0]])
+        k = np.array([[cam.fx, 0.0, cam.cx], [0.0, cam.fx, cam.cy], [0.0, 0.0, 1.0]])
+        und = cv2.fisheye.undistortPoints(pixels.reshape(-1, 1, 2), k, np.array(cam.dist, float)).reshape(-1, 2)
+        for (u, v), (x, y) in zip(pixels, und):
+            d = cam.rotation().T @ cam.ray(float(u), float(v))
+            self.assertAlmostEqual(d[0] / d[2], x, delta=1e-9)
+            self.assertAlmostEqual(d[1] / d[2], y, delta=1e-9)
+
+    def test_a_point_behind_the_fisheye_is_none(self):
+        # above the lens: the camera looks down, so a floor point just behind its x can still be in front
+        self.assertIsNone(candidate().project((0.33, 0.0, 2.0)))
+
+    def test_a_harsh_lens_still_gives_a_finite_ray(self):
+        cam = fc.FrontCamera(fx=500.0, x=0.3, y=0.0, z=0.8, pitch=RAD(45), calibrated=True,
+                             dist_model="fisheye", dist=(-0.9, 0.8, -0.5, 0.2))
+        for u, v in ((0.0, 0.0), (639.0, 479.0), (320.0, 240.0)):
+            d = cam.ray(u, v)
+            self.assertTrue(np.isfinite(d).all())
+            self.assertAlmostEqual(float(np.linalg.norm(d)), 1.0, places=12)
+
+    def test_a_short_distortion_is_padded(self):
+        cam = fc.FrontCamera(dist_model="fisheye", dist=[-0.12, 0.054])
+        self.assertEqual(cam.dist, (-0.12, 0.054, 0.0, 0.0))
+
+    def test_the_fit_keeps_a_fixed_distortion(self):
+        cam = candidate()
+        out, _edges = fc._unpack(cam, ("fx",), (), np.array([math.log(500.0)]))
+        self.assertEqual(out.dist_model, "fisheye")
+        self.assertEqual(out.dist, FISH_K)
+        self.assertAlmostEqual(out.fx, 500.0)
+        self.assertAlmostEqual(out.pitch, cam.pitch)
+
+    def test_the_candidate_file_stays_uncalibrated(self):
+        with open(CANDIDATE_FILE) as f:
+            raw = json.load(f)
+        self.assertFalse(raw["calibrated"])
+        self.assertEqual(raw["dist_model"], "fisheye")
+        self.assertEqual(tuple(raw["dist"]), FISH_K)
+        cam = fc.FrontCamera.from_dict(raw)
+        self.assertFalse(cam.calibrated)
+        self.assertEqual(cam.dist, FISH_K)
+        with self.assertRaises(fc.NotCalibrated):
+            cam.project((1.0, 0.0, 0.0))
+
+
 if __name__ == "__main__":
     unittest.main()

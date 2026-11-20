@@ -3,6 +3,7 @@ import io
 import json
 import math
 import os
+import tempfile
 import signal
 import socket
 import subprocess
@@ -98,6 +99,14 @@ class PickTest(unittest.TestCase):
         arm = ApiArm(results={"pick_bag": (True, "SUCCESS", "holding", {"gripper_pos": 0.123, "gripper_load": 25.0})})
         make(arm).pick(0.31, 0.0, top=0.30)
         self.assertEqual(arm.sent, ["grab_success|SUCCESS|gripper_pos=0.123 gripper_load=25.0"])
+
+    def test_an_unverified_hold_stays_a_grab_and_names_the_code(self):
+        arm = ApiArm(results={"pick_bag": (True, "SUCCESS_UNVERIFIED", "closed, camera did not confirm",
+                                           {"gripper_pos": 0.1, "gripper_load": 10.0})})
+        res = make(arm).pick(0.31, 0.0, top=0.30)
+        self.assertTrue(res.ok)
+        self.assertEqual(res.code, "SUCCESS_UNVERIFIED")
+        self.assertEqual(arm.sent, ["grab_success|SUCCESS_UNVERIFIED|gripper_pos=0.100 gripper_load=10.0"])
         arm = ApiArm(results={"pick_bag": (False, "MISSED", "closed on air 3 times",
                                            {"gripper_pos": 0.041, "gripper_load": 3.0})})
         make(arm).pick(0.31, 0.0, top=0.30)
@@ -707,6 +716,43 @@ class GateTest(unittest.TestCase):
         with mock.patch.object(floor_pick, "RosArm", side_effect=Reached), redirect_stdout(io.StringIO()):
             with self.assertRaises(Reached):  # past the gate, at the ROS transport
                 bag_arm.main([])
+
+
+class Blind:
+    def detect(self, _frame):
+        return None
+
+
+class ProfileTest(unittest.TestCase):
+    def test_a_calibrated_camera_that_sees_nothing_does_not_probe(self):
+        arm = ApiArm()
+        ba = bag_arm.BagArm(KIN, arm, true_camera(), Blind(), log=lambda _s: None)
+        res = ba.pick(0.31, 0.0)
+        self.assertTrue(res.ok, res)
+        grasp = arm.tasks[-1][1]["grasp"]
+        self.assertTrue(math.isfinite(grasp[2]))
+        self.assertAlmostEqual(grasp[2], bag_arm.ARM_FLOOR_Z + bag_arm.DEFAULT_TOP, places=6)
+        names = [row["phase"] for row in ba.last_pick["phases"]]
+        self.assertIn("home", names)
+        self.assertIn("pick_bag", names)
+        self.assertFalse(ba.last_pick["probe"])
+        self.assertEqual(ba.last_pick["profile"], "safe")
+
+    def test_fast_is_handed_to_the_arm_and_written_with_the_pick(self):
+        class Profiling(ApiArm):
+            def set_speed_profile(self, name):
+                self.asked = name
+
+        arm = Profiling()
+        with tempfile.TemporaryDirectory() as folder:
+            ba = bag_arm.BagArm(KIN, arm, log=lambda _s: None, profile="fast", pick_log_dir=folder)
+            ba.pick(0.31, 0.0, top=0.30)
+            self.assertEqual(arm.asked, "fast")
+            self.assertEqual(ba.last_pick["speeds"]["bag_speed"], 0.12)
+            self.assertEqual(ba.last_pick["speeds"]["joint_scale"], 0.45)
+            written = os.listdir(folder)
+            self.assertEqual(len(written), 1)
+            self.assertTrue(written[0].endswith("-bag.json"))
 
 
 def wait_until(check, timeout=5.0):

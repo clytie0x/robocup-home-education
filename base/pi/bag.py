@@ -15,7 +15,7 @@ returns through the usual safety stop and the cable rules, and tells it what rea
   far        straight on at FAR_SPEED, steering the bag onto that line, every point counted by the normal
              stop (the bag too: it ends CREEP_DIST before the goal, well outside the clearance).
   creep      straight at CREEP (0.03 m/s) until the bag centre is at x = TARGET_X (the arm reaches a grasp point
-             0.24 to 0.34 m ahead of its pan axis). Only the locked bag may come closer than the normal
+             0.24 to 0.32 m ahead of its pan axis). Only the locked bag may come closer than the normal
              clearance: the points within EXCLUDE_R of it are left out of the stop, anything else in the front
              strip stops it (BLOCKED). A virtual bag leaves nothing out: there is nothing real to come close to.
   settle     stand SETTLE_S, measure the bag from the LiDAR, then decide: turn, far, creep, reached or failed.
@@ -53,8 +53,8 @@ import safety
 
 # The arm (owner's numbers, 2026-11-15)
 ARM_Y = 0.0145  # m, the arm's pan axis is at robot (0.012, 0.0145)
-TARGET_X = 0.31  # m, where the bag centre ends: 0.298 ahead of the pan axis, inside its 0.24 to 0.34 reach
-X_TOL = 0.03  # m, reached when the centre is this close to TARGET_X
+TARGET_X = 0.35  # m, bag centre 0.338 m ahead of the pan axis -> front wall ~0.288 m (inside the 0.32 m reach)
+X_TOL = 0.02  # m, reached when the centre is this close to TARGET_X
 Y_TOL = 0.03  # m, and this close to ARM_Y
 Y_AIM = 0.015  # m, before the creep a turn puts the bag this close to ARM_Y (straight on keeps y)
 # Motion

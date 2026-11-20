@@ -3,7 +3,8 @@
   .venv/bin/python console.py [--port 8081] [--no-devices]
   then open http://192.168.31.21:8081/ (Wi-Fi) or http://10.0.0.1:8081/ (LAN cable)
 
-Tabs: Overview (state, faults, health list, power bank estimate, motor battery use), Live (Xtion camera, LiDAR from above,
+Tabs: Robot (the default: Xtion, arm webcam, Jetson snapshot, LiDAR, status, events, pick and drop,
+STOP), Overview (state, faults, health list, power bank estimate, motor battery use), Live (Xtion camera, LiDAR from above,
 the arm team's webcam), Task (start run_follow, Follow / Wait / Resume / Go back, STOP), Data (charts and
 runs from telemetry.py's database, read only), Jetson (detector, bridge, flow through the Jetson's
 agent.py), Checks (wheel test, camera pitch, link test), Logs, Help. The
@@ -28,6 +29,7 @@ import argparse
 import hmac
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -84,12 +86,16 @@ FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/preact-htm.js": ("preact-htm.js", "text/javascript; charset=utf-8"),
+    "/robot.js": ("robot.js", "text/javascript; charset=utf-8"),
 }
 COMMANDS = ("follow", "wait", "resume", "return", "bag", "bag_again", "bag_near")
+MISSIONS = ("full", "follow_only", "bag_only")
+MISSION_LABEL = {"full": "โจทย์จริง HMC", "follow_only": "ตามคนอย่างเดียว", "bag_only": "หาและหยิบถุง"}
 NO_PIN = ("/api/stop", "/api/arm/stop", "/api/bank/full", "/api/bank/reading")  # STOPs, and the owner's battery marks
 CLIENT = re.compile(r"^[\w.@:%-]{1,64}$")  # a program's name (X-HMC-Client), e.g. robotctl's "xohm@192.168.31.50"
 ARM_CMDS = ("home", "rest", "center", "torque", "pick_bag", "drop_bag", "bagpick")
-ARM_JOBS = ("pick_bag", "drop_bag", "bagpick")  # bag_arm's bag jobs: allowed during a task run, not while its bag task drives
+ARM_JOBS = ("pick_bag", "drop_bag", "bagpick")  # bag jobs: refused on the page while a task run is active
 ARM_TIMEOUT = 95.0  # s: the agent answers an arm command when it is done, within its own ARM_TIMEOUT (90 s)
 ARM_JOB_TIMEOUT = 245.0  # s: and a bag job within its ARM_JOB_TIMEOUT (240 s: home 60 + pick 150 + the camera looks)
 ARM_BAGPICK_TIMEOUT = 335.0  # s: and the arm team's bagpick within its ARM_BAGPICK_TIMEOUT (330 s)
@@ -104,6 +110,8 @@ SESSION = re.compile(r"^[0-9a-f]{32}$")  # a page tab's token (X-HMC-Session), f
 WHEEL_TEST_EVERY = 10.0  # s at least between two wheel tests
 WHEEL_CLEAR = (0.35, 0.25)  # m: nothing may be in 0 < x < 0.35, |y| < 0.25 (robot frame) for a wheel test
 SCAN_FRESH = 0.5  # s; the wheel test needs a scan of the console's own LiDAR at most this old showing a clear front
+BAG_KEEP_S = 30.0  # s a front-camera bag reading is kept when a later look has no camera handle
+EVENT_CAP = 80  # lines kept on the Robot page's event list
 HURRY_MIN = 0.3  # s a second STOP still leaves the run after asking it to end (it sends its own S# when it ends)
 PIN_TRIES = 5  # wrong PINs (from anyone) before the PIN is locked out
 PIN_LOCK_S = 60.0  # s of the first lockout; each next one twice as long, at most PIN_LOCK_MAX_S
@@ -120,18 +128,22 @@ NEED_PIN_VIRTUAL = ("ตั้ง PIN ก่อน ถึงจะทดสอ�
 
 # ---------------------------------------------------------------- jobs
 
-def task_command(drive, speed, minutes, p, py=sys.executable, virtual=None):
+def task_command(drive, speed, minutes, p, py=sys.executable, virtual=None, mission="full"):
     """(argv, None) for run_follow, or (None, why not). virtual: the PC's IPv4 address for a virtual operator run."""
     if not isinstance(drive, bool):
         return None, "drive takes true or false"
+    if mission not in MISSIONS:
+        return None, "mission must be one of %s" % ", ".join(MISSIONS)
     if isinstance(speed, bool) or speed not in SPEEDS:
         return None, "top speed must be one of %s m/s" % ", ".join("%.2f" % s for s in SPEEDS)
     if speed > p["max_speed"] + 1e-9:
         return None, "%.2f m/s is above max_speed %.2f in params.json" % (speed, p["max_speed"])
     if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or not 0 < minutes <= MINUTES_MAX:
         return None, "length must be 1 to %d minutes" % MINUTES_MAX
+    # follow_only omits --remote so Jetson hmc_flow / voice cannot trigger bag picking or interfere
+    remote_flag = [] if mission == "follow_only" else ["--remote"]
     run = [py, str(HERE / "run_follow.py")] + (["--drive"] if drive else []) + [
-        "--seconds", str(int(round(minutes * 60))), "--max-speed", "%.2f" % speed, "--remote",
+        "--seconds", str(int(round(minutes * 60))), "--max-speed", "%.2f" % speed, *remote_flag,
         "--dashboard-host", "127.0.0.1"]  # its page skips the PIN: only the console may reach it
     if virtual is not None:
         if not _one_computer(virtual):
@@ -817,6 +829,7 @@ class Jetson:
         self.host = None  # the address the agent last answered on
         self.links = [{"host": h, "ok": None, "ms": None} for h in hosts]
         self.agent, self.agent_error, self.agent_at = None, "not asked yet", None
+        self.arm_state, self.arm_at = None, None  # last GET /arm, cached with the 3 s checker
         self.webcam = None
         self.checked = None
 
@@ -844,6 +857,13 @@ class Jetson:
                 self.agent_error = "the Jetson does not answer on %s" % " or ".join(self.hosts)
         host = self.host or next((link["host"] for link in self.links if link["ok"]), None)
         self.webcam = host is not None and self.port_open(host, WEBCAM_PORT)
+        if self.host:
+            try:
+                code, body = self.arm()
+            except (OSError, ValueError):
+                code, body = 0, None
+            if code == 200 and isinstance(body, dict):
+                self.arm_state, self.arm_at = body, self.clock()
         self.checked = self.clock()
 
     def act(self, action, name=None):
@@ -882,9 +902,23 @@ class Jetson:
     def webcam_url(self):
         return "http://%s:%d/stream" % (self.host or self.hosts[0], WEBCAM_PORT)
 
+    def webcam_snap(self):
+        """(code, body, content type) of one JPEG from the arm webcam's /snap.jpg. The page shows it with an img tag."""
+        url = "http://%s:%d/snap.jpg" % (self.host or self.hosts[0], WEBCAM_PORT)
+        try:
+            with urllib.request.urlopen(url, timeout=1.5) as r:
+                data = r.read()
+                kind = (r.headers.get("Content-Type") or "image/jpeg").split(";")[0]
+        except (OSError, ValueError) as error:
+            return 503, {"error": "the arm webcam snapshot does not answer (%s)" % error}, "application/json"
+        if not data:
+            return 502, {"error": "the arm webcam snapshot was empty"}, "application/json"
+        return 200, data, kind or "image/jpeg"
+
     def snapshot(self):
         return {"host": self.host, "links": self.links, "agent": self.agent, "agent_error": self.agent_error,
-                "agent_at": self.agent_at, "webcam": self.webcam, "checked": self.checked}
+                "agent_at": self.agent_at, "webcam": self.webcam, "checked": self.checked,
+                "arm": self.arm_state, "arm_at": self.arm_at}
 
 
 def link_test(hosts=JETSON_HOSTS, tries=3, ports=(AGENT_PORT, 22), probe=probe):
@@ -1232,6 +1266,50 @@ def _db_info(path):
 
 # ---------------------------------------------------------------- the web server
 
+def _load_mission():
+    """hmc.flow.HmcFlow. On the Pi the package sits next to this file; in the repo it is ../../hmc/src."""
+    try:
+        from hmc.flow import HmcFlow
+        return HmcFlow
+    except ImportError:
+        pass
+    for folder in (HERE.parent.parent / "hmc" / "src", HERE):
+        if (folder / "hmc" / "flow.py").exists() and str(folder) not in sys.path:
+            sys.path.insert(0, str(folder))
+            break
+    from hmc.flow import HmcFlow
+    return HmcFlow
+
+
+def _mission_status(body):
+    """run_follow's status record as the executive reads it, or None when the page has no record yet."""
+    if not isinstance(body, dict):
+        return None
+    record = body.get("record") if isinstance(body.get("record"), dict) else None
+    if record is None and any(key in body for key in ("locked", "phase", "at_start", "end")):
+        record = body
+    if record is None:
+        return None
+    status = {"link": True}
+    if "locked" in record:
+        status["locked"] = bool(record.get("locked"))
+    if "at_start" in record:
+        status["at_start"] = bool(record.get("at_start"))
+    end = record.get("end")
+    if end:
+        status["end"] = str(end)
+    wheels = record.get("wheels")
+    if isinstance(wheels, str) and wheels:
+        status["wheels"] = wheels
+    pose = record.get("believed") if isinstance(record.get("believed"), dict) else record.get("pose")
+    if isinstance(pose, dict):
+        status["pose"] = pose
+    return status
+
+
+_RUN_ACTION = {"follow_me": "follow", "wait": "wait", "resume": "resume", "go_back": "return", "stop": "wait"}
+
+
 class Console:
     def __init__(self, p, devices, jobs, jetson, run_url=RUN_URL, fetch=http_json, pin=None, log_root=LOG_ROOT,
                  db_path=None):
@@ -1246,12 +1324,23 @@ class Console:
         self.hold = None  # {"who", "since"} while a deploy or a repair holds the console; a restart clears it
         self.db_path = Path(db_path) if db_path is not None else (
             telemetry.DB_PATH if telemetry is not None else HERE / "data" / "robot.db")
+        self.events = []  # {"time", "level", "text"}, oldest first, capped; the Robot page shows them newest first
+        self.bag = None  # last measured bag, or None; never a hard-coded x
+        self._bank, self._bank_at = None, 0.0
+        self._drop = None
+        self.mission = _load_mission()()
+        self._mission_stop = threading.Event()
+        self._mission_saw_run = False
+        self._mission_thread = threading.Thread(target=self._mission_loop, daemon=True)
+        self._mission_thread.start()
 
     def data(self, path, query):
         """(code, body[, content type, headers]) of GET /api/data/series, /runs, /run/<id>, /export.csv and
         /api/bank (the power bank's estimate, and "motor": the 21V battery's use). Read-only queries on the telemetry database; a database not made yet gives empty answers."""
         if telemetry is None:
             return 503, {"error": "telemetry.py is not next to console.py: no data to show", "telemetry": False}
+        if path == "/api/data/runs":
+            self._import_finished_runs()
         if not path.startswith("/api/data/"):
             return self._query(path, query)
         job = self.jobs.status()
@@ -1372,18 +1461,169 @@ class Console:
         except (sqlite3.Error, OSError, ValueError) as error:
             return 503, {"error": "could not write the mark (%s)" % error}
         code, bank = self.data("/api/bank", {})
+        self._bank = None  # the next /api/state reads the mark just written
         return 200, {"error": None, "bank": bank if code == 200 else None}
 
-    def state(self):
+    def note(self, level, text):
+        """Append one line to the Robot page's event list. An error identical to the last line is kept once."""
+        text = " ".join(str(text).split())[:400]
+        if not text:
+            return
+        with self.guard:
+            if (level == "error" and self.events and self.events[-1]["level"] == "error"
+                    and self.events[-1]["text"] == text):
+                return
+            self.events.append({"time": round(time.time(), 3), "level": level, "text": text})
+            if len(self.events) > EVENT_CAP:
+                del self.events[:-EVENT_CAP]
+
+    def _import_finished_runs(self):
+        """Pull finished run folders into the telemetry database so the Data tab does not wait for the recorder.
+        Skipped while a drive is running, and when there is no run folder (reading must not create the file)."""
+        if telemetry is None:
+            return
+        job = self.jobs.status()
+        info = (job.get("job") or {}).get("info") or {}
+        if job.get("running") and (info.get("drive") or info.get("moves")):
+            return
+        try:
+            folders = [f for f in Path(self.log_root).iterdir() if f.is_dir() and RUN_NAME.match(f.name)]
+        except OSError:
+            return
+        if not folders:
+            return
+        try:
+            db = telemetry.open_db(self.db_path)
+            try:
+                telemetry.import_runs(db, self.log_root)
+                db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            finally:
+                db.close()
+        except (sqlite3.Error, OSError):
+            pass
+
+    def bank_cached(self):
+        """The /api/bank body, refreshed at most every 15 s, so the Robot page does not poll it itself."""
+        now = time.time()
+        if self._bank is not None and now - self._bank_at < 15.0:
+            return self._bank
+        code, body = self.data("/api/bank", {})
+        self._bank = body if code == 200 else None
+        self._bank_at = now
+        return self._bank
+
+    def drop_default(self):
+        """The reachable place, from so100_ik.reachable_drop. Cached. None x when that module cannot be imported."""
+        if self._drop is not None:
+            return self._drop
+        try:
+            import importlib.util
+            path = HERE.parent / "jetson" / "so100_ik.py"
+            spec = importlib.util.spec_from_file_location("so100_ik_console", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            self._drop = mod.reachable_drop()
+        except Exception as error:  # noqa: BLE001 (the page still works; it shows why there is no default)
+            self._drop = {"x": None, "y": 0.0, "error": "%s" % error}
+        return self._drop
+
+    def _set_bag(self, x, y, top, yaw, source, at):
+        bag = {"x": round(float(x), 3), "y": round(float(y), 3), "source": source, "at": round(float(at), 3)}
+        if isinstance(top, (int, float)) and not isinstance(top, bool):
+            bag["top"] = round(float(top), 3)
+        if isinstance(yaw, (int, float)) and not isinstance(yaw, bool):
+            bag["yaw"] = round(float(yaw), 3)
+        with self.guard:
+            self.bag = bag
+
+    def _ask_front_camera(self, points):
+        """One JSON line to front_camera.serve (TCP LOOK) and its answer, or None. Short timeouts: this is a probe."""
+        hosts = list(getattr(self.jetson, "hosts", ()) or ())
+        host = getattr(self.jetson, "host", None)
+        if host:
+            hosts = [host] + [h for h in hosts if h != host]
+        req = (json.dumps({"id": "console", "points": points}) + "\n").encode("utf-8")
+        for one in hosts:
+            try:
+                with socket.create_connection((one, ports.LOOK), timeout=0.4) as s:
+                    s.settimeout(0.8)
+                    s.sendall(req)
+                    line = s.makefile("rb").readline(65536)
+                answer = json.loads(line.decode("utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(answer, dict):
+                return answer
+        return None
+
+    def probe_bag(self):
+        """Remember the newest bag the front camera (or, failing that, the LiDAR) measured. Never writes 0.36.
+        While a task holds the LiDAR, take the run's reached bag and do not open the camera port."""
+        if self.live_from_run():
+            self._bag_from_run()
+            return
+        devices = self.devices
+        if devices.held:
+            return
+        with devices.scan.lock:
+            points, at = list(devices.scan.points), devices.scan.at
+        if at is None or devices.clock() - at > 2.0 or not points:
+            return
+        front = [(x, y) for x, y in points
+                 if 0.25 < x < 1.6 and abs(y) < 0.5 and abs(math.degrees(math.atan2(y, x))) <= 40]
+        if not front:
+            return
+        near = min(front, key=lambda p: math.hypot(p[0], p[1]))
+        cluster = [p for p in front if math.hypot(p[0] - near[0], p[1] - near[1]) <= 0.12]
+        answer = self._ask_front_camera([[round(x, 3), round(y, 3)] for x, y in cluster])
+        now = time.time()
+        handle = answer.get("handle") if isinstance(answer, dict) else None
+        if isinstance(answer, dict) and answer.get("ok") and isinstance(handle, list) and len(handle) >= 2:
+            self._set_bag(handle[0], handle[1], answer.get("top"), answer.get("yaw"), "front-camera", now)
+            return
+        with self.guard:
+            bag = self.bag
+        if bag and bag.get("source") == "front-camera" and now - bag["at"] < BAG_KEEP_S:
+            return
+        self._set_bag(sum(p[0] for p in cluster) / len(cluster), sum(p[1] for p in cluster) / len(cluster),
+                      None, None, "lidar", now)
+
+    def _bag_from_run(self):
+        try:
+            code, body = self.run_status()
+        except (OSError, ValueError):
+            return
+        if code != 200 or not isinstance(body, dict):
+            return
+        record = body.get("record") if isinstance(body.get("record"), dict) else {}
+        result = (record.get("bag_task") or {}).get("result") if isinstance(record.get("bag_task"), dict) else None
+        if not isinstance(result, dict) or not result.get("ok"):
+            return
+        if not isinstance(result.get("x"), (int, float)) or isinstance(result.get("x"), bool):
+            return
+        if not isinstance(result.get("y"), (int, float)) or isinstance(result.get("y"), bool):
+            return
+        self._set_bag(result["x"], result["y"], result.get("top"), result.get("yaw"), "run", time.time())
+
+    def state(self, heartbeat=False, session=None):
         devices = self.devices.status()
         jetson = self.jetson.snapshot()
         wheel = wheel_test_last(self.log_root / "wheel-test" / "last.json")
         pi = pi_health()
+        _code, run = self.run_status(heartbeat=heartbeat, session=session)
+        if isinstance(run, dict) and run.get("error"):
+            self.note("error", str(run["error"]))
+        with self.guard:
+            events = list(self.events)
+            bag = dict(self.bag) if self.bag else None
         return {"time": time.time(), "host": socket.gethostname(), "cards": cards(pi, devices, wheel, jetson, time.time()),
                 "pi": pi, "devices": devices, "job": self.jobs.status(), "jetson": jetson, "wheel_test": wheel,
                 "max_speed": self.p["max_speed"], "speeds": [s for s in SPEEDS if s <= self.p["max_speed"] + 1e-9],
                 "minutes_max": MINUTES_MAX, "pin": self.pin is not None, "virtual_port": VIRTUAL_PORT,
-                "version": deployed_version(), "hold": self.hold}
+                "version": deployed_version(), "hold": self.hold,
+                "run": run if isinstance(run, dict) else {"state": "unknown"},
+                "mission": self.mission.snapshot(time.monotonic()),
+                "bag": bag, "drop": self.drop_default(), "events": events, "bank": self.bank_cached()}
 
     def live_from_run(self):
         """True while run_follow holds the camera and the LiDAR: its own page serves them (live_feed.py)."""
@@ -1400,16 +1640,23 @@ class Console:
             return 503, {"error": "the run's live view does not answer yet (%s)" % error}
 
     def run_status(self, heartbeat=False, session=None):
-        """run_follow's /status. heartbeat: only for a read a browser just asked for (GET /api/run?heartbeat=1,
+        """run_follow's /status.         heartbeat: only for a read a browser just asked for (GET /api/run?heartbeat=1 or GET /api/state?heartbeat=1,
         sent by the page while its tab is in view), so the run's page-alive heartbeat stops with the phone; never
         from a thread or timer of the console itself. And only from the tab that sent the last command (its
-        session token): another tab left open on a laptop must not keep the run's page alive for the phone."""
+        session token): another tab left open on a laptop must not keep the run's page alive for the phone.
+        With no task running the answer is 200 {"state": "idle"} and the run's page is not asked."""
+        if not self.live_from_run():
+            return 200, {"state": "idle"}
         heartbeat = bool(heartbeat and self.commander and isinstance(session, str)
                          and hmac.compare_digest(session.encode(), self.commander.encode()))
         try:
             code, body = self.fetch(self.run_url + ("/status?heartbeat=1" if heartbeat else "/status"), timeout=1.0)
         except (OSError, ValueError) as error:
             return 200, {"error": "the run's status page does not answer yet (%s)" % error}
+        if isinstance(body, dict) and "state" not in body:
+            record = body.get("record") if isinstance(body.get("record"), dict) else None
+            phase = record.get("phase") if record else None
+            body = dict(body, state=phase or "running")
         return code, body
 
     def wheel_refusal(self):
@@ -1466,6 +1713,7 @@ class Console:
         and y takes the running task's last reached bag. Refused while the task's bag task moves the base, and while a
         task runs whose status does not say."""
         record = None
+        from_run = False
         if task:
             code, status = self.run_status()
             record = status.get("record") if code == 200 and isinstance(status, dict) else None
@@ -1485,6 +1733,7 @@ class Console:
             if not (isinstance(result, dict) and result.get("ok")):
                 return 409, {"error": "no reached bag in a running task: give x and y, or run bag or bag_near first"}
             body = result
+            from_run = True
         out = {"cmd": cmd}
         for key in ("x", "y", "top", "yaw") if cmd == "pick_bag" else ("x", "y"):
             value = body.get(key)
@@ -1494,8 +1743,53 @@ class Console:
                 return 400, {"error": "%s takes x and y in metres (robot frame)%s" % (
                     cmd, ", top (m) and yaw (rad) when known" if cmd == "pick_bag" else "")}
             out[key] = float(value)
+        # The page's empty bag fields are 0.36, 0.00. That point is not a measurement.
+        if cmd == "pick_bag" and abs(out["x"] - 0.36) < 0.001 and abs(out["y"]) < 0.001:
+            measured = body.get("measured") is True or (from_run and body.get("ok") is True)
+            if not measured:
+                return 409, {
+                    "error": "0.36, 0.00 is the console default, not a measured bag",
+                    "reason": "DEFAULT_NOT_MEASURED",
+                }
         code, answer = self.jetson.arm(out, timeout=ARM_JOB_TIMEOUT)
         return code, (dict(answer, sent=out) if isinstance(answer, dict) else answer)
+
+    def _bag_only_worker(self, drive):
+        """Auto-sequence for mission='bag_only': wait for run_follow -> send bag_near -> when reached, trigger pick_bag."""
+        deadline = self.clock() + 15.0
+        sent = False
+        while self.clock() < deadline:
+            job = self.jobs.status()
+            if not (job["running"] and job["job"] and job["job"]["kind"] == "task"):
+                return
+            try:
+                code, _ = self.fetch(self.run_url + "/command", {"command": "bag_near"}, timeout=2.0)
+                if code == 200:
+                    sent = True
+                    break
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.5)
+        if not sent:
+            return
+        # Poll until bag_near finishes (up to 120 s)
+        pick_deadline = self.clock() + 120.0
+        while self.clock() < pick_deadline:
+            job = self.jobs.status()
+            if not (job["running"] and job["job"] and job["job"]["kind"] == "task"):
+                return
+            try:
+                code, status = self.fetch(self.run_url + "/status?heartbeat=1", timeout=2.0)
+            except (OSError, ValueError):
+                time.sleep(0.5)
+                continue
+            if code == 200 and isinstance(status, dict):
+                result = ((status.get("record") or {}).get("bag_task") or {}).get("result")
+                if isinstance(result, dict) and "ok" in result:
+                    if result.get("ok") and drive:
+                        self.bag_job("pick_bag", {}, task=True)
+                    return
+            time.sleep(0.5)
 
     def stop_arm(self):
         """The arm's stop beside the base's STOP, best effort: a note, never an error, never waits long."""
@@ -1540,11 +1834,102 @@ class Console:
         out.sort(key=lambda c: c.get("time") or 0)
         return {"commands": out[-n:]}
 
+    def _mission_loop(self):
+        """Clock and run_follow status for the executive. A failed read before the robot has left the start
+        is not a lost link: the page is often not up yet."""
+        while not self._mission_stop.wait(0.5):
+            try:
+                if not self.mission.running:
+                    continue
+                now = time.monotonic()
+                live = self.live_from_run()
+                if live:
+                    self._mission_saw_run = True
+                elif self._mission_saw_run:
+                    self._mission_saw_run = False
+                    self._apply(self.mission.on_event(
+                        "base_run_ended|BASE_RUN_ENDED|the run ended", now))
+                    continue
+                self._apply(self.mission.on_tick(now))
+                if not self.live_from_run():
+                    continue
+                try:
+                    code, body = self.fetch(self.run_url + "/status", timeout=0.3)
+                except (OSError, ValueError):
+                    if getattr(self.mission, "left_start", False):
+                        self._apply(self.mission.on_status({"link": False}, time.monotonic()))
+                    continue
+                status = _mission_status(body) if code == 200 else None
+                if status is None:
+                    continue
+                self._apply(self.mission.on_status(status, time.monotonic()))
+            except Exception:
+                continue
+
+    def _apply(self, outputs):
+        """Drive run_follow and the arm from the executive. Never stop-all."""
+        for kind, value in outputs or ():
+            if kind != "cmd" or not isinstance(value, dict):
+                continue
+            action = value.get("action")
+            params = value.get("params") if isinstance(value.get("params"), dict) else {}
+            try:
+                if action in ("pick_bag", "drop_bag"):
+                    body = {"cmd": action}
+                    for key in ("x", "y", "top", "yaw"):
+                        if key in params and not isinstance(params[key], bool):
+                            body[key] = params[key]
+                    self.jetson.arm(body)
+                    continue
+                if action == "find_bag":
+                    command = "bag_again" if params.get("again") else "bag"
+                else:
+                    command = _RUN_ACTION.get(action)
+                if command:
+                    self.fetch(self.run_url + "/command", {"command": command},
+                               timeout=0.4 if action == "stop" else 2.0)
+            except Exception:
+                continue
+
+    def _begin_mission(self, minutes):
+        """Reset the executive for the run that just started. The task clock is at most 5:00."""
+        job = (self.jobs.status().get("job") or {})
+        stem = Path(str(job.get("log") or "")).stem
+        run_id = stem[:15] if RUN_NAME.match(stem[:15]) else time.strftime("%Y%m%d-%H%M%S")
+        try:
+            limit = min(300.0, float(minutes) * 60.0)
+        except (TypeError, ValueError):
+            limit = 300.0
+        try:
+            self.mission.open_log(Path(self.log_root) / run_id, run_id)
+        except OSError:
+            pass
+        self._mission_saw_run = False
+        # This call runs only after the Pi base program has started, so the local link is up.
+        # A later status or NO_LINK can take it down again.
+        self._apply(self.mission.start(time.monotonic(), report={"link": True}, run_id=run_id, limit_s=limit))
+        self._park_flow()
+
+    def _stop_mission(self):
+        self._apply(self.mission.stop(time.monotonic()))
+
+    def _park_flow(self):
+        """Ask the Jetson agent to stop only the flow program, when its host is already known."""
+        host = getattr(self.jetson, "host", None)
+        if not host:
+            return
+        fetch = getattr(self.jetson, "fetch", None) or self.fetch
+        try:
+            fetch("http://%s:%d/stop" % (host, AGENT_PORT), {"name": "flow"}, timeout=0.4)
+        except Exception:
+            pass
+
     def post(self, path, body, session=None, client=None, program=None):
         """(code, body) for one POST from the page. session: the tab's X-HMC-Session token, if it has one.
         client: the address the POST came from (a virtual operator run takes the person from there).
         program: the X-HMC-Client name of a program on the Pi (robotctl), None for the console's own page."""
         if path == "/api/stop":
+            self._stop_mission()  # motion only: records OPERATOR_STOP, never stop-all
             note = self.jobs.stop()  # the base first: the arm's stop never delays it
             return 200, {"error": None, "note": note, "arm": self.stop_arm()}
         if path == "/api/arm/stop":
@@ -1581,30 +1966,38 @@ class Console:
                 return 400, {"error": "torque takes on: true or false"}
             job = self.jobs.status()
             task = bool(job["running"] and job["job"] and job["job"]["kind"] == "task")
+            if task or self.mission.running:
+                return 409, {"error": "a task run is active: arm and bag buttons are refused until the run ends"
+                                      " (STOP still stops motion)"}
             if cmd in ARM_JOBS:
                 return self.bag_job(cmd, body, task)
-            if task:
-                return 409, {"error": "a task run drives the arm itself: arm buttons wait until it ended (STOP works)"}
             return self.jetson.arm({"cmd": cmd, "on": body["on"]} if cmd == "torque" else {"cmd": cmd})
         if path == "/api/task/start":
             virtual = body.get("virtual", False)
             if not isinstance(virtual, bool):
                 return 400, {"error": "virtual takes true or false"}
+            mission = body.get("mission", "full")
             pc = (body.get("virtual_host") or client) if virtual else None  # the PC that sends the virtual person
-            cmd, error = task_command(body.get("drive"), body.get("speed"), body.get("minutes"), self.p, virtual=pc)
+            cmd, error = task_command(body.get("drive"), body.get("speed"), body.get("minutes"), self.p,
+                                      virtual=pc, mission=mission)
             if error:
                 return 400, {"error": error}
             if body["drive"] and self.pin is None:
                 return 403, {"error": NEED_PIN}
             if virtual and self.pin is None:
                 return 403, {"error": NEED_PIN_VIRTUAL}
-            label = "งาน%s%s %.2f m/s %s นาที" % ("ขับจริง" if body["drive"] else "ทดลอง", " คนเสมือน" if virtual else "",
-                                                 body["speed"], ("%g" % body["minutes"]))
+            m_tag = MISSION_LABEL.get(mission, mission)
+            label = "%s (%s%s %.2f m/s %s นาที)" % (
+                m_tag, "ขับจริง" if body["drive"] else "ทดลอง", " คนเสมือน" if virtual else "",
+                body["speed"], ("%g" % body["minutes"]))
             error = self.jobs.start("task", label, cmd, {"drive": body["drive"], "speed": body["speed"],
-                                                         "minutes": body["minutes"],
+                                                         "minutes": body["minutes"], "mission": mission,
                                                          "virtual": {"host": pc, "port": VIRTUAL_PORT} if virtual else None})
             if not error:
                 self.commander = None  # a new run: no tab leads it until one sends a command
+                self._begin_mission(body.get("minutes"))
+                if mission == "bag_only":
+                    threading.Thread(target=self._bag_only_worker, args=(body["drive"],), daemon=True).start()
             return (409 if error else 200), {"error": error}
         if path == "/api/check/start":
             try:
@@ -1633,6 +2026,12 @@ class Console:
             job = self.jobs.status()
             if not job["running"] or job["job"]["kind"] != "task":
                 return 409, {"error": "no task is running"}
+            if self.mission.running:
+                self._apply(self.mission.on_button(command, time.monotonic()))
+                token = session if isinstance(session, str) and SESSION.match(session) else secrets.token_hex(16)
+                self.commander = token
+                snap = self.mission.snapshot()
+                return 200, {"error": None, "session": token, "state": snap["state"], "say": snap["say"]}
             token = session if isinstance(session, str) and SESSION.match(session) else secrets.token_hex(16)
             try:
                 code, reply = self.fetch(self.run_url + "/command", {"command": command}, timeout=2.0)
@@ -1647,6 +2046,15 @@ class Console:
             return code, (dict(reply, session=token) if isinstance(reply, dict) else reply)
         if path.startswith("/api/jetson/"):
             return self.jetson.act(path[len("/api/jetson/"):], body.get("name"))
+        if path == "/api/mission/hear":
+            text = body.get("text")
+            if not isinstance(text, str) or not text.strip():
+                return 400, {"error": "text must be a string"}
+            self._apply(self.mission.on_heard(text, time.monotonic()))
+            return 200, {"error": None, "mission": self.mission.snapshot()}
+        if path == "/api/mission/event":
+            self._apply(self.mission.on_event(body.get("event", body), time.monotonic()))
+            return 200, {"error": None, "mission": self.mission.snapshot()}
         if path == "/api/skeleton":
             if not isinstance(body.get("on"), bool):
                 return 400, {"error": "send on: true or false"}
@@ -1680,7 +2088,15 @@ def handler_for(console):
                     name, kind = FILES[path]
                     self._send(200, (STATIC / name).read_bytes(), kind)  # read each time: edit, reload
                 elif path == "/api/state":
-                    self._send(200, console.state())
+                    query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                    session = self.headers.get("X-HMC-Session") or (query.get("session") or [None])[0]
+                    self._send(200, console.state(heartbeat=query.get("heartbeat") == ["1"], session=session))
+                elif path == "/usb-snap":
+                    snap = getattr(console.jetson, "webcam_snap", None)
+                    if snap is None:
+                        self._send(503, {"error": "no snapshot"})
+                    else:
+                        self._send(*snap())
                 elif path == "/api/run":
                     query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                     session = self.headers.get("X-HMC-Session") or (query.get("session") or [None])[0]
@@ -1754,6 +2170,10 @@ def handler_for(console):
             program = self.headers.get("X-HMC-Client")
             self.body = None
             code, answer = self._post(path, program)
+            if isinstance(answer, dict) and answer.get("error"):
+                console.note("error", "%s: %s" % (path, answer["error"]))
+            elif path in ("/api/stop", "/api/arm/stop", "/api/jetson/stop-all"):
+                console.note("info", "%s ok" % path)
             session = self.headers.get("X-HMC-Session") or ""
             try:
                 self._send(code, answer)
@@ -1816,10 +2236,19 @@ def main(argv=None):
             time.sleep(REFRESH)
     threading.Thread(target=keep_checking, daemon=True).start()
     console = Console(p, devices, jobs, jetson, pin=load_pin())
+
+    def keep_bag():
+        while True:
+            try:
+                console.probe_bag()
+            except Exception:  # noqa: BLE001 (a failed look must not stop the console)
+                pass
+            time.sleep(2.0)
+    threading.Thread(target=keep_bag, daemon=True).start()
     recorder = None
     try:  # telemetry.py (base/pi, the telemetry recorder's own file) records metrics while the console runs
         import telemetry
-        recorder = telemetry.Recorder()
+        recorder = telemetry.Recorder(logs_dir=console.log_root, db_path=console.db_path)
         recorder.start()
     except Exception:  # not there, or it failed: the console works without it
         recorder = None

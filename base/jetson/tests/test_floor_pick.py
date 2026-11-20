@@ -5,6 +5,7 @@ import io
 import json
 import math
 import os
+import tempfile
 import sys
 import tempfile
 import unittest
@@ -328,6 +329,21 @@ class PickSequenceTest(unittest.TestCase):
         self.assertEqual(res.code, "NOT_HOLDING")
         self.assertTrue(arm.events[0].startswith("drop_failed|NOT_HOLDING|"))
 
+    def test_a_pick_records_descend_lift_and_carry(self):
+        arm = FakeArm(bag=(0.32, 0.0, 0.245))
+        with tempfile.TemporaryDirectory() as folder:
+            fp = run(arm, pick_log_dir=folder, profile="safe")
+            res = fp.pick(0.32, 0.0)
+            self.assertTrue(res.ok, res)
+            names = [row["phase"] for row in fp.last_pick["phases"]]
+            self.assertIn("descend", names)
+            self.assertIn("lift", names)
+            self.assertIn("carry", names)
+            self.assertEqual(fp.last_pick["speeds"]["line_speed"], floor_pick.LINE_SPEED)
+            written = os.listdir(folder)
+            self.assertEqual(len(written), 1)
+            self.assertTrue(written[0].endswith("-floor.json"))
+
 
 class CarryPoseTest(unittest.TestCase):
     def test_default_bag_fits_inside_the_footprint_above_the_lidar(self):
@@ -336,6 +352,13 @@ class CarryPoseTest(unittest.TestCase):
         self.assertTrue(c["clears_lidar"])
         self.assertGreaterEqual(c["bag_bottom"], so100_ik.DECK_TOP + 0.02)
         self.assertGreater(c["grip"][2] - floor_pick.BAG_HANG, so100_ik.LIDAR_Z)
+
+    def test_the_fast_profile_raises_the_line_and_the_joints(self):
+        self.assertEqual(Planner(KIN).line_speed, floor_pick.LINE_SPEED)
+        fast = floor_pick.speed_profile.get("fast")
+        planner = Planner(KIN, fast["joint_scale"], line_speed=fast["line_speed"])
+        self.assertEqual(planner.line_speed, 0.08)
+        self.assertAlmostEqual(planner.vmax["shoulder_pan"], KIN.velocity["shoulder_pan"] * 0.45)
 
     def test_a_deep_bag_cannot_stay_inside_and_says_so(self):
         c = Planner(KIN, bag_half=(0.12, 0.15)).carry_plan()

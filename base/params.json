@@ -12,7 +12,7 @@
   "command_latency": 0.40,
   "robot_radius": 0.29,
   "robot_half_width": 0.20,
-  "robot_height": 0.24,
+  "robot_height": 1.05,
   "lidar_x": 0.175,
   "lidar_front_deg": 178.7,
   "camera_x": 0.205,
@@ -29,5 +29,14 @@
   "jetson_port": 5601,
   "jetson_silence": 0.5,
   "track_jump": 0.35,
-  "track_coast_max": 2.0
+  "track_coast_max": 2.0,
+  "self_mask": {
+    "skin_m": 0.015,
+    "sectors": [
+      {"name": "arm", "min_deg": 32, "max_deg": 55, "max_m": 0.36},
+      {"name": "cable", "min_deg": -55, "max_deg": -32, "max_m": 0.36},
+      {"name": "bag", "min_deg": -15, "max_deg": 15, "max_m": 0.30}
+    ],
+    "polygons": []
+  }
 }

@@ -30,7 +30,7 @@ import ports
 DEFAULT_FILE = os.path.expanduser("~/hmc-follow/front_camera.json")
 SNAP_URL = "http://127.0.0.1:%d/snap.jpg" % ports.WEBCAM
 PORT = ports.LOOK  # TCP: bag measurements for the Pi (base/pi/bag.py Look)
-WIDTH, HEIGHT = 640, 480
+WIDTH, HEIGHT = 640, 480  # webcam_view opens the AX1080P at this size, MJPG. fx, cx, cy are for these pixels.
 F_GUESS = 480.0  # px: the same AX1080P webcam as gripper_camera.F_GUESS (about 67 deg across); the fit sets it
 X_GUESS = 0.20  # m ahead of the turning centre ("about 0.2 m", the lane brief); measure it with a tape
 Z_GUESS = 0.25  # m above the floor: a guess, the fit sets it
@@ -59,15 +59,66 @@ def _rx(a):
     return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
 
 
+# The same three helpers are copied in so100_driver/bag_camera.py. The two trees do not import each other.
+def _lens(dist_model, dist):
+    """("pinhole" or "fisheye", (k1, k2, k3, k4)). An unknown name is an error, not a silent pinhole."""
+    model = "pinhole" if dist_model is None else str(dist_model)
+    if model not in ("pinhole", "fisheye"):
+        raise ValueError("unknown dist_model %r (expected \"pinhole\" or \"fisheye\")" % model)
+    coeffs = (list(dist) if dist is not None else []) + [0.0, 0.0, 0.0, 0.0]
+    return model, tuple(float(k) for k in coeffs[:4])
+
+
+def _fish_r(theta, k):
+    """OpenCV fisheye radius over f: theta * (1 + k1 theta^2 + k2 theta^4 + k3 theta^6 + k4 theta^8)."""
+    t2 = theta * theta
+    return theta * (1.0 + t2 * (k[0] + t2 * (k[1] + t2 * (k[2] + t2 * k[3]))))
+
+
+def _fish_theta(rd, k, iterations=20):
+    """Ray angle whose fisheye radius over f is rd (rd >= 0). Newton, held inside [0, pi/2].
+
+    OpenCV's model stops at 180 deg, so rd is clipped to pi/2. A derivative near zero, or a step
+    that is not a finite number, stops the loop instead of dividing.
+    """
+    rd = float(rd)
+    if not math.isfinite(rd) or rd <= 0.0:
+        return 0.0
+    rd = min(rd, math.pi / 2.0)
+    theta = rd
+    for _ in range(iterations):
+        t2 = theta * theta
+        f = _fish_r(theta, k) - rd
+        df = 1.0 + t2 * (3.0 * k[0] + t2 * (5.0 * k[1] + t2 * (7.0 * k[2] + t2 * 9.0 * k[3])))
+        if not math.isfinite(df) or abs(df) < 1e-14:
+            break
+        step = f / df
+        if not math.isfinite(step):
+            break
+        theta = theta - step
+        if theta < 0.0:
+            theta = 0.0
+        elif theta > math.pi / 2.0:
+            theta = math.pi / 2.0
+        if abs(step) < 1e-15:
+            break
+    return theta if math.isfinite(theta) else 0.0
+
+
 class FrontCamera:
     """Pinhole (fx = fy, cx, cy) at (x, y, z) in the robot frame, turned by yaw, pitch, roll (rad).
+
+    dist_model "fisheye" is OpenCV's equidistant lens (k1..k4), applied only in _project and _ray.
+    "pinhole" is no distortion: the default, and every calibration written before the 2026-11-20 lens.
 
     calibrated False (no file, or a file that says so): project and ray raise NotCalibrated, and the bag is not
     measured by this camera. The fit uses the same geometry without that check (_project, _ray)."""
 
     def __init__(self, fx=F_GUESS, x=X_GUESS, y=0.0, z=Z_GUESS, yaw=0.0, pitch=0.0, roll=0.0, cx=None, cy=None,
-                 width=WIDTH, height=HEIGHT, mirror=False, calibrated=False, info=None):
+                 width=WIDTH, height=HEIGHT, mirror=False, calibrated=False, info=None, dist_model="pinhole",
+                 dist=None):
         self.fx, self.x, self.y, self.z = float(fx), float(x), float(y), float(z)
+        self.dist_model, self.dist = _lens(dist_model, dist)
         self.yaw, self.pitch, self.roll = float(yaw), float(pitch), float(roll)
         self.width, self.height = int(width), int(height)
         self.cx = (self.width - 1) / 2 if cx is None else float(cx)  # pixel centres at whole numbers (OpenCV)
@@ -76,7 +127,8 @@ class FrontCamera:
         self.info = dict(info or {})
 
     def copy(self, **changes):
-        d = {k: getattr(self, k) for k in NAMES + ("cx", "cy", "width", "height", "mirror", "calibrated")}
+        d = {k: getattr(self, k) for k in NAMES + ("cx", "cy", "width", "height", "mirror", "calibrated",
+                                                   "dist_model", "dist")}
         d.update(changes)
         return FrontCamera(info=self.info, **d)
 
@@ -96,6 +148,17 @@ class FrontCamera:
         """(N, 3) robot points -> (N, 2) pixels, nan for points not in front of the camera."""
         pc = (np.asarray(pts, float).reshape(-1, 3) - self.position) @ self.rotation()
         z = pc[:, 2]
+        if self.dist_model == "fisheye":
+            # theta_d / r. On the optical axis that ratio's limit is 1/z. tan() in _ray blows up at 90 deg,
+            # so anything steeper than 89 deg is not in front.
+            r = np.hypot(pc[:, 0], pc[:, 1])
+            theta = np.arctan2(r, z)
+            good = (z > 1e-6) & np.isfinite(theta) & (theta < math.radians(89.0))
+            s = np.where(r > 1e-12, _fish_r(theta, self.dist) / np.maximum(r, 1e-12), 1.0 / np.maximum(z, 1e-12))
+            u = self.fx * pc[:, 0] * s
+            u = self.cx - u if self.mirror else self.cx + u
+            v = self.cy + self.fx * pc[:, 1] * s
+            return np.where(good[:, None], np.column_stack([u, v]), np.nan)
         good = z > 1e-6
         zs = np.where(good, z, 1.0)
         u = self.fx * pc[:, 0] / zs
@@ -104,7 +167,16 @@ class FrontCamera:
         return np.where(good[:, None], np.column_stack([u, v]), np.nan)
 
     def _ray(self, u, v):
-        d = np.array([(u - self.cx) / self.fx * (-1.0 if self.mirror else 1.0), (v - self.cy) / self.fx, 1.0])
+        if self.dist_model == "fisheye":
+            mx = (u - self.cx) / self.fx * (-1.0 if self.mirror else 1.0)
+            my = (v - self.cy) / self.fx
+            rd = math.hypot(mx, my)
+            if rd > 1e-12:
+                scale = math.tan(min(_fish_theta(rd, self.dist), math.radians(89.0))) / rd
+                mx, my = mx * scale, my * scale
+            d = np.array([mx, my, 1.0])
+        else:
+            d = np.array([(u - self.cx) / self.fx * (-1.0 if self.mirror else 1.0), (v - self.cy) / self.fx, 1.0])
         d = self.rotation() @ d
         return d / np.linalg.norm(d)
 
@@ -128,14 +200,15 @@ class FrontCamera:
         return {"calibrated": self.calibrated, "fx": self.fx, "cx": self.cx, "cy": self.cy, "width": self.width,
                 "height": self.height, "x": self.x, "y": self.y, "z": self.z, "yaw_deg": math.degrees(self.yaw),
                 "pitch_deg": math.degrees(self.pitch), "roll_deg": math.degrees(self.roll), "mirror": self.mirror,
-                "info": self.info}
+                "dist_model": self.dist_model, "dist": list(self.dist), "info": self.info}
 
     @classmethod
     def from_dict(cls, d):
         return cls(fx=d["fx"], x=d["x"], y=d["y"], z=d["z"], yaw=math.radians(d.get("yaw_deg", 0.0)),
                    pitch=math.radians(d.get("pitch_deg", 0.0)), roll=math.radians(d.get("roll_deg", 0.0)),
                    cx=d.get("cx"), cy=d.get("cy"), width=d.get("width", WIDTH), height=d.get("height", HEIGHT),
-                   mirror=d.get("mirror", False), calibrated=d.get("calibrated", False), info=d.get("info"))
+                   mirror=d.get("mirror", False), calibrated=d.get("calibrated", False), info=d.get("info"),
+                   dist_model=d.get("dist_model", "pinhole"), dist=d.get("dist"))
 
     def save(self, path=DEFAULT_FILE):
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -150,6 +223,29 @@ class FrontCamera:
                 return cls.from_dict(json.load(f))
         except (OSError, ValueError, KeyError, TypeError):
             return cls(calibrated=False, info={"why": "no calibration at %s" % path})
+
+
+def for_image(cam, image):
+    """The camera for this frame's pixel size.
+
+    The calibration (fx, cx, cy, width, height) is for WIDTH x HEIGHT. The same size is returned
+    unchanged. A frame that is a uniform scale of that size (the same aspect) gets fx, cx and cy
+    scaled about pixel centres, so a ray through a feature is the ray it had in the calibration
+    image. A different aspect (1280x720 against 640x480) is refused: scaling one axis would bend
+    the rays. Returns None in that case.
+    """
+    shape = np.asarray(image).shape
+    height, width = int(shape[0]), int(shape[1])
+    if width == cam.width and height == cam.height:
+        return cam
+    if cam.width <= 0 or cam.height <= 0:
+        return None
+    sx, sy = width / float(cam.width), height / float(cam.height)
+    if abs(sx - sy) > 0.02:
+        return None
+    scale = (sx + sy) / 2.0
+    return cam.copy(fx=cam.fx * scale, cx=(cam.cx + 0.5) * scale - 0.5, cy=(cam.cy + 0.5) * scale - 0.5,
+                    width=width, height=height)
 
 
 # ====================================================================== calibration fit
@@ -513,6 +609,11 @@ def measure_bag(cam, image, points, segmenter=None):
     if image is None:
         out["why"] = "no front camera frame"
         return out
+    scaled = for_image(cam, image)
+    if scaled is None:
+        out["why"] = "front frame is not %dx%d and not a uniform scale of it" % (cam.width, cam.height)
+        return out
+    cam = scaled
     pts = np.asarray(points, float).reshape(-1, 2)
     if len(pts) < 3:
         out["why"] = "fewer than 3 LiDAR points on the bag"

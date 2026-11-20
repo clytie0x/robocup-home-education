@@ -10,6 +10,9 @@ The flow matches the task's own words in /speech/heard first ("follow me", "stop
 "go back", "done", ...). Only sentences it does not handle in the current state go on to the brain
 on /speech/text, so one sentence never triggers twice. Intents from the brain are used as well.
 
+A full run is owned by the Pi console executive (hmc.flow). While that run is active this node
+stays quiet: a console_owns_run event parks it, and console_released lets it command again.
+
 Start: the flow enters ready once tts_node says so on /tts/ready (latched, so the first line is heard), or after
 START_WAIT s without it (warning logged; lines are still published), and once one /base/status was read
 (at most STATUS_WAIT s: link and person as the Pi has them, so a restarted flow does not take the person
@@ -22,20 +25,9 @@ and "okay"/"ok" only in a sentence of at most SHORT (3) words ("wait here", "ple
 ("don't", "never", ...) cancels only a word after it in the same clause, so "I don't know, stop" is stop.
 
 States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, the arm picks it):
-  ready      entry: say how to start. "follow me" -> following.
-             "carry the bag" (brain carry_bag, also in done and error with empty hands) -> bag first: follow_me,
-             wait (the Pi takes find_bag only in FOLLOW after wait), then pointing. Its pick does not go back:
-             done "I have the bag. Say follow me ..." holding it; "follow me" -> resume -> following carrying it;
-             there "stop" -> wait -> dropping_bag (hand it over), "go back" -> returning.
-             With the arm (close_pick, on by default) bag first looks first: choosing_bag.
-  choosing_bag  sent look_bags (bag_arm, bag_choice.py: the bags in the front camera, the arm does not move).
-             bags_seen: one bag in reach (or the one the colour / side said with "take the ... bag" names) ->
-             picking straight away, no base move; several -> "I see a blue bag on the left and a red bag on
-             the right. Which one?"; an answer (brain carry_bag with colour / side, "choice") -> picking.
-             A named bag that is not there is asked, never guessed. MAX_CHOICE_TRIES answers naming no single
-             bag, no bag in reach, bags_seen FAILED or none in LOOK_TIMEOUT -> the Pi's pointing (bag first).
-             Its pick holds the bag as bag first does; a MISSED grab looks again once for the same colour.
-             "stop" -> ready, "follow me" -> following.
+  ready      entry: say how to start. "follow me" -> following, but only when the base link is known up.
+             Unknown or down: say to start the Pi base program (LINK_ASKS times), then stay quiet.
+             No follow_me and no find_bag until base_link_ok.
   following  sent follow_me (Pi follow). Lost: say "Please come back." once, when /base/status "search"
              (base_bridge) ended without a lock, or after come_back_s (20 s) lost (each ask risks -150).
              "stop" / "wait" / "this is the car" / "we are here" (or "go back") -> wait (Pi wait),
@@ -45,7 +37,9 @@ States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, t
              bag_reached x,y -> picking (no arm: say what it would do, then returning).
              bag_failed with NOT_POINTED, NO_BAG, BLOCKED, TIMEOUT or LOST_BAG -> say a short reason and
              "Please point at the bag again." and send find_bag again (MAX_BAG_TRIES in a row, then at_car);
-             NOT_POINTED first says "Please step back two steps and point at the bag." (the camera sees
+             NOT_POINTED, when a short "left" or "right" was already heard, uses that side once
+             ("No pointing was seen in 20 s. I will use the left you said.") before the step-back retry;
+             otherwise NOT_POINTED first says "Please step back two steps and point at the bag." (the camera sees
              the shoulder only from about 2.2 m);
              bag_failed REFUSED "... not in IDLE" (the Pi never got follow): follow_me, wait, find_bag again, once.
              any other bag_failed (REFUSED, NO_LINK, CANCELLED) or no answer in bag_timeout -> at_car.
@@ -63,7 +57,8 @@ States (spec "HmcFlow states"; the robot finds and approaches the pointed bag, t
              bag counts as path), queue and start heading. "stop"/"wait" -> wait (paused),
              "go back"/"continue" -> resume; after RESUME_AFTER_S (20 s) it only asks (never moves by itself), "Going back to
              the start.". at_start -> dropping_bag (no arm: say "Here is your bag." -> done)
-  dropping_bag  sent drop_bag {"x": 0.31, "y": 0.0}. drop_done -> say "Here is your bag." -> done.
+  dropping_bag  sent drop_bag at DROP_AT (so100_ik.reachable_drop, not the old 0.31 m edge).
+                drop_done -> say "Here is your bag." -> done.
              drop_failed / timeout -> error
   done       "follow me" starts a new run
   error      on base_link_lost from following / pointing / at_car / picking / returning with no base_link_ok
@@ -93,7 +88,14 @@ CHOOSING = "choosing_bag"  # bag first, close: the front camera's bags, "Which o
 LOOK_TIMEOUT = 15.0  # s for bags_seen after look_bags, then the Pi's pointing
 MAX_CHOICE_TRIES = 2  # answers that name no single bag, then the Pi's pointing
 NEEDS_BASE = (FOLLOWING, POINTING, AT_CAR, PICKING, RETURNING)  # a lost Pi link here is an error; not after at_start
-DROP_AT = {"x": 0.31, "y": 0.0}  # m, robot frame: where the arm puts the bag down at the start
+def _drop_at():
+    """Where the arm puts the bag down, from the arm's reach, not a fixed 0.31 m."""
+    import so100_ik
+    found = so100_ik.reachable_drop()
+    return {"x": found["x"], "y": found["y"]}
+
+
+DROP_AT = _drop_at()  # m, robot frame: reachable place at the start of the task
 MAX_BAG_TRIES = 3  # bag_failed answered with "point again" this many times in a row, then at_car
 RETRY_CODES = ("NOT_POINTED", "NO_BAG", "BLOCKED", "TIMEOUT", "LOST_BAG")  # the Pi looked: point again
 REMEASURE_CODES = ("MISSED", "NOT_FOUND")  # a grab that missed: the Pi measures the bag once more
@@ -107,6 +109,8 @@ STATUS_WAIT = 1.0  # s to wait at start for one /base/status (link and person as
 # s a lost Pi link may last before the flow gives up (error): base_bridge reconnects and restores the
 # Pi's intent itself, so a short drop needs nothing from the flow
 LINK_GRACE_S = 4.0
+LINK_ASKS = 2  # spoken refusals while the base link is unknown or down; then the reason sticks
+BASE_LINK_SAY = "The base program is not running. Start the Pi base program."
 RESUME_AFTER_S = 20.0  # s into a "stop"/"wait" pause on the way back, the robot asks to be told to go on
 COME_BACK_TEXT = "Please come back."
 STEP_BACK_TEXT = "Please step back two steps and point at the bag."  # the camera sees the shoulder from about 2.2 m
@@ -155,6 +159,21 @@ def classify(text):
     return None
 
 
+_SIDE = re.compile(r"\b(left|right)\b")
+
+
+def spoken_side(text):
+    """left or right in a short sentence, or None. A long remark does not choose a side."""
+    low = (text or "").lower().strip()
+    if len(re.findall(r"[a-z']+", low)) > SHORT:
+        return None
+    found = None
+    for match in _SIDE.finditer(low):
+        if not _negated(low, match.start()):
+            found = match.group(1)
+    return found
+
+
 def should_start(tts_ready, waited_s, wait_s=START_WAIT, status_seen=True, status_wait_s=STATUS_WAIT):
     """The node starts the flow once tts_node published /tts/ready (or after wait_s without it) and a
     /base/status was read (or after status_wait_s without one). Not the subscriber count of /tts/say: stt_node
@@ -191,9 +210,12 @@ class HmcFlow:
         self.state = None
         self.deadline = None  # arm timeout of the current state
         self.carrying = False
-        self.idle_retried = False  # this bag search was already resent after an "IDLE" refusal from the Pi
-        self.bag_first = False  # this pick was asked for before any following: hold the bag afterwards, don't go back
-        self.link_ok = None  # None until base_bridge says anything
+        self.link_ok = None  # None until base_bridge says anything; None is not ready
+        self.link_tries = 0
+        self.link_stuck = False
+        self.reason_code = None
+        self.side = None  # a short "left" or "right" heard during the run
+        self.side_fallback_used = False
         self.person_visible = False
         self.lost_since = None  # following: when the operator was lost (None = seen)
         self.come_back_said = False
@@ -204,6 +226,7 @@ class HmcFlow:
         self.paused = False  # returning: halted by "stop"
         self.paused_at = None
         self.pause_asked = False  # returning: "Say continue ..." said for this pause
+        self.parked = False  # the console executive owns the run: this flow must not command
 
     # ---------------- helpers ----------------
     @staticmethod
@@ -227,7 +250,10 @@ class HmcFlow:
         elif state == POINTING:
             self.deadline = now + self.bag_timeout
             out.append(("say", msg or self.point_text))
-            out.append(self._cmd("find_bag", again=True) if again else self._cmd("find_bag"))
+            if self.link_ok is True:
+                out.append(self._cmd("find_bag", again=True) if again else self._cmd("find_bag"))
+            else:
+                out.append(("log", "(find_bag withheld: BASE_LINK_DOWN)"))
         elif state == PICKING:
             self.deadline = now + self.grab_timeout
             more = {k: v for k, v in (("top", self.bag_top), ("yaw", self.bag_yaw)) if v is not None}
@@ -246,9 +272,28 @@ class HmcFlow:
                     ("say", (msg or "Sorry, something went wrong.") + " Say follow me to start again.")]
         return out
 
+    def _blocked_link(self):
+        """None when the base link is known up. Otherwise no follow_me and no find_bag.
+
+        An unknown link counts as down. Two refusals are spoken; after that the reason sticks
+        and further tries are logged only, until base_link_ok.
+        """
+        if self.link_ok is True:
+            self.link_tries = 0
+            self.link_stuck = False
+            return None
+        self.reason_code = "BASE_LINK_DOWN"
+        if self.link_stuck:
+            return [("log", "(BASE_LINK_DOWN)")]
+        self.link_tries += 1
+        if self.link_tries >= LINK_ASKS:
+            self.link_stuck = True
+        return [("say", BASE_LINK_SAY)]
+
     def _start_following(self, now):
-        if self.link_ok is False:
-            return [("say", "I cannot reach my wheels. Please check the base.")]
+        blocked = self._blocked_link()
+        if blocked is not None:
+            return blocked
         return [self._cmd("follow_me")] + self._goto(FOLLOWING, now)
 
     def _after_pick(self, now):
@@ -328,7 +373,11 @@ class HmcFlow:
 
     def _point(self, now, msg=""):
         """pointing afresh: from following or at_car (not a retry)."""
-        self.bag_tries, self.remeasured, self.idle_retried = 0, False, False
+        blocked = self._blocked_link()
+        if blocked is not None:
+            return blocked
+        self.bag_tries, self.remeasured = 0, False
+        self.side_fallback_used = False
         return self._goto(POINTING, now, msg)
 
     def _at_start(self, now):
@@ -346,8 +395,13 @@ class HmcFlow:
 
     def on_heard(self, text, now):
         """Raw speech. Handled here if it is a task word for this state, else forwarded to the brain."""
+        if self.parked:
+            return [("log", "(parked: the console executive owns this run)")]
         first = self._start_first(now)
         self.last_prompt = max(self.last_prompt, now)  # someone is talking: don't nag
+        side = spoken_side(text)
+        if side:
+            self.side = side
         kind = classify(text)
         if kind is None and self.state == RETURNING:
             low = text.lower()
@@ -357,6 +411,8 @@ class HmcFlow:
         return first + (out if out is not None else [("text", text)])
 
     def on_intent(self, intent, now):
+        if self.parked:
+            return [("log", "(parked: the console executive owns this run)")]
         first = self._start_first(now)
         kind = INTENT_KINDS.get(intent.get("action", "none"))
         params = intent.get("params") if isinstance(intent.get("params"), dict) else {}
@@ -439,6 +495,15 @@ class HmcFlow:
         return None
 
     def on_event(self, ev, now):
+        name = ev.strip().split("|", 1)[0].strip().lower()
+        if name == "console_owns_run":
+            self.parked = True
+            return [("log", "(parked: the console executive owns this run)")]
+        if name == "console_released":
+            self.parked = False
+            return [("log", "(console released this run)")]
+        if self.parked:
+            return [("log", "(parked)")]
         if self.state is None:  # base_bridge connects before tts_node: note it (link_ok, ...), don't start
             self._event(ev, now)
             return [("log", "(event '%s' before start: noted)" % ev.strip())]
@@ -470,6 +535,10 @@ class HmcFlow:
         if name == "base_link_ok":
             self.link_ok = True
             self.link_lost_at = None
+            self.link_tries = 0
+            self.link_stuck = False
+            if self.reason_code == "BASE_LINK_DOWN":
+                self.reason_code = None
             return []
         if name == "base_link_lost":
             self.link_ok = False
@@ -538,11 +607,12 @@ class HmcFlow:
             if self.use_arm:
                 return self._goto(PICKING, now)
             return [("say", "I would pick up the bag now.")] + self._after_pick(now)
-        if code == "REFUSED" and "IDLE" in text and not self.idle_retried:
-            # the Pi never got follow (spoken before its run started, or a new run): bag is taken only in FOLLOW
-            # after wait, so send those and look again, once per search
-            self.idle_retried = True
-            return [self._cmd("follow_me"), self._cmd("wait"), self._cmd("find_bag")]
+        if code == "NO_LINK":
+            self.link_ok = False
+        if code == "NOT_POINTED" and self.side and not self.side_fallback_used and self.link_ok is True:
+            self.side_fallback_used = True
+            line = "No pointing was seen in 20 s. I will use the %s you said." % self.side
+            return [("say", line), self._cmd("find_bag", side=self.side, again=True)]
         first = [("say", STEP_BACK_TEXT)] if code == "NOT_POINTED" else []  # too close for the camera to see it
         if code in RETRY_CODES and self.bag_tries < MAX_BAG_TRIES:
             self.bag_tries += 1
@@ -553,6 +623,8 @@ class HmcFlow:
         """One /base/status from base_bridge (also before start). The first one sets link_ok and person_visible:
         the bridge sends base_link_ok and see_person only on a change, so a restarted flow would never hear
         them. While following, a Pi search that ended without a lock asks the operator back."""
+        if self.parked:
+            return []
         out = []
         if not self.status_seen:
             self.status_seen = True
@@ -572,6 +644,8 @@ class HmcFlow:
         return out
 
     def on_tick(self, now):
+        if self.parked:
+            return []
         s = self.state
         if self.link_lost_at is not None and s in NEEDS_BASE:
             if now - self.link_lost_at >= LINK_GRACE_S:

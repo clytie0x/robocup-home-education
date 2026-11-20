@@ -63,6 +63,7 @@ import command_server
 import dashboard as dashboard_module
 import depth_obstacles
 import escape as escape_module
+import footprint
 import geometry
 import keyframes as keyframes_module
 import lidar
@@ -151,7 +152,9 @@ SEARCH_MAX = 4 * math.pi  # rad; after two full turns, stand and wait
 SEARCH_HOLD = 3.0  # s held on a centred person who does not lock (a stranger, too far): then turn past them
 SEARCH_SKIP = 1.5  # s of turning on, past them, before a centred person can stop the turn again
 HISTORY = 2.0  # s of sent commands kept for the latency prediction
-CLOSED_GATE_SPEED = 0.15  # m/s; above this --drive needs the braking numbers measured (params.speed_gates_open)
+CLOSED_GATE_SPEED = 0.15  # m/s; above this --drive needs the braking numbers measured (params.speed_gates_open).
+# 0.15 itself is allowed once params.json max_speed is raised. tools/brake_distance.py and follow_speed.py
+# measure the stop first; this file does not change the cap.
 STILL = (0.0, 0.0, 0.0)  # the dry run's pose: zero motion
 LOG_ROOT = Path(__file__).resolve().parent / "logs"  # on the Pi: ~/hmc-base/logs
 FOLLOW, RETURN, DONE = "follow", "return", "done"  # the phases of a run
@@ -770,7 +773,12 @@ def cycle(state, now):
 
     # 1. Sensors. Broken odometry means we no longer know where we are: stop (Review Focus 5).
     try:
-        pose = state.wheels.read_odom() if state.wheels is not None else STILL
+        if state.wheels is None:
+            pose = STILL
+        elif hasattr(state.wheels, "cached_odom"):
+            pose = state.wheels.cached_odom()
+        else:
+            pose = state.wheels.read_odom()
     except (ValueError, OSError) as error:  # pyserial's SerialException is an OSError
         return _end(state, now, "odometry", error)
     if state.wheels is not None:
@@ -826,14 +834,21 @@ def cycle(state, now):
 
     # 3. The brain. While learning, RealSenses cannot lock by itself: enrol again whenever unlocked.
     senses = state.senses
-    senses.learned = follower.operator_look.count
+    senses.learned = getattr(follower, "learned_count", follower.operator_look.count)
     enrol = None
     if senses.learned < LEARNED and not senses.locked and answer is not None:
         # The first enrol takes the one person in view; once a look is learned, a re-enrol
         # must look like the operator, or a stranger who steps in would be learned too.
-        accept = (lambda look: follower.score(look) >= LOOK_MATCH) if senses.learned else None
+        # fused_score also counts a continuous LiDAR track, so a look dimmed by the light still passes.
+        if senses.learned and hasattr(follower, "fused_score"):
+            accept = lambda look: follower.fused_score(look, continuous=True) >= LOOK_MATCH
+        else:
+            accept = None
         result = senses.enrol(now, sensed, answer, accept)
-        enrol = result if isinstance(result, str) else "locked"
+        if isinstance(result, str):
+            enrol = result
+        else:
+            enrol = "locked" if not senses.enrol_how else "locked (%s)" % senses.enrol_how
         if enrol != state.enrol_said:
             print("enrol: %s" % enrol)
             state.enrol_said = enrol
@@ -870,7 +885,11 @@ def cycle(state, now):
         stop = "wheels"  # held for wheels that did not turn (_watch_wheels), until resume or follow
     if stop is None and senses.ambiguous and state.phase == FOLLOW:
         stop = "ambiguous"  # someone is right at the operator: wait, never guess who is who
-    points = lidar_points = scan_points(scan, p)
+    raw_lidar = scan_points(scan, p)
+    # The arm, cable and bag are rigid in the base frame. Leaving them in this cloud stopped every
+    # cycle on 18 Nov for an "obstacle" 0.26 m away, the outline's own corner.
+    lidar_points = footprint.drop_self(raw_lidar, p, sensor="lidar")
+    points = lidar_points
     if depth_points is not None:
         points = numpy.vstack([points, depth_points])
     v, w = state.body.command()
@@ -901,6 +920,7 @@ def cycle(state, now):
     # SLOW_CYCLE: the next cycle may come that late (a later one ends the run), so the command runs that long.
     # BAG creeping: the locked bag's own points are left out, only they may come closer than the clearance.
     checked = state.bag.safety_points(points) if state.phase == BAG else points
+    judged = (v, w)
     if stop is None and any(safety.must_stop(checked, mv, mw, p, cycle=SLOW_CYCLE) for mv, mw in state.coast.motions(v, w, now)):
         stop = "obstacle"
     if stop is None and v < 0 and not escape_module.rear_clear(points, state.cable.lay.points(pose), -v, p, -v * SLOW_CYCLE):
@@ -914,6 +934,12 @@ def cycle(state, now):
             stop = "idle"
         elif state.phase != DONE:
             stop = _held_now(state)
+    if stop == "obstacle":
+        cause = safety.stop_cause(lidar_points, depth_points, judged[0], judged[1], p, cycle=SLOW_CYCLE)
+    elif stop is not None:
+        cause = safety.nearest_return(lidar_points, depth_points)
+    else:
+        cause = None
     if stop is not None:
         v = w = 0.0
         if state.velocity is not None:
@@ -931,6 +957,8 @@ def cycle(state, now):
     if cycle_time > SLOW_CYCLE:
         return _end(state, now, "slow cycle", "%.2f s from cycle start to send" % cycle_time)
     if state.wheels is not None:
+        if v > 0:
+            v, w = wheels_module.clamp_curvature(v, w, p)
         try:
             state.wheels.send_reverse(-v, w) if v < 0 else state.wheels.send(v, w)  # backward only in an escape
         except (ValueError, OSError) as error:
@@ -939,8 +967,14 @@ def cycle(state, now):
         state.history = [h for h in state.history if h[0] > now - HISTORY] + [(now, v, w)]  # only what reached the wheels
     state.coast.sent(v, w, now)
     if frame is not None and state.link is not None:
-        if state.phase == BAG and state.bag.wants_pose:
-            state.link.send(frame, pose=True)  # keypoints only while the bag task looks for the pointing
+        state._pose_tick = getattr(state, "_pose_tick", 0) + 1
+        want_pose = (state.phase == BAG and state.bag.wants_pose) or (
+            state.dashboard is not None and state._pose_tick % 2 == 0)
+        if want_pose:
+            try:
+                state.link.send(frame, pose=True)  # keypoints for bag pointing and live skeleton overlay (5 Hz)
+            except TypeError:
+                state.link.send(frame)
         else:
             state.link.send(frame)
     if state.n % SAVE_EVERY == 0:
@@ -975,6 +1009,9 @@ def cycle(state, now):
         "memory": len(getattr(follower, "obstacle_memory", {}) or {}),  # the brain's remembered obstacles
         "nearest": float(numpy.hypot(points[:, 0], points[:, 1]).min()) if len(points) else None,  # m from the base centre
         "stop": stop,
+        # sensor + bearing of the return that stopped us (blocking) or the nearest return on any other stop
+        "stop_cause": cause,
+        "self_mask": {"lidar": footprint.LAST.get("lidar"), "depth": getattr(depth_obstacles.points, "last", None)},
         "search": None if search is None else ("hold" if search == (0.0, 0.0) else "turn"),
         "why": getattr(senses, "why", None),  # the senses rule behind an ambiguous cycle or a dropped track
         "enrol": enrol,
@@ -1015,8 +1052,19 @@ def cycle(state, now):
     state.log.write(record)
     if state.dashboard is not None:
         state.dashboard.latest = record
+        if link_alive and answer is not None:
+            w = int(getattr(frame, "width", 0) or (frame.rgb.shape[1] if getattr(frame, "rgb", None) is not None else 320))
+            h = int(getattr(frame, "height", 0) or (frame.rgb.shape[0] if getattr(frame, "rgb", None) is not None else 240))
+            people = []
+            for s in answer.people:
+                x1, y1, x2, y2 = s.box
+                kp = [[w - k[0], k[1], k[2]] for k in s.kp] if s.kp else None
+                people.append({"box": [w - x2, y1, w - x1, y2], "kp": kp})
+            state.dashboard.skeleton = {"w": w, "h": h, "people": people}
+        else:
+            state.dashboard.skeleton = {"w": None, "h": None, "people": []}
         try:  # references only, for the console's Live tab (live_feed.py): never let it stop a cycle
-            state.dashboard.feed.put(frame, lidar_points, record, now)
+            state.dashboard.feed.put(frame, raw_lidar, record, now)
         except Exception:
             pass
     PLANNER.update(remote=0, local=0)
@@ -1100,7 +1148,7 @@ def refusal(drive, max_speed, p):
 
 def open_wheels(drive, p):
     """The wheel port is opened only with --drive."""
-    return wheels_module.Wheels(p) if drive else None
+    return wheels_module.Wheels(p, poll_odom=True) if drive else None
 
 
 # Ctrl+C, kill, and SIGHUP from a dropped ssh session (SIGHUP does not exist on Windows).

@@ -694,6 +694,11 @@ class Recorder:
             self.pending = (rows + self.pending)[-MAX_PENDING:]
             self._error("write", error)
             print("telemetry: cannot write %s: %s" % (self.db_path, error), file=sys.stderr)
+            return
+        try:  # a read-only connection sees the latest rows once the WAL is checkpointed
+            self.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except Exception:
+            pass
 
     def prune(self, now):
         self.pruned = now
