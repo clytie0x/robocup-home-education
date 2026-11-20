@@ -63,6 +63,21 @@ class BagCalTest(unittest.TestCase):
         self.assertTrue(out["undetermined"])
         self.assertFalse(out["camera"].calibrated)
 
+    def test_a_refit_keeps_the_fisheye_fixed_and_still_finds_fx(self):
+        truth = TRUE.copy(dist_model="fisheye", dist=(-0.12, 0.054, 0.0, 0.0))
+        out = bc.fit(frames_from(truth, PLACES, noise=0.0), truth.copy(fx=440.0), ("fx",))
+        self.assertEqual(out["camera"].dist_model, "fisheye")
+        self.assertEqual(out["camera"].dist, (-0.12, 0.054, 0.0, 0.0))
+        self.assertAlmostEqual(out["camera"].fx, truth.fx, delta=0.05)
+        self.assertLess(out["rms_px"], 0.05)
+
+    def test_a_session_can_pass_a_fixed_lens_into_the_start(self):
+        cam = bc.camera_start({"dist_model": "fisheye", "dist": [-0.12, 0.05]}, 0.375)
+        self.assertEqual(cam.dist_model, "fisheye")
+        self.assertEqual(cam.dist, (-0.12, 0.05, 0.0, 0.0))
+        self.assertAlmostEqual(cam.x, 0.375)
+        self.assertEqual(bc.camera_start({}, 0.375).dist_model, "pinhole")
+
     def test_corners_of_a_synthetic_bag_blob(self):
         img = np.full((480, 640, 3), (200, 200, 120), np.uint8)   # pale floor (BGR)
         img[250:400, 300:460] = (60, 30, 220)                     # red face
