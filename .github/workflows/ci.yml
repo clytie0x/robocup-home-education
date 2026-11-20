@@ -63,3 +63,21 @@ jobs:
       - name: voice (voice_assistant, no ROS)
         working-directory: voice/voice_assistant
         run: python -m pytest -q
+
+  # MuJoCo bag-grasp sim. CPU torch only. The tests are a nominal grasp plus toy PPO/SAC.
+  rl-grasp:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sim
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          pip install mujoco numpy pytest
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Test
+        run: python -m pytest -q
