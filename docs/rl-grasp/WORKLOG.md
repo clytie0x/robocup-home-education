@@ -155,3 +155,69 @@ Both policies beat the scripted pick on these seeds: more successes, and a lower
 - The 11.56 s floor is the nominal scripted duration in this sim, not a measured real pick. It stops the "do nothing" exploit. It does not make a fast miss cheaper than a slow one, except when the miss is also a success.
 - The default camera is tight because the arm only closes cleanly in a few centimetres of wall distance. That is a property of this scene, not a calibration. `--hard` is still there, and it will look much worse.
 - Flex warnings still show up during training. A few steps report a stiff inertia. They did not stop the runs, and they are not a measured rope modulus.
+
+## Close height 0.21 (bag-posture)
+
+20 Nov 2026. The robot parameter `bag_cam_close_h` moves from 0.19 m to 0.21 m, with a raise that tilts only to `HOLD_PITCH` -35 deg and a carry bottom of 0.28 m. Tier 1 scores the lift and the 3 s hold. It does not run the raise, the side swing, or the put-down, so those two posture numbers are not copied into the sim. The scripted close height is 0.21, and a network output of 0 is that pick again (height bounds 0.17–0.25).
+
+The same plate still holds a nominal bag. One nominal scripted try is 9.560 s of sim time (was 11.560 s at 0.19). The miss charge `MINIMUM_TRY_S` is that measurement.
+
+Full suite: `cd sim && python3 -m pytest -q` — 28 passed in 8.45 s.
+
+Scripted pick, seeds 1000–1099, default ranges:
+
+```text
+python3 -m rl_grasp evaluate --policy scripted --episodes 100 --seed 1000 --tries 1
+successes: 71
+median_time_s: 11.200
+collision_count: 0
+
+python3 -m rl_grasp evaluate --policy scripted --episodes 100 --seed 1000 --tries 4
+successes: 77
+median_time_s: 11.200
+collision_count: 1
+```
+
+Retrain, same commands as the 0.19 run:
+
+```text
+python3 -u -m rl_grasp train --algo ppo --steps 50000 --seed 0 --workers 4 --tries 1 --out ../docs/rl-grasp/policies/ppo50k.pt
+episodes: 50000
+mean_return: 5.5051
+wall_s: 5472.325
+tries_per_s: 9.14
+median_time_s: 9.140
+instant_fraction: 0.186
+
+python3 -u -m rl_grasp train --algo sac --steps 50000 --seed 0 --workers 4 --tries 1 --out ../docs/rl-grasp/policies/sac50k.pt
+episodes: 50000
+mean_return: 6.6190
+wall_s: 5871.829
+tries_per_s: 8.52
+median_time_s: 10.100
+instant_fraction: 0.152
+```
+
+sha256, also in `docs/rl-grasp/policies/SHA256SUMS`:
+
+```text
+abe62ad40d60f24435f45e9f6622e3c63fb912df31f469266660af71eb441ad8  ppo50k.pt
+87ff2238aa9615e9229c76283a1732ba81c3e4a788f65d81da77f08bd6be92cc  sac50k.pt
+```
+
+Same 100 seeds. Old is the 0.19 run recorded above. New is close height 0.21.
+
+| policy | tries | old success | old median | old collisions | new success | new median | new collisions |
+|---|---|---|---|---|---|---|---|
+| scripted | 1 | 75/100 | 11.580 s | 0 | 71/100 | 11.200 s | 0 |
+| scripted | 4 | 80/100 | 11.580 s | 1 | 77/100 | 11.200 s | 1 |
+| PPO | 1 | 77/100 | 8.920 s | 0 | 78/100 | 8.920 s | 0 |
+| PPO | 4 | 89/100 | 8.920 s | 1 | 91/100 | 8.920 s | 4 |
+| SAC | 1 | 80/100 | 9.620 s | 1 | 79/100 | 9.800 s | 0 |
+| SAC | 4 | 94/100 | 9.620 s | 2 | 90/100 | 9.800 s | 0 |
+
+### Self-review
+
+- The higher close still pinches the same plate, and the nominal try got exactly 2 s shorter. That is joint-path time, not a change to the 3 s hold. The miss charge had to be remeasured or a fast success at 9.56 s would have been charged as if it were still an 11.56 s miss.
+- `HOLD_PITCH` and `bag_carry_bottom` are the raise and the carry. Tier 1 stops at "lifted and held 3 s", so mirroring them would add a phase the reward does not score.
+- At 0.21 the scripted pick loses a few successes (75 to 71, 80 to 77) and PPO's 4-try collision count goes from 1 to 4. The policies still beat the scripted pick on success and on time. One hundred seeds is one draw.

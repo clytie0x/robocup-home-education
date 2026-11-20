@@ -44,7 +44,7 @@ Observation, 24 numbers, in the arm's user frame (forward, left, height above th
 
 The handle and the rim are projected through a random wide-FOV fisheye and back-projected with one fixed nominal model. Nothing is read from `front_camera.json`.
 
-Action, clipped to a fixed range: forward offset (m), sideways offset (m), close height (m), pitch (deg), roll offset (deg), speed scale. The scripted baseline uses `TRIES` from `bag_camera.py` for the first two of those, close height 0.19 m, roll offset 0 and speed scale 1.
+Action, clipped to a fixed range: forward offset (m), sideways offset (m), close height (m), pitch (deg), roll offset (deg), speed scale. The scripted baseline uses `TRIES` from `bag_camera.py` for the first two of those, close height 0.21 m, roll offset 0 and speed scale 1.
 
 Success is both finger pads on the rim or a handle, the bag bottom at least 2 cm off the floor, held 3 s, slip under 1 cm, and no collision. The reward is +10, -5 on a collision, -2 if the jaws had the bag and then lost it, and -0.1 per second (the tier-2 time term, -0.01 per 10 Hz step).
 
@@ -58,4 +58,4 @@ MuJoCo 4.0.1 has no `<composite>` cable. Handles are `flexcomp dim="1"` rods: ro
 
 A full try is about 11 s of simulation, including the 3 s hold. A rejected reach used to return in one step and score 0, which was better than a real miss, so a long PPO run collapsed onto that and reported hundreds of tries per second. A miss is now charged at least the scripted try's duration.
 
-On the narrowed default ranges, 50k PPO tries took 5455 s (9.17 tries/s) and 50k SAC tries took 6307 s (7.93 tries/s), 4 workers. On the same 100 seeds, scripted was 75/100 and 80/100 (1 and 4 tries, median 11.580 s). PPO was 77/100 and 89/100 (median 8.920 s). SAC was 80/100 and 94/100 (median 9.620 s). Details are in `WORKLOG.md`.
+The close height is 0.21 m, matching `bag_cam_close_h`. On the default ranges, 50k PPO tries took 5472 s and 50k SAC tries took 5872 s (4 workers). On the same 100 seeds, scripted was 71/100 and 77/100 (1 and 4 tries, median 11.200 s). PPO was 78/100 and 91/100 (median 8.920 s). SAC was 79/100 and 90/100 (median 9.800 s). The checkpoints are in `policies/`. Details are in `WORKLOG.md`.

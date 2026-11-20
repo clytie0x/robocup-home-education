@@ -1,5 +1,6 @@
 """Hand-made success and reward cases. No simulator."""
 
+from rl_grasp import constants as C
 from rl_grasp.reward import judge, outcome_reward
 
 
@@ -42,6 +43,6 @@ def test_reward_uses_the_named_terms():
 def test_quitting_early_does_not_beat_a_real_miss():
     # A rejected reach used to return time 0 and reward 0, which beat a full miss.
     instant = outcome_reward(False, False, False, 0.0)
-    full = outcome_reward(False, False, False, 11.56)
+    full = outcome_reward(False, False, False, C.MINIMUM_TRY_S)
     assert instant == full
-    assert instant < outcome_reward(True, False, False, 11.56)
+    assert instant < outcome_reward(True, False, False, C.MINIMUM_TRY_S)

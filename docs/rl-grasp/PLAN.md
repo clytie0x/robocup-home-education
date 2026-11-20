@@ -6,6 +6,7 @@ Update, 20 Nov 2026: tier 1 now lives in `sim/rl_grasp` (see `docs/rl-grasp/READ
 - The sim's position-actuator kp, kv and forcerange are the bench stand-ins. kp is 40 and kv is 2, up from the bench's 20 and 1, so the -60 deg reach holds against gravity. They are not an STS3215 stall torque and not a `mujoco.sysid` fit. `mujoco.sysid` was not run.
 - Training uses MuJoCo, CPU PyTorch and numpy only. PPO and SAC are in this repo. Gymnasium, stable-baselines3, Menagerie, MJX, Warp, Isaac, ManiSkill and Brax are not used.
 - The default camera and dynamics draws are a narrow band around the placeholder (a few centimetres, 2% of focal length, mass and friction ±20%, actuators ±10%). `--hard` is the wide draw in section 5.3 and 5.7. The wide draw made the scripted pick miss or collide, because the close only works when the estimated wall is about 0.29–0.32 m.
+- The robot close height `bag_cam_close_h` is 0.21 m (bag-posture change). Section 2.4 below still records the 0.19 m value from 20 Nov morning. The tier-1 sim follows 0.21. The raise to a carry bottom of 0.28 m and `HOLD_PITCH` -35 deg are after the lift-and-hold that tier 1 scores, so the sim does not model them.
 
 The sentence below, that nothing was committed, describes the research session. The tier-1 package is a later change.
 
