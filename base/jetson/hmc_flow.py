@@ -210,6 +210,7 @@ class HmcFlow:
         self.state = None
         self.deadline = None  # arm timeout of the current state
         self.carrying = False
+        self.idle_retried = False  # this bag search was already resent after an "IDLE" refusal from the Pi
         self.link_ok = None  # None until base_bridge says anything; None is not ready
         self.link_tries = 0
         self.link_stuck = False
@@ -376,7 +377,7 @@ class HmcFlow:
         blocked = self._blocked_link()
         if blocked is not None:
             return blocked
-        self.bag_tries, self.remeasured = 0, False
+        self.bag_tries, self.remeasured, self.idle_retried = 0, False, False
         self.side_fallback_used = False
         return self._goto(POINTING, now, msg)
 
@@ -609,6 +610,11 @@ class HmcFlow:
             return [("say", "I would pick up the bag now.")] + self._after_pick(now)
         if code == "NO_LINK":
             self.link_ok = False
+        if code == "REFUSED" and "IDLE" in text and not self.idle_retried:
+            # the Pi never got follow (spoken before its run started, or a new run): bag is taken only in FOLLOW
+            # after wait, so send those and look again, once per search
+            self.idle_retried = True
+            return [self._cmd("follow_me"), self._cmd("wait"), self._cmd("find_bag")]
         if code == "NOT_POINTED" and self.side and not self.side_fallback_used and self.link_ok is True:
             self.side_fallback_used = True
             line = "No pointing was seen in 20 s. I will use the %s you said." % self.side
