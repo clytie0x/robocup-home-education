@@ -1547,7 +1547,9 @@ class Console:
             return self._drop
         try:
             import importlib.util
-            path = HERE.parent / "jetson" / "so100_ik.py"
+            path = HERE / "jetson" / "so100_ik.py"  # on the Pi: deploy.sh puts it beside console.py
+            if not path.exists():
+                path = HERE.parent / "jetson" / "so100_ik.py"  # in the repo
             spec = importlib.util.spec_from_file_location("so100_ik_console", path)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)

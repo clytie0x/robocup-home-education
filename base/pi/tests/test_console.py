@@ -1057,6 +1057,20 @@ class RobotPageTest(unittest.TestCase):
             self.assertLessEqual(drop["x"], drop["x_max"])
             self.assertNotEqual(drop["x"], 0.31)
 
+    def test_the_drop_default_is_found_where_the_pi_keeps_so100_ik(self):
+        # deploy.sh puts so100_ik.py in ~/hmc-base/jetson, beside console.py; in the repo it is ../jetson
+        here = console.HERE
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "jetson").mkdir()
+            (Path(tmp) / "jetson" / "so100_ik.py").write_text(
+                "def reachable_drop():\n    return {'x': 0.3, 'y': 0.0}\n", encoding="utf-8")
+            self.console._drop = None
+            console.HERE = Path(tmp)
+            try:
+                self.assertEqual(self.console.drop_default(), {"x": 0.3, "y": 0.0})
+            finally:
+                console.HERE = here
+
     def test_the_page_serves_the_robot_tab_and_one_local_library(self):
         code, page = self.request("/")
         self.assertEqual(code, 200)
