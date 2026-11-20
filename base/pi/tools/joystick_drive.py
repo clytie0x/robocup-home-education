@@ -12,12 +12,20 @@ that rests off centre, is not a go). SIGTERM from the console's STOP ends it cle
 deadman released, a stick in its dead zone, no or stale LiDAR points, a blocked front (safety.must_stop) or rear
 (safety.rear_clear), the controller going away, the time limit. Backward is straight, at REAR_SPEED, and the LiDAR does
 not see the power cable: the person driving watches it. Prints one JSON line at the end.
+
+Heartbeat: a js device sends an event only when a value changes, so a lost Bluetooth link could leave R1 reading
+held. The tool therefore also reads the motion-sensor device of the same controller (found by itself in
+/proc/bus/input/devices; about 170 reports a second, also at rest, measured on USB on 2026-11-20). No report for
+HEARTBEAT_S stops the base and it must be armed again (R1 seen released). A Bluetooth controller without that
+stream is refused; --device skips the search and the heartbeat (a repair option, not allowed through the console).
 """
 
 import argparse
+import collections
 import json
 import math
 import os
+import re
 import select
 import signal
 import struct
@@ -44,7 +52,8 @@ REAR_LOOK = 0.30  # m of backing the LiDAR must show clear (as back_up.MAX_METRE
 # margin: backing is refused with a wall within about 0.40 m behind the back edge, even when the stick asks for a little
 PERIOD = 0.05  # s between two commands; the wheels' watchdog stops the base after 0.3 s of silence
 SECONDS, SECONDS_MAX = 300.0, 600.0
-DEVICE = "/dev/input/js0"
+DEVICE = "/dev/input/js0"  # when no controller is found in /proc/bus/input/devices
+HEARTBEAT_S = 0.25  # s without a report from the controller: the link is lost (the wheels' watchdog is 0.3 s)
 EVENT = struct.Struct("IhBB")  # struct js_event: time ms, value, type, number
 INIT = 0x80  # the type flag of the start-up events that report the state at open
 
@@ -80,28 +89,83 @@ def command(axes, buttons, p, max_speed):
     return "forward", v, w
 
 
-class Pad:
-    """The controller's js device: the state of every button and axis, kept up to date by poll()."""
+Controller = collections.namedtuple("Controller", "js sensor bus")
+BUSES = {"0003": "usb", "0005": "bluetooth"}
 
-    def __init__(self, path=DEVICE):
-        self.fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+
+def devices_text(path="/proc/bus/input/devices"):
+    """The kernel's list of input devices, or "" when there is none (not Linux)."""
+    try:
+        return Path(path).read_text()
+    except OSError:
+        return ""
+
+
+def locate(text):
+    """The DualShock 4 in the text of /proc/bus/input/devices: Controller(js device, event device of the motion
+    sensors of the same controller or None, bus "usb" or "bluetooth"); None when there is no such controller."""
+    found = []
+    for block in text.split("\n\n"):
+        name = re.search(r'^N: Name="(.*)"', block, re.M)
+        if not name or "Wireless Controller" not in name.group(1):
+            continue
+        uniq = re.search(r"^U: Uniq=(.*)$", block, re.M)
+        handlers = re.search(r"^H: Handlers=(.*)$", block, re.M)
+        bus = re.search(r"^I: Bus=(\w+)", block, re.M)
+        found.append((name.group(1), uniq.group(1).strip() if uniq else "", handlers.group(1).split() if handlers else [], bus.group(1) if bus else ""))
+    for _, uniq, handlers, bus in found:
+        js = next((h for h in handlers if re.fullmatch(r"js\d+", h)), None)
+        if js is None:
+            continue
+        sensor = next((h for n, u, hs, _ in found if n.endswith("Motion Sensors") and u == uniq for h in hs if re.fullmatch(r"event\d+", h)), None)
+        return Controller("/dev/input/" + js, "/dev/input/" + sensor if sensor else None, BUSES.get(bus, bus))
+    return None
+
+
+def _open(path):
+    return os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+
+
+class Pad:
+    """The controller: the buttons and axes of its js device, kept up to date by poll(), and, when `sensor` is given,
+    the event device of its motion sensors, read only to know the link is alive (silent_for). opener, ready and read
+    are the OS calls, replaceable in tests."""
+
+    def __init__(self, path=DEVICE, sensor=None, clock=time.monotonic, opener=_open, ready=select.select, read=os.read):
+        self.fd = opener(path)
+        self.sensor_fd = opener(sensor) if sensor else None
         self.axes, self.buttons = {}, {}
+        self.clock, self.last_seen, self._ready, self._read = clock, clock(), ready, read
 
     def poll(self):
         """Apply every event waiting; never blocks. OSError when the controller is gone (unplugged or closed)."""
-        while select.select([self.fd], [], [], 0)[0]:
-            data = os.read(self.fd, EVENT.size * 32)
-            if not data:
-                raise OSError("the controller closed the device")
-            for i in range(0, len(data) - EVENT.size + 1, EVENT.size):
-                kind, number, value = parse_event(data[i : i + EVENT.size])
-                if kind == 1:
-                    self.buttons[number] = value
-                elif kind == 2:
-                    self.axes[number] = value
+        fds = [self.fd] + ([self.sensor_fd] if self.sensor_fd is not None else [])
+        while True:
+            waiting = self._ready(fds, [], [], 0)[0]
+            if not waiting:
+                return
+            for fd in waiting:
+                data = self._read(fd, EVENT.size * 32 if fd == self.fd else 24 * 256)
+                if not data:
+                    raise OSError("the controller closed the device")
+                self.last_seen = self.clock()
+                if fd != self.fd:
+                    continue  # a sensor report only proves the link is alive
+                for i in range(0, len(data) - EVENT.size + 1, EVENT.size):
+                    kind, number, value = parse_event(data[i : i + EVENT.size])
+                    if kind == 1:
+                        self.buttons[number] = value
+                    elif kind == 2:
+                        self.axes[number] = value
+
+    def silent_for(self):
+        """Seconds since the last report from the controller; 0.0 when there is no sensor stream to tell."""
+        return self.clock() - self.last_seen if self.sensor_fd is not None else 0.0
 
     def close(self):
         os.close(self.fd)
+        if self.sensor_fd is not None:
+            os.close(self.sensor_fd)
 
 
 def _terminate(signum, frame):
@@ -150,14 +214,17 @@ def drive(pad, wheels_, session, p, max_speed, seconds, clock, sleep, log):
             except OSError:
                 result["stop"] = "controller gone"
                 break
-            if released(pad, p, max_speed):
+            quiet = pad.silent_for() > HEARTBEAT_S
+            if quiet:
+                armed = False  # the link may have dropped with R1 held: nothing moves until R1 is seen released again
+            elif released(pad, p, max_speed):
                 armed = True
             kind, v, w = (
                 command(pad.axes, pad.buttons, p, max_speed)
                 if armed
                 else ("stop", 0.0, 0.0)
             )
-            reason = None
+            reason = "controller silent" if quiet else None
             if kind != "stop":
                 try:
                     points = run_follow.scan_points(session.latest(), p)
@@ -198,7 +265,8 @@ def dry(pad, p, max_speed, seconds, clock, sleep, log):
             pad.poll()
         except OSError:
             return {"stop": "controller gone"}
-        armed = armed or released(pad, p, max_speed)  # as drive(): a held deadman at start shows stop
+        quiet = pad.silent_for() > HEARTBEAT_S
+        armed = False if quiet else armed or released(pad, p, max_speed)  # as drive()
         held = sorted(n for n, value in pad.buttons.items() if value)
         sticks = {
             n: round(value / AXIS_FULL * 8) / 8
@@ -208,9 +276,9 @@ def dry(pad, p, max_speed, seconds, clock, sleep, log):
         asked = (
             command(pad.axes, pad.buttons, p, max_speed) if armed else ("stop", 0.0, 0.0)
         )
-        if (held, sticks, asked[0]) != shown:
-            log("buttons %s axes %s -> %s v=%.2f w=%+.2f" % (held, sticks, *asked))
-            shown = (held, sticks, asked[0])
+        if (held, sticks, asked[0], quiet) != shown:
+            log("buttons %s axes %s -> %s v=%.2f w=%+.2f%s" % (held, sticks, *asked, " (controller silent)" if quiet else ""))
+            shown = (held, sticks, asked[0], quiet)
         sleep(PERIOD)
     return {"stop": "time"}
 
@@ -231,7 +299,7 @@ def main():
         default=SECONDS,
         help="how long to run, at most %g" % SECONDS_MAX,
     )
-    ap.add_argument("--device", default=DEVICE)
+    ap.add_argument("--device", help="the js device; skips the search for the controller and the heartbeat")
     ap.add_argument(
         "--dry",
         action="store_true",
@@ -256,7 +324,14 @@ def main():
             sys.exit("REFUSED: pass --yes-owner-at-robot (this tool drives the base)")
         if not wheels.under_safe_run():
             sys.exit("REFUSED: " + wheels.NOT_SAFE_RUN)
-    pad = Pad(args.device)
+    if args.device:
+        js, sensor, bus = args.device, None, None
+    else:
+        js, sensor, bus = locate(devices_text()) or (DEVICE, None, None)
+    if bus == "bluetooth" and not sensor:
+        sys.exit("REFUSED: the Bluetooth controller shows no motion-sensor stream, so a lost link could not be noticed")
+    print("controller %s (%s), heartbeat from %s" % (js, bus or "bus unknown", sensor or "nothing"), flush=True)
+    pad = Pad(js, sensor)
     session = wheels_ = None
     signal.signal(signal.SIGTERM, _terminate)  # the console's STOP: end through the finally blocks, like Ctrl+C
     try:

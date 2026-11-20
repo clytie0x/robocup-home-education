@@ -158,7 +158,11 @@ class FakePad:
             self.i += 1
             if item == "gone":
                 raise OSError("no such device")
-            self.axes, self.buttons = item
+            self.axes, self.buttons = item[0], item[1]
+            self.silence = item[2] if len(item) > 2 else 0.0
+
+    def silent_for(self):
+        return getattr(self, "silence", 0.0)
 
     def close(self):
         self.closed = True
@@ -266,6 +270,14 @@ class DriveTest(unittest.TestCase):
         self.assertEqual([c for c in calls if c[0] == "send" and c[1] == 0.0], [])  # no turn while the base still rolls at the wall
         self.assertIn("front blocked", " ".join(log))
 
+    def test_a_silent_controller_stops_the_base_and_needs_a_new_release(self):
+        quiet = (UP[0], UP[1], 0.5)  # R1 and the stick still read as held, but no report came for 0.5 s
+        script = [RELEASED] + [UP] * 3 + [quiet] * 3 + [UP] * 5 + [RELEASED] + [UP] * 3
+        _, calls, log = run(script, seconds=0.78)  # exactly the 16 ticks of the script
+        self.assertEqual(len(moves(calls)), 6)  # three before the silence, none while R1 reads held, three after a release
+        self.assertIn("controller silent", " ".join(log))
+        self.assertEqual(calls[3], "stop")
+
     def test_a_held_stick_keeps_driving_without_new_events(self):
         _, calls, _ = run(
             [RELEASED] * 2 + [UP]
@@ -290,6 +302,7 @@ class FakeOpens:
             FakeSession(OPEN_ROOM),
             FakeWheels(),
         )
+        self.paths = []
         test.saved = (
             joystick_drive.Pad,
             joystick_drive.lidar.LidarSession,
@@ -298,7 +311,11 @@ class FakeOpens:
             sys.argv,
             os.environ.get(wheels.SAFE_RUN_ENV),
         )
-        joystick_drive.Pad = lambda path: self.opened.append("pad") or self.pad
+        joystick_drive.Pad = lambda path, sensor=None: (
+            self.opened.append("pad"),
+            self.paths.append((path, sensor)),
+            self.pad,
+        )[2]
         joystick_drive.lidar.LidarSession = lambda: (
             self.opened.append("lidar") or self.session
         )
@@ -367,6 +384,37 @@ class MainTest(unittest.TestCase):
         self.assertIsNone(code)
         self.assertNotIn("forward", out)
 
+    def test_dry_run_says_when_the_controller_goes_silent(self):
+        code, out = self.main(["--dry", "--seconds", "0.2"], script=[RELEASED, (UP[0], UP[1], 0.5)], safe_run=False)
+        self.assertIsNone(code)
+        self.assertIn("silent", out)
+
+    def test_the_controller_is_found_with_its_sensor_stream(self):
+        self.addCleanup(setattr, joystick_drive, "devices_text", joystick_drive.devices_text)
+        joystick_drive.devices_text = lambda: USB_TEXT
+        code, _ = self.main(["--yes-owner-at-robot"], script=[RELEASED, "gone"])
+        self.assertIsNone(code)
+        self.assertEqual(self.fakes.paths, [("/dev/input/js0", "/dev/input/event5")])
+
+    def test_a_bluetooth_controller_is_found_by_its_own_js_number(self):
+        self.addCleanup(setattr, joystick_drive, "devices_text", joystick_drive.devices_text)
+        joystick_drive.devices_text = lambda: BT_TEXT
+        self.main(["--yes-owner-at-robot"], script=[RELEASED, "gone"])
+        self.assertEqual(self.fakes.paths, [("/dev/input/js1", "/dev/input/event8")])
+
+    def test_a_bluetooth_controller_without_a_sensor_stream_is_refused(self):
+        self.addCleanup(setattr, joystick_drive, "devices_text", joystick_drive.devices_text)
+        joystick_drive.devices_text = lambda: BT_TEXT.split("\n\n")[0] + "\n"
+        code, _ = self.main(["--yes-owner-at-robot"])
+        self.assertTrue(code and code.startswith("REFUSED"), code)
+        self.assertEqual(self.fakes.opened, [])  # a lost Bluetooth link could not be noticed
+
+    def test_the_device_option_skips_the_search(self):
+        self.addCleanup(setattr, joystick_drive, "devices_text", joystick_drive.devices_text)
+        joystick_drive.devices_text = lambda: USB_TEXT
+        self.main(["--yes-owner-at-robot", "--device", "/dev/input/js3"], script=[RELEASED, "gone"])
+        self.assertEqual(self.fakes.paths, [("/dev/input/js3", None)])
+
     def test_a_drive_opens_pad_lidar_wheels_and_closes_all_of_them(self):
         code, out = self.main(["--yes-owner-at-robot"], script=[RELEASED, UP, "gone"])
         self.assertIsNone(code)
@@ -384,6 +432,102 @@ class MainTest(unittest.TestCase):
         self.assertEqual(json.loads(out.strip().splitlines()[-1])["stop"], "terminated")
         self.assertEqual(self.fakes.wheels.calls[-2:], ["stop", "close"])
         self.assertTrue(self.fakes.session.closed and self.fakes.pad.closed)
+
+
+USB_TEXT = """\
+I: Bus=0003 Vendor=054c Product=09cc Version=8111
+N: Name="Sony Interactive Entertainment Wireless Controller"
+U: Uniq=41:42:e5:7b:14:d9
+H: Handlers=event4 js0
+
+I: Bus=0003 Vendor=054c Product=09cc Version=8111
+N: Name="Sony Interactive Entertainment Wireless Controller Motion Sensors"
+U: Uniq=41:42:e5:7b:14:d9
+H: Handlers=event5
+
+I: Bus=0003 Vendor=054c Product=09cc Version=8111
+N: Name="Sony Interactive Entertainment Wireless Controller Touchpad"
+U: Uniq=41:42:e5:7b:14:d9
+H: Handlers=mouse0 event6
+"""  # captured from the Pi on 2026-11-20 (the three input devices of the DS4 on USB)
+BT_TEXT = """\
+I: Bus=0005 Vendor=054c Product=09cc Version=8111
+N: Name="Wireless Controller"
+U: Uniq=a0:ab:51:00:11:22
+H: Handlers=event7 js1
+
+I: Bus=0005 Vendor=054c Product=09cc Version=8111
+N: Name="Wireless Controller Motion Sensors"
+U: Uniq=a0:ab:51:00:11:22
+H: Handlers=event8
+
+I: Bus=0005 Vendor=054c Product=09cc Version=8111
+N: Name="Wireless Controller Touchpad"
+U: Uniq=a0:ab:51:00:11:22
+H: Handlers=mouse1 event9
+"""  # SYNTHESIZED from the USB capture (Bus 0005, the HID name without the vendor prefix); not captured over Bluetooth yet
+KEYBOARD_TEXT = 'I: Bus=0011 Vendor=0001 Product=0001 Version=ab41\nN: Name="AT Translated Set 2 keyboard"\nU: Uniq=\nH: Handlers=sysrq kbd event0 \n'
+
+
+class LocateTest(unittest.TestCase):
+    def test_usb(self):
+        self.assertEqual(joystick_drive.locate(USB_TEXT), joystick_drive.Controller("/dev/input/js0", "/dev/input/event5", "usb"))
+
+    def test_bluetooth(self):
+        self.assertEqual(joystick_drive.locate(BT_TEXT), joystick_drive.Controller("/dev/input/js1", "/dev/input/event8", "bluetooth"))
+
+    def test_the_sensor_must_be_the_same_controller(self):
+        other = BT_TEXT.replace("U: Uniq=a0:ab:51:00:11:22\nH: Handlers=event8", "U: Uniq=ff:ff:ff:00:00:01\nH: Handlers=event8")
+        self.assertIsNone(joystick_drive.locate(other).sensor)
+
+    def test_no_controller(self):
+        self.assertIsNone(joystick_drive.locate(""))
+        self.assertIsNone(joystick_drive.locate(KEYBOARD_TEXT))
+
+
+class PadTest(unittest.TestCase):
+    JS, SENSOR = 10, 11
+
+    def setUp(self):
+        self.clock, self.waiting = Clock(), {}  # fd -> chunks of bytes the kernel would hold
+
+    def pad(self, sensor=True):
+        def ready(fds, w, x, t):
+            return [fd for fd in fds if self.waiting.get(fd)], [], []
+
+        def read(fd, n):
+            return self.waiting[fd].pop(0)
+
+        opener = {"js": self.JS, "ev": self.SENSOR}.__getitem__
+        return joystick_drive.Pad("js", "ev" if sensor else None, clock=self.clock, opener=opener, ready=ready, read=read)
+
+    def test_js_events_update_the_state(self):
+        pad = self.pad()
+        self.waiting[self.JS] = [struct.pack("IhBB", 0, 1, 1, 5) + struct.pack("IhBB", 0, -32767, 2, 1)]
+        pad.poll()
+        self.assertEqual((pad.buttons[5], pad.axes[1]), (1, -32767))
+
+    def test_the_sensor_stream_is_the_heartbeat(self):
+        pad = self.pad()
+        self.clock.t = 0.2
+        self.waiting[self.SENSOR] = [b"\0" * 24 * 5]  # a few sensor events, not parsed
+        pad.poll()
+        self.assertAlmostEqual(pad.silent_for(), 0.0)
+        self.clock.t = 0.7  # nothing since
+        pad.poll()
+        self.assertAlmostEqual(pad.silent_for(), 0.5)
+
+    def test_without_a_sensor_there_is_no_heartbeat(self):
+        pad = self.pad(sensor=False)
+        self.clock.t = 5.0
+        pad.poll()
+        self.assertEqual(pad.silent_for(), 0.0)
+
+    def test_an_empty_read_means_the_device_is_gone(self):
+        pad = self.pad()
+        self.waiting[self.JS] = [b""]
+        with self.assertRaises(OSError):
+            pad.poll()
 
 
 if __name__ == "__main__":

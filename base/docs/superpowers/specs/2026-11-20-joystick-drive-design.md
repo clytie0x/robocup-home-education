@@ -63,6 +63,27 @@ Nothing in the repo uses a joystick today.
 - Tests: `command()` table; the loop with a fake controller, fake wheels and fake scans (deadman release, blocked front,
   blocked rear, controller gone, time limit); `check_command` allow and refuse cases in `test_console_control.py`.
 
+## Bluetooth (added 2026-11-20)
+
+The owner wants the DS4 wireless. A js device sends an event only when a value changes, so a Bluetooth link that
+dies with R1 held can leave the last state standing, and the kernel removes the device only after the link
+supervision timeout (up to about 20 s). The heartbeat is the motion-sensor evdev device of the same controller
+(`... Motion Sensors`): on USB it delivered about 168 reports a second at rest (measured on the Pi, kernel
+6.18, `hid_playstation`, 2026-11-20).
+
+- The tool finds the controller in `/proc/bus/input/devices` by name (`Wireless Controller`, with or without the
+  vendor prefix) and takes the sensor device with the same `Uniq`; no controller found falls back to `js0`.
+- `Pad.silent_for()` is the time since the last report of either device. Over `HEARTBEAT_S` (0.25 s, under the
+  wheels' 0.3 s watchdog) the base stops and the tool needs R1 released again; the tool does not end.
+- A Bluetooth controller with no sensor device is refused. `--device` skips the search and the heartbeat and stays out
+  of the console's allow-list.
+- Not verified: the kernel's names and report rate over Bluetooth (the test text for it is synthesized from the USB
+  capture), the number of the js device after pairing, and the gap size under Wi-Fi interference on the Pi's shared
+  2.4 GHz radio. A false stop is safe (R1 released and pressed again), a missed one is not, so 0.25 s errs to stopping.
+- Pairing is a system change on the Pi: the owner does it (`bluetoothctl power on`, the DS4 in pairing mode with Share
+  and PS held, then `scan on`, `pair`, `trust`, `connect` with its address) and runs `--dry` to see the line
+  `controller /dev/input/jsN (bluetooth), heartbeat from /dev/input/eventM`.
+
 ## Test on the robot
 
 1. `--dry` over ssh with the owner pressing buttons: confirm the numbers, print the commands, nothing moves.
