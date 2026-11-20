@@ -16,7 +16,9 @@ fisheye when that file says dist_model "fisheye".
      later. The rim height in the 3D estimate is the Pi's measured top when it is between RIM_LO and RIM_HI,
      otherwise bag_cam_rim_h. Orientation: the goal's yaw = the handles' line; no yaw = the bag faces the
      robot (handles parallel to the robot's y axis).
-  2. what: the bag's FRONT wall (the one nearer the arm), bag_cam_half_depth in front of the centre. The jaws
+  2. what: the bag's BACK wall (bag_cam_half_depth beyond the centre) when the arm reaches it, else its FRONT wall
+     (the one nearer the arm) (WALLS: on the back wall the jaw inside the bag gets under the rim's inner fold, which
+     hooks a heavy bag; the bag then hangs towards the robot, which held_clear keeps off the deck). The jaws
      (pitched -60 deg) close across that wall. When the tuned model gives a handle centroid, the grasp
      keeps the rim's forward distance and shifts sideways onto the handle; otherwise the paper rim
      (a handle has rope only at its very top). Finger tips are bag_cam_grip_depth under the rim (1 or 1.5 cm
@@ -76,8 +78,15 @@ LIFT_SPEED = 0.25                 # rad/s of the fastest joint on that lift
 # 2026-11-19; at the grasp pitch -60 the tips get no higher than 0.39 m). Simulated over 109 bag placements and
 # tried on the robot 2026-11-20 (the bag held in every pick; side 60 deg, tilt 25 deg).
 CARRY_SIDES = (60.0, 45.0, -30.0, None)   # deg from straight ahead (+ = left); None = in front (hides the camera)
-CARRY_PITCHES = (None, -45.0, -35.0, -25.0)   # None = the grasp pitch
-CARRY_R = (0.32, 0.28, 0.24)      # m, finger tips from the pan axis at the carry pose: the shortest move of these
+# None = the grasp pitch. Down to -15 (45 deg of tilt): a tall bag (37 cm rim) only clears the LiDAR with the tips
+# about 0.59 m up, which the arm reaches at -15 deg (robot 2026-11-20: a heavy 37 cm bag held at 45 deg, back wall)
+CARRY_PITCHES = (None, -45.0, -35.0, -25.0, -15.0)
+CARRY_R = (0.32, 0.28, 0.24, 0.20)   # m, finger tips from the pan axis at the carry pose: the shortest move of these
+# Which wall the jaws close on, in this order. "back" (the far wall): the jaw inside the bag is the lower one (the
+# closing axis tilts 30 deg at pitch -60), so it reaches under the rim's inner fold and the fold hooks on it; a
+# heavy bag held that way, while on its front wall it slipped out, with or without tilt (robot 2026-11-20).
+# "front" when the back wall is out of reach (a front grip lets the bag stand one bag-depth further out).
+WALLS = ("back", "front")
 DRAG_MAX = 0.015                  # m the grip may move sideways while the bag's bottom is still on the floor
 # Grip depth (rim - finger tips at the close) when the bag_cam_grip_depth pose is out of reach (a low bag further
 # away): 1 and 1.5 cm shallower, so at least 3.5 cm of wall stays in the jaws.
@@ -873,33 +882,44 @@ class CameraBag:
                    "lift_s": line_seconds(len(lift_path), self.speed("lift"))}
         return down_path, lift_path, lifted_to, planned
 
-    def held_clear(self, path, grip_h, grasp_xy):
+    def held_clear(self, path, grip_h, grasp_xy, side=1.0, stood=None):
         """The bag hanging from the gap middle along a joint path (its wall in the jaws, the bag behind it along the
-        closing axis): False when it is dragged on the floor (the grip moves sideways more than DRAG_MAX while the
-        bag's bottom is still down) or swings into the robot body (the deck box) below the deck's top."""
+        closing axis, or in front of it for side -1: a back-wall grip): False when it is dragged on the floor (the
+        grip moves sideways more than DRAG_MAX while the bag's bottom is still down) or swings into the robot body
+        (the deck box) below the deck's top deeper than where it stood (the joints `stood`, default the path's start:
+        the bag stood there, so the deck parameter is no tighter than that)."""
         deck = getattr(self.n, "deck", None)
         width = float(self.p("bag_cam_width"))
-        depth = 2.0 * float(self.p("bag_cam_half_depth"))
+        depth = side * 2.0 * float(self.p("bag_cam_half_depth"))
+
+        def into_deck(q):
+            g = self.kin.gripper_point(q, (GAP_MID, TIP_Y, 0.0))
+            if g[2] - grip_h >= deck[1][2] + 0.01:
+                return 0.0
+            a = self.kin.close_axis(q)[:2]
+            if np.linalg.norm(a) < 1e-6:
+                return 0.0
+            u = a / np.linalg.norm(a)
+            v = np.array([-u[1], u[0]])
+            worst = 0.0
+            for along in np.linspace(0.0, depth, 4):
+                for across in np.linspace(-width / 2, width / 2, 5):
+                    c = g[:2] + along * u + across * v
+                    worst = max(worst, float(np.min(np.minimum(c - deck[0][:2], deck[1][:2] - c))) + 0.01)
+            return worst
+
+        ref = stood if stood is not None else (path[0] if path else None)
+        allowed = into_deck(ref) if deck is not None and ref is not None else 0.0
         for q in path:
             g = self.kin.gripper_point(q, (GAP_MID, TIP_Y, 0.0))
             bottom = g[2] - grip_h
             if bottom < self.n.table_z + 0.01 and math.hypot(g[0] - grasp_xy[0], g[1] - grasp_xy[1]) > DRAG_MAX:
                 return False
-            if deck is None or bottom >= deck[1][2] + 0.01:
-                continue
-            a = self.kin.close_axis(q)[:2]
-            if np.linalg.norm(a) < 1e-6:
-                continue
-            u = a / np.linalg.norm(a)
-            v = np.array([-u[1], u[0]])
-            for along in np.linspace(0.0, depth, 4):
-                for across in np.linspace(-width / 2, width / 2, 5):
-                    c = g[:2] + along * u + across * v
-                    if np.all(c > deck[0][:2] - 0.01) and np.all(c < deck[1][:2] + 0.01):
-                        return False
+            if deck is not None and into_deck(q) > max(0.0, allowed) + 0.005:
+                return False
         return True
 
-    def carry_plan(self, r, cz, pitch, roll, sim=None):
+    def carry_plan(self, r, cz, pitch, roll, sim=None, side=1.0):
         """(path, theta, pitch, reach) of ONE held move from the close pose (the arm now, or the joint dict sim): up,
         out to the carry side and the jaws tilted, to where the bag's bottom is bag_carry_bottom over the floor.
         Sides in CARRY_SIDES order, the least tilt first (CARRY_PITCHES), the shortest move of the reaches CARRY_R;
@@ -910,8 +930,8 @@ class CameraBag:
         grasp_xy = self.kin.gripper_point(start, (GAP_MID, TIP_Y, 0.0))[:2]
         saved = self.theta
         try:
-            for side in CARRY_SIDES:
-                theta = saved if side is None else math.radians(side)
+            for bearing in CARRY_SIDES:
+                theta = saved if bearing is None else math.radians(bearing)
                 for tilt in CARRY_PITCHES:
                     jaw_pitch = pitch if tilt is None else tilt
                     best = None
@@ -923,7 +943,8 @@ class CameraBag:
                             if exc.code != "UNREACHABLE":
                                 raise
                             continue
-                        if (best is None or len(path) < len(best[0])) and self.held_clear(path, grip_h, grasp_xy):
+                        if ((best is None or len(path) < len(best[0]))
+                                and self.held_clear([start] + path, grip_h, grasp_xy, side)):
                             best = (path, theta, jaw_pitch, reach)
                     if best:
                         return best
@@ -959,11 +980,11 @@ class CameraBag:
         a = self.kin.close_axis(sim)
         return float(a @ close_dir / (np.linalg.norm(a) * np.linalg.norm(close_dir)))
 
-    def grasp_outward(self, r, close_z, pitch, close_dir):
+    def grasp_outward(self, r, close_z, pitch, close_dir, nearer=NEARER, allow_inward=True):
         """grasp_pose with the closing axis pointing away from the arm, moving the gap middle up to max(NEARER)
         nearer when that is out of reach at r (the open gap is 7.5 cm: the wall stays between the jaws); only
         then the other way round. Returns (pitch, roll, align, r used)."""
-        for d in NEARER:
+        for d in nearer:
             try:
                 pt, rl, al = self.grasp_pose(r - d, close_z, pitch, close_dir, allow_inward=False)
             except Failed:
@@ -971,7 +992,7 @@ class CameraBag:
             if d:
                 self.n.say(f"ท่าแนวหุบชี้ออกจากหุ่นเอื้อมไม่ถึงที่ {r * 100:.1f} ซม.: เลื่อนช่องก้ามเข้ามา {d * 100:.1f} ซม.")
             return pt, rl, al, r - d
-        pt, rl, al = self.grasp_pose(r, close_z, pitch, close_dir)
+        pt, rl, al = self.grasp_pose(r, close_z, pitch, close_dir, allow_inward=allow_inward)
         return pt, rl, al, r
 
     def grasp_pose(self, r, close_z, pitch, close_dir, allow_inward=True):
@@ -1301,60 +1322,80 @@ class CameraBag:
                 w = self.where(obj, first=(i == 0))
                 need_look = False
             start = w["seen"]
-            wall, normal = w["wall"], w["normal"]
-            self.theta = math.atan2(wall[1], wall[0])
-            r_wall = float(np.hypot(*wall))
+            normal = np.asarray(w["normal"], float)
+            front = np.asarray(w["wall"], float)
             close_dir = self.user_dir(normal)
             fl = w["centre"]
-            self.n.get_logger().info(
-                f"camera bag try {i + 1}: centre fwd {fl[0]:.3f} left {fl[1]:+.3f} (from {w['from']}, goal fwd "
-                f"{w['goal'][0]:.3f} left {w['goal'][1]:+.3f}); handles' line {math.degrees(w['line']):.0f} deg; "
-                f"front wall fwd {wall[0]:.3f} left {wall[1]:+.3f}, bearing {math.degrees(self.theta):+.1f} deg, "
-                f"{r_wall:.3f} m from the pan axis; tips close {close_z - self.n.table_z:.3f} m above the floor")
+            half = float(self.p("bag_cam_half_depth"))
             # a low bag must be nearer: the arm reaches less far the lower it closes (WALL_REACH; the shallower
             # grip below adds at most 1.5 cm of height)
             reach = wall_reach(close_z - self.n.table_z + SHALLOWER[-1])
-            if r_wall > reach:
+            r_front = float(np.hypot(*front))
+            self.n.get_logger().info(
+                f"camera bag try {i + 1}: centre fwd {fl[0]:.3f} left {fl[1]:+.3f} (from {w['from']}, goal fwd "
+                f"{w['goal'][0]:.3f} left {w['goal'][1]:+.3f}); handles' line {math.degrees(w['line']):.0f} deg; "
+                f"front wall fwd {front[0]:.3f} left {front[1]:+.3f}, {r_front:.3f} m from the pan axis; tips close "
+                f"{close_z - self.n.table_z:.3f} m above the floor")
+            if r_front > reach:
                 raise Failed(
                     "move closer: the bag front is %.2f m from the arm base; the arm reaches %.2f m "
-                    "(ขยับหุ่นเข้าใกล้ถุง)" % (r_wall, reach), "UNREACHABLE")
-            r = r_wall + dt
-            # where the gap middle should end up (log), then the pose asked of the arm: the measured bias of the
-            # close pose taken off (bag_cam_close_bias)
-            want = (r * math.cos(self.theta), r * math.sin(self.theta), close_z - self.n.table_z)
+                    "(ขยับหุ่นเข้าใกล้ถุง)" % (r_front, reach), "UNREACHABLE")
             bias_f, bias_up = (float(v) for v in self.p("bag_cam_close_bias"))
-            r, cz0 = r + bias_f, close_z + bias_up
-            chosen, last = None, None
-            for up in SHALLOWER:                   # a low bag further away: grip a little higher (shallower)
-                try:
-                    chosen = (*self.grasp_outward(r, cz0 + up, pitch, close_dir), cz0 + up)
-                    break
-                except Failed as exc:
-                    if exc.code != "UNREACHABLE":
-                        raise
-                    last = exc
-            if chosen is None:
-                if i + 1 < len(tries):
-                    self.n.say(f"ลองที่ {i + 1}: {last} — ข้าม")
+            plan, last = None, None
+            for which in WALLS:
+                wall = front + (2.0 * half * normal if which == "back" else 0.0)
+                side = -1.0 if which == "back" else 1.0     # the bag's body: in front of the gripped wall or behind
+                theta = math.atan2(wall[1], wall[0])
+                r_wall = float(np.hypot(*wall))
+                if r_wall > reach:
                     continue
-                raise last
-            pitch, roll, align, r, cz = chosen
+                self.theta = theta
+                r = r_wall + dt
+                # where the gap middle should end up (log), then the pose asked of the arm: the measured bias of the
+                # close pose taken off (bag_cam_close_bias)
+                want = (r * math.cos(theta), r * math.sin(theta), close_z - self.n.table_z)
+                rb, cz0 = r + bias_f, close_z + bias_up
+                for up in SHALLOWER:               # a low bag further away: grip a little higher (shallower)
+                    try:
+                        # the back wall: no shift nearer (that puts the inner jaw on the front wall: a push)
+                        # (nor the jaws turned round: the jaw nearer the robot would close on the front wall)
+                        pt_, roll, align, rr = self.grasp_outward(rb, cz0 + up, pitch, close_dir,
+                                                                  (0.0,) if which == "back" else NEARER,
+                                                                  allow_inward=which != "back")
+                    except Failed as exc:
+                        if exc.code != "UNREACHABLE":
+                            raise
+                        last = exc
+                        continue
+                    # the held move must exist before the jaws close on the bag (from the close pose, on paper)
+                    close_q = {j: float(self.n.joints[j]) for j in ARM}
+                    try:
+                        self.tip(rr, cz0 + up, pt_, roll, "", sim=close_q)
+                    except Failed as exc:
+                        if exc.code != "UNREACHABLE":
+                            raise
+                        continue
+                    carry = self.carry_plan(rr, cz0 + up, pt_, roll, sim=close_q, side=side)
+                    if carry is None:
+                        last = Failed(f"ยกถุงไปถือไม่ได้เมื่อหนีบผนัง{'หลัง' if side < 0 else 'หน้า'} (ทุกด้านชนตัวหุ่น"
+                                      "หรือเอื้อมไม่ถึง)", "UNREACHABLE")
+                        continue
+                    plan = (which, side, theta, want, pt_, roll, align, rr, cz0 + up, cz0, carry)
+                    break
+                if plan:
+                    break
+            if plan is None:
+                why = str(last) if last else "เอื้อมไม่ถึงผนังถุงทั้งสองด้าน"
+                if i + 1 < len(tries):
+                    self.n.say(f"ลองที่ {i + 1}: {why} — ข้าม")
+                    continue
+                raise last if last else Failed(why, "UNREACHABLE")
+            which, side, self.theta, want, pitch, roll, align, r, cz, cz0, carry = plan
             if cz > cz0:
                 self.n.say(f"หนีบตื้นขึ้น {(cz - cz0) * 100:.1f} ซม. (เอื้อมไม่ถึงที่ความลึกปกติ)")
-            self.n.get_logger().info(f"camera try {i + 1}: tips {r:.3f} m out, pitch {pitch}, roll {roll:+.1f} deg "
+            self.n.get_logger().info(f"camera try {i + 1}: the {which} wall, tips {r:.3f} m out, bearing "
+                                     f"{math.degrees(self.theta):+.1f} deg, pitch {pitch}, roll {roll:+.1f} deg "
                                      f"(closing axis vs wall normal {align:.2f})")
-            # the held move must exist before the jaws close on the bag (from the close pose, on paper)
-            close_q = {j: float(self.n.joints[j]) for j in ARM}
-            try:
-                self.tip(r, cz, pitch, roll, "", sim=close_q)
-            except Failed as exc:
-                if exc.code != "UNREACHABLE":
-                    raise
-            carry = self.carry_plan(r, cz, pitch, roll, sim=close_q)
-            if carry is None:
-                why = "ยกถุงไปถือไม่ได้ (ทุกด้านชนตัวหุ่นหรือเอื้อมไม่ถึง)"
-                self.n.say(f"ลองที่ {i + 1}: {why} — ข้าม")
-                continue
             self.n.gripper(0.9, "อ้าก้าม")
             need_look = True
             # One plan: above the handle, down onto it, then (only pause: the gripper close) the straight lift.
@@ -1396,11 +1437,12 @@ class CameraBag:
             if phase_log is not None:
                 phase_log.mark("carry")
             self.n.progress(4, 5, "carry", "ยก หันไปด้านข้าง และเงยก้ามในท่าเดียว...")
-            path, hold_th, hold_pt, hold_r = self.carry_plan(r, cz, pitch, roll) or carry
+            path, hold_th, hold_pt, hold_r = self.carry_plan(r, cz, pitch, roll, side=side) or carry
             grip_h = cz - self.n.table_z           # the bag's bottom hangs this far below the tips
             top = self.n.table_z + float(self.p("bag_carry_bottom")) + grip_h
             held = {"mode": "camera", "camera": True, "theta": hold_th, "roll": roll, "pitch": pitch, "r": r,
-                    "hold_r": hold_r, "hold": (hold_pt, top), "verified": False, "close_z": cz,
+                    "hold_r": hold_r, "hold": (hold_pt, top), "verified": False, "close_z": cz, "side": side,
+                    "grasp_q": {j: float(self.n.joints[j]) for j in ARM},
                     "grasp_theta": self.theta, "object": (obj.x, obj.y, obj.yaw, obj.size)}
             self.n.holding = held                # from here on the arm never folds or forgets it by itself
             self._remember_plan(self.last_motion["mode"] if getattr(self, "last_motion", None) else "stepwise",
@@ -1444,29 +1486,42 @@ class CameraBag:
         new = math.atan2(l, f)
         # the jaws hold the FRONT wall: tips half a bag before the target, so the bag's centre lands on it (the
         # tips at the target put the bag 10-17 cm too far, 2026-11-18)
-        r = max(0.24, min(0.32, math.hypot(f, l) - float(self.p("bag_cam_half_depth"))))
+        side = held.get("side", 1.0)
+        r = max(0.20, min(0.32, math.hypot(f, l) - side * float(self.p("bag_cam_half_depth"))))
         put_z = held.get("close_z", self.n.table_z + float(self.p("bag_cam_close_h"))) + PUT_DROP
         grip_h = held.get("close_z", put_z) - self.n.table_z
         gp = held.get("pitch", -60)
         self.n.progress(1, 3, "over", "ถือถุงไปเหนือจุดวาง...")
         start = {j: float(self.n.joints[j]) for j in ARM}
         no_drag = (math.inf, math.inf)           # the bag is off the floor here: only the deck matters
+        # one move over the spot; when that would swing the bag into the deck on the way (a back-wall grip: the bag
+        # hangs towards the robot), first turn towards the spot at the carry height and reach (the bag's inner edge
+        # stays off the deck), then in and down to it
+        hold_pt, hold_tz = held.get("hold", (gp, put_z + 0.08))
+        hold_r = max(r, held.get("hold_r", r))
         over = None
-        for pp in PUT_PITCHES:
-            jaw_pitch = gp if pp is None else pp
-            self.theta = new
-            try:
-                path = self.tip(r, put_z + 0.08, jaw_pitch, roll, "", pull_in=0.06, sim=dict(start))
-            except Failed as exc:
-                if exc.code != "UNREACHABLE":
-                    raise
-                continue
-            if self.held_clear(path, grip_h, no_drag):
-                over = (path, jaw_pitch)
+        for two in (False, True):
+            for pp in PUT_PITCHES:
+                jaw_pitch = gp if pp is None else pp
+                self.theta = new
+                sim = dict(start)
+                try:
+                    turn = self.tip(hold_r, hold_tz, hold_pt, roll, "", pull_in=0.06, sim=sim) if two else []
+                    path = self.tip(r, put_z + 0.08, jaw_pitch, roll, "", pull_in=0.06, sim=sim)
+                except Failed as exc:
+                    if exc.code != "UNREACHABLE":
+                        raise
+                    continue
+                if self.held_clear([start] + turn + path, grip_h, no_drag, side, stood=held.get("grasp_q")):
+                    over = (turn, path, jaw_pitch)
+                    break
+            if over:
                 break
         if over is None:
             raise Failed(f"ถือถุงไปเหนือจุดวางไม่ได้ (ปลายก้าม {r:.3f} ม. จากแกนหมุน)", "UNREACHABLE")
-        path, jaw_pitch = over
+        turn, path, jaw_pitch = over
+        if turn:
+            self.n.line(turn, "หันถุงไปเหนือจุดวาง", self.speed("put"), JOINT_STEP)
         self.n.line(path, "ถือถุงไปเหนือจุดวาง", self.speed("put"), JOINT_STEP)
         self.n.progress(2, 3, "lower", "วางลง...")
         placed_r = r
@@ -1483,5 +1538,16 @@ class CameraBag:
         self.n.gripper(0.9, "ปล่อย")
         self.n.holding = self.n.grasped = None
         self.n.progress(3, 3, "retreat", "ถอยออกแล้วกลับท่า ready...")
-        self.tip(placed_r - 0.03, put_z + 0.12, jaw_pitch, roll, "ถอยขึ้น", pull_in=0.05)
+        # up and out of the bag: back towards the robot (a front-wall grip) or away from it (a back-wall grip: the
+        # tall bag's mouth is in the way nearer the robot, and a high pose that near is out of reach)
+        for back_r, up, back_pt in ((placed_r - 0.03 * side, 0.12, jaw_pitch), (placed_r, 0.10, jaw_pitch),
+                                    (placed_r + 0.03 * side, 0.08, jaw_pitch), (placed_r, 0.08, -45.0)):
+            try:
+                self.tip(back_r, put_z + up, back_pt, roll, "ถอยขึ้น", pull_in=0.05)
+                break
+            except Failed as exc:
+                if exc.code != "UNREACHABLE":
+                    raise
+        else:
+            self.n.say("ถอยก้ามขึ้นจากถุงไม่ได้ (เอื้อมไม่ถึง): ก้ามอ้าค้างไว้ที่ถุง")
         return "วางถุงแล้ว"

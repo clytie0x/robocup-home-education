@@ -178,7 +178,7 @@ class Gates(unittest.TestCase):
         self.assertLess(src.index('self.n.gripper(0.0, "หนีบ")'), src.index('self.n.line(path, "ยกถุงไปถือ'))
         self.assertIn("_down_stepwise", src)
         # the held move is planned before the jaws close (a bag that cannot be carried is not picked up)
-        self.assertLess(src.index("self.carry_plan(r, cz, pitch, roll, sim=close_q)"),
+        self.assertLess(src.index("self.carry_plan(rr, cz0 + up, pt_, roll, sim=close_q, side=side)"),
                         src.index('self.n.gripper(0.0, "หนีบ")'))
 
 

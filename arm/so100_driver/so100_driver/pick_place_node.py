@@ -158,8 +158,9 @@ class PickPlace(Node):
         # m of wall in the jaws (rim - finger tips at the close). 0 = the fixed bag_cam_close_h above. 5 cm: from 7 cm
         # the gripper body hits the rim on the way down (simulated 2026-11-20); 5 cm held on the robot that day
         self.declare_parameter("bag_cam_grip_depth", 0.05)
-        # m above the floor the held bag's bottom is lifted to (LiDAR plane 0.245 m + 3.5 cm)
-        self.declare_parameter("bag_carry_bottom", 0.28)
+        # m above the floor the held bag's bottom is lifted to (LiDAR plane 0.245 m + 2 cm). 0.265, not 0.28: a 37 cm
+        # bag clears it only with the tips about 0.59 m up, close to the arm's top at a 45 deg tilt
+        self.declare_parameter("bag_carry_bottom", 0.265)
         self.declare_parameter("bag_cam_half_depth", 0.055)   # m: bag centre -> its front wall (test bag 11 cm deep)
         # front camera bag finding (bag_camera.locate): the front wall's rim height above the floor (test bag
         # 27 cm) and the rim width the image must show for a standing bag (test bag: 0.178 m measured from two

@@ -47,11 +47,42 @@ class CarryOneMove(unittest.TestCase):
         self.assertTrue(self.cam.held_clear([self.close_q], grip_h, grasp))
         moved = grasp + [0.0, 0.05]                                  # the grip 5 cm away, the bottom still down
         self.assertFalse(self.cam.held_clear([self.close_q], grip_h, moved))
-        # a deck under the whole hanging bag: refused while the bag's bottom is below the deck top, clear above it
+        # a deck under the whole hanging bag: a move from where it stood clear (high) into it is refused; a bag that
+        # already stood there (the deck parameter is too wide) is not refused for staying there
+        high = {j: float(bc.LOOK[j]) for j in bc.ARM}
+        self.cam.tip(0.26, self.cz + 0.30, -15, 180.0, "", sim=high)   # bag bottom over the deck top
         real, self.node.deck = self.node.deck, (np.array([-1.0, -1.0, self.FLOOR]), np.array([1.0, 1.0, -0.068]))
         try:
-            self.assertFalse(self.cam.held_clear([self.close_q], grip_h, (math.inf, math.inf)))
-            self.assertTrue(self.cam.held_clear([self.close_q], grip_h - 0.30, (math.inf, math.inf)))
+            self.assertFalse(self.cam.held_clear([high, self.close_q], grip_h, grasp))
+            self.assertTrue(self.cam.held_clear([self.close_q, self.close_q], grip_h, grasp))
+        finally:
+            self.node.deck = real
+
+    def test_a_back_wall_grip_hangs_the_bag_towards_the_robot(self):
+        # the same pose: the bag behind the wall (front grip) vs in front of it (back grip), a deck just in front of
+        # the gripped wall: only the back grip puts the bag into it
+        roll, _align = self.cam.roll_for(0.26, self.cz, -60, self.cam.user_dir((1.0, 0.0)))   # jaws across the wall
+        close_q = {j: float(bc.LOOK[j]) for j in bc.ARM}
+        self.cam.tip(0.26, self.cz, -60, roll, "", sim=close_q)
+        g = self.node.kin.gripper_point(close_q, (bc.GAP_MID, bc.TIP_Y, 0.0))
+        grip_h = self.cz - self.FLOOR
+        high = {j: float(bc.LOOK[j]) for j in bc.ARM}
+        self.cam.tip(0.26, self.cz + 0.30, -15, roll, "", sim=high)   # bag bottom over the deck top
+        real = self.node.deck
+        # base frame: the arm's forward is heading0; the deck covers everything nearer the pan axis than 2 cm in front
+        # of the gripped wall
+        fwd = np.array([math.cos(self.node.kin.heading0), math.sin(self.node.kin.heading0)])
+        near = g[:2] - 0.02 * fwd
+        lo = np.where(fwd > 0.5, -1.0, np.where(fwd < -0.5, near, -1.0))
+        hi = np.where(fwd > 0.5, near, 1.0)
+        self.node.deck = (np.array([*lo, self.FLOOR]), np.array([*hi, -0.068]))
+        try:
+            # side is along the closing axis, which a real grasp points away from the arm (grasp_outward); this
+            # test pose's roll may point it back, so the sign of "away" comes from the pose
+            a = self.node.kin.close_axis(close_q)[:2]
+            away = 1.0 if float(a @ (g[:2] - self.node.kin.pan_point)) > 0 else -1.0
+            self.assertTrue(self.cam.held_clear([high, close_q], grip_h, g[:2], away))
+            self.assertFalse(self.cam.held_clear([high, close_q], grip_h, g[:2], -away))
         finally:
             self.node.deck = real
 
