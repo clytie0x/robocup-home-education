@@ -27,6 +27,8 @@ is the measured -0.331 itself, so no offset of ours is added); x, y go through M
                                  did not confirm; grab_failed|CODE|message [gripper_pos=R gripper_load=L])
   drop_bag {"x", "y"}            floor point, robot frame -> drop_done | drop_failed|CODE|message
   stop                           while a job runs: /arm/stop (the arm holds where it is)
+  look_bags                      every bag in the front camera now (bag_choice.py), the arm does not move ->
+                                 bags_seen|OK|{"bags": [{"colour", "side", "x", "y", "ok"}, ...]} | bags_seen|FAILED|why
 Events go out on /robot/event, the names hmc_flow.py reads.
 
 The console's arm buttons (agent.py POST /arm) on TCP 127.0.0.1:ARM_CMD_PORT, one JSON object per line in,
@@ -66,6 +68,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
+import bag_choice
 import console_gate
 import front_camera
 import gripper_camera as gc
@@ -319,9 +322,10 @@ class BagArm:
 class Jobs:
     """/robot/command -> one BagArm job at a time on a thread (pure: tests drive it without ROS)."""
 
-    def __init__(self, bag_arm, log=print, before=None):
+    def __init__(self, bag_arm, log=print, before=None, look=None):
         self.arm, self.log = bag_arm, log
         self.before = before or (lambda: None)  # a job starts: ArmCommands.release
+        self.look = look  # look_bags: () -> bag_choice.look()'s dict; None: refused (no front camera here)
         self.thread = None
         self.console = None  # the console's arm command running now (ArmCommands), or None
         self.lock = threading.Lock()
@@ -348,11 +352,36 @@ class Jobs:
                 self.log("stop: /arm/stop")
                 self.arm.t.stop()
             return
+        if action == "look_bags":
+            self.look_bags()
+            return
         if action not in ("pick_bag", "drop_bag"):
             return
         refused = self.start(action, p)
         if refused is not None:
             self.arm.event("%s|%s|%s" % ("grab_failed" if action == "pick_bag" else "drop_failed", *refused))
+
+    def look_bags(self):
+        """Every bag in the front camera now (bag_choice.look) on its own thread, the arm does not move:
+        bags_seen|OK|{"bags": [{"colour", "side", "x", "y", "ok"}, ...]} or bags_seen|FAILED|why."""
+        if self.look is None:
+            self.arm.event("bags_seen|FAILED|no front camera look here")
+            return
+
+        def run():
+            try:
+                res = self.look()
+            except Exception as exc:  # noqa: BLE001 (the flow falls back to pointing)
+                res = {"ok": False, "why": str(exc)}
+            if not res.get("ok"):
+                self.arm.event("bags_seen|FAILED|%s" % str(res.get("why", "")).replace("|", "/")[:200])
+                return
+            keep = ("colour", "side", "x", "y", "ok")
+            bags = [{k: b.get(k) for k in keep} for b in res.get("bags", [])]
+            self.log("look_bags: %s" % bags)
+            self.arm.event("bags_seen|OK|%s" % json.dumps({"bags": bags}, separators=(",", ":")))
+        self.look_thread = threading.Thread(target=run, daemon=True)
+        self.look_thread.start()
 
     def start(self, action, p, done=None):
         """One pick_bag or drop_bag job with params p on the thread; done(Result) when it ends. None when it started,
@@ -785,7 +814,8 @@ def main(argv=None):
             print("bag_arm: front camera bag measurements on TCP %d" % front_camera.PORT)
         except OSError as exc:  # another copy serves it: the arm jobs still run
             print("bag_arm: front camera service not started: %s" % exc)
-        jobs = Jobs(arm, before=lambda: commands.release())
+        jobs = Jobs(arm, before=lambda: commands.release(),
+                    look=lambda: bag_choice.look(a.snap_url, a.front_camera_file))
         commands = ArmCommands(jobs, RosConsoleArm(t))
         try:
             serve_commands(commands)

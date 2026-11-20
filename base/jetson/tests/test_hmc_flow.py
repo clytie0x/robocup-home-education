@@ -1040,3 +1040,229 @@ class ParkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BagFirstTest(unittest.TestCase):
+    """'carry the bag' before 'follow me' (2026-11-19: commands in any order), without the front camera's look."""
+
+    def setUp(self):
+        self.f = HmcFlow(use_arm=True, close_pick=False)
+        self.f.start(0.0)
+        self.f.on_event("base_link_ok", 0.1)
+
+    def carry(self, now=1.0):
+        return self.f.on_intent({"action": "carry_bag"}, now)
+
+    def test_carry_the_bag_in_ready_points_after_follow_and_wait(self):
+        out = self.carry()
+        self.assertEqual(actions(out), ["follow_me", "wait", "find_bag"])
+        self.assertEqual(self.f.state, POINTING)
+        self.assertIn("Please point at the bag.", says(out))
+
+    def test_the_pick_holds_the_bag_instead_of_going_back(self):
+        self.carry()
+        self.f.on_event(REACHED, 2.0)
+        self.assertEqual(self.f.state, PICKING)
+        out = self.f.on_event("grab_success", 3.0)
+        self.assertEqual(self.f.state, DONE)
+        self.assertNotIn("go_back", actions(out))
+        self.assertTrue(any("I have the bag" in t for t in says(out)))
+
+    def test_then_follow_me_resumes_and_stop_hands_the_bag_over(self):
+        self.carry()
+        self.f.on_event(REACHED, 2.0)
+        self.f.on_event("grab_success", 3.0)
+        out = self.f.on_intent({"action": "follow_me"}, 4.0)
+        self.assertEqual(actions(out), ["resume"])
+        self.assertEqual(self.f.state, FOLLOWING)
+        out = self.f.on_intent({"action": "stop"}, 5.0)
+        self.assertEqual(actions(out), ["wait", "drop_bag"])
+        self.assertEqual(self.f.state, DROPPING)
+        self.f.on_event("drop_done", 6.0)
+        self.assertEqual(self.f.state, DONE)
+        self.assertFalse(self.f.carrying)
+
+    def test_follow_first_still_goes_back_after_the_pick(self):
+        self.f.on_intent({"action": "follow_me"}, 1.0)
+        self.f.on_intent({"action": "stop"}, 2.0)
+        self.f.on_event(REACHED, 3.0)
+        out = self.f.on_event("grab_success", 4.0)
+        self.assertEqual(self.f.state, RETURNING)
+        self.assertIn("go_back", actions(out))
+
+    def test_a_failed_bag_first_then_follow_me_is_a_normal_run(self):
+        self.carry()
+        for t in range(4):
+            self.f.on_event("bag_failed|NOT_POINTED|no steady pointing in 20 s", 2.0 + t)
+        self.assertEqual(self.f.state, AT_CAR)
+        self.f.on_intent({"action": "follow_me"}, 10.0)
+        self.f.on_intent({"action": "stop"}, 11.0)
+        self.f.on_event(REACHED, 12.0)
+        self.f.on_event("grab_success", 13.0)
+        self.assertEqual(self.f.state, RETURNING)
+
+    def test_carry_the_bag_while_following_is_still_ignored(self):
+        self.f.on_intent({"action": "follow_me"}, 1.0)
+        self.assertEqual(actions(self.carry(2.0)), [])
+        self.assertEqual(self.f.state, FOLLOWING)
+
+    def test_no_wheels_no_bag_first(self):
+        self.f.on_event("base_link_lost", 0.5)
+        out = self.carry()
+        self.assertEqual(actions(out), [])
+        self.assertEqual(self.f.state, READY)
+
+
+class IdleRefusalTest(unittest.TestCase):
+    """The Pi refuses bag in IDLE (2026-11-19 16:19: 'follow me' was said before the Pi's run started)."""
+    IDLE = "bag_failed|REFUSED|bag: only while waiting at the car (FOLLOW after wait), not in IDLE"
+
+    def setUp(self):
+        self.f = HmcFlow(use_arm=True)
+        self.f.start(0.0)
+        self.f.on_event("base_link_ok", 0.1)
+        self.f.on_intent({"action": "follow_me"}, 1.0)
+        self.f.on_intent({"action": "stop"}, 2.0)
+        self.assertEqual(self.f.state, POINTING)
+
+    def test_an_idle_refusal_sends_follow_wait_and_the_search_again(self):
+        out = self.f.on_event(self.IDLE, 3.0)
+        self.assertEqual(actions(out), ["follow_me", "wait", "find_bag"])
+        self.assertEqual(self.f.state, POINTING)
+        self.f.on_event(REACHED, 4.0)
+        self.assertEqual(self.f.state, PICKING)
+
+    def test_a_second_idle_refusal_goes_to_at_car(self):
+        self.f.on_event(self.IDLE, 3.0)
+        out = self.f.on_event(self.IDLE, 4.0)
+        self.assertEqual(self.f.state, AT_CAR)
+        self.assertNotIn("follow_me", actions(out))
+
+    def test_a_fresh_search_may_retry_again(self):
+        self.f.on_event(self.IDLE, 3.0)
+        self.f.on_event(self.IDLE, 4.0)
+        self.f.on_intent({"action": "carry_bag"}, 5.0)  # in at_car: ready -> pointing afresh
+        self.assertEqual(self.f.state, POINTING)
+        out = self.f.on_event(self.IDLE, 6.0)
+        self.assertEqual(actions(out), ["follow_me", "wait", "find_bag"])
+
+    def test_another_refusal_still_goes_to_at_car(self):
+        self.f.on_event("bag_failed|REFUSED|bag: a bag task is running", 3.0)
+        self.assertEqual(self.f.state, AT_CAR)
+
+
+def seen(*bags):
+    import json
+    return "bags_seen|OK|" + json.dumps({"bags": [dict(b, ok=b.get("ok", True)) for b in bags]})
+
+
+BLUE_L = {"colour": "blue", "side": "left", "x": 0.33, "y": 0.10}
+RED_R = {"colour": "red", "side": "right", "x": 0.31, "y": -0.09}
+
+
+class ChoosingTest(unittest.TestCase):
+    """Bag first, close: the front camera's bags, "Which one?" by colour or side (2026-11-19)."""
+
+    def setUp(self):
+        self.f = HmcFlow(use_arm=True)
+        self.f.start(0.0)
+        self.f.on_event("base_link_ok", 0.1)
+
+    def carry(self, now=1.0, **params):
+        return self.f.on_intent({"action": "carry_bag", "params": params}, now)
+
+    def answer(self, now=3.0, **params):
+        return self.f.on_intent({"action": "carry_bag", "params": dict(params, choice=True)}, now)
+
+    def pick_of(self, out):
+        return [c["params"] for c in cmds(out) if c["action"] == "pick_bag"]
+
+    def test_take_the_bag_looks_first_without_moving_the_base(self):
+        out = self.carry()
+        self.assertEqual(actions(out), ["look_bags"])
+        self.assertEqual(self.f.state, hmc_flow.CHOOSING)
+
+    def test_one_bag_is_picked_with_no_question(self):
+        self.carry()
+        out = self.f.on_event(seen(RED_R), 2.0)
+        self.assertEqual(self.pick_of(out), [{"x": 0.31, "y": -0.09}])
+        self.assertEqual(self.f.state, PICKING)
+
+    def test_two_bags_ask_which_one_and_an_answer_picks_it(self):
+        self.carry()
+        out = self.f.on_event(seen(BLUE_L, RED_R), 2.0)
+        self.assertEqual(actions(out), [])
+        self.assertIn("I see a blue bag on the left and a red bag on the right. Which one?", says(out))
+        out = self.answer(colour="red")
+        self.assertEqual(self.pick_of(out), [{"x": 0.31, "y": -0.09}])
+        out = self.f.on_event("grab_success", 4.0)
+        self.assertEqual(self.f.state, DONE)  # held, as bag first: "follow me" carries it
+        self.assertNotIn("go_back", actions(out))
+
+    def test_a_side_answer_works_too(self):
+        self.carry()
+        self.f.on_event(seen(BLUE_L, RED_R), 2.0)
+        self.assertEqual(self.pick_of(self.answer(side="left")), [{"x": 0.33, "y": 0.10}])
+
+    def test_the_colour_said_with_take_the_bag_needs_no_question(self):
+        self.carry(colour="blue")
+        out = self.f.on_event(seen(BLUE_L, RED_R), 2.0)
+        self.assertEqual(self.pick_of(out), [{"x": 0.33, "y": 0.10}])
+
+    def test_a_named_colour_that_is_not_there_is_asked_never_guessed(self):
+        self.carry(colour="green")
+        out = self.f.on_event(seen(RED_R), 2.0)
+        self.assertEqual(actions(out), [])
+        self.assertTrue(says(out)[0].startswith("I do not see a green bag."), says(out))
+
+    def test_two_unclear_answers_go_to_pointing(self):
+        self.carry()
+        self.f.on_event(seen(BLUE_L, RED_R), 2.0)
+        out = self.answer(colour="green")
+        self.assertEqual(actions(out), [])
+        self.assertTrue(any("I do not see a green bag" in t for t in says(out)), says(out))
+        out = self.answer(4.0, colour="yellow")
+        self.assertEqual(actions(out), ["follow_me", "wait", "find_bag"])
+        self.assertEqual(self.f.state, POINTING)
+
+    def test_no_bag_near_or_a_failed_look_goes_to_pointing(self):
+        self.carry()
+        out = self.f.on_event(seen(dict(RED_R, ok=False)), 2.0)
+        self.assertEqual(actions(out), ["follow_me", "wait", "find_bag"])
+        self.f.start(5.0)
+        self.carry(6.0)
+        out = self.f.on_event("bags_seen|FAILED|no frame", 7.0)
+        self.assertEqual(actions(out), ["follow_me", "wait", "find_bag"])
+
+    def test_no_answer_to_the_look_goes_to_pointing(self):
+        self.carry()
+        out = self.f.on_tick(1.0 + hmc_flow.LOOK_TIMEOUT + 0.1)
+        self.assertEqual(actions(out), ["follow_me", "wait", "find_bag"])
+
+    def test_stop_cancels_the_choice(self):
+        self.carry()
+        self.f.on_event(seen(BLUE_L, RED_R), 2.0)
+        self.f.on_intent({"action": "stop"}, 3.0)
+        self.assertEqual(self.f.state, READY)
+        self.assertEqual(actions(self.answer(4.0, colour="red")), [])  # an answer with no question is nothing
+
+    def test_silence_asks_again(self):
+        self.carry()
+        self.f.on_event(seen(BLUE_L, RED_R), 2.0)
+        out = self.f.on_tick(2.0 + self.f.reask_s + 0.1)
+        self.assertTrue(says(out)[0].endswith("Which one?"))
+
+    def test_a_missed_close_grab_looks_again_for_the_same_colour(self):
+        self.carry()
+        self.f.on_event(seen(BLUE_L, RED_R), 2.0)
+        self.answer(colour="red")
+        out = self.f.on_event("grab_failed|MISSED|closed on nothing", 4.0)
+        self.assertEqual(actions(out), ["look_bags"])
+        out = self.f.on_event(seen(BLUE_L, dict(RED_R, side="right", x=0.30)), 5.0)
+        self.assertEqual(self.pick_of(out), [{"x": 0.30, "y": -0.09}])
+        out = self.f.on_event("grab_failed|MISSED|closed on nothing", 6.0)
+        self.assertEqual(self.f.state, ERROR)
+
+    def test_a_choice_word_in_ready_starts_nothing(self):
+        self.assertEqual(actions(self.answer(1.0, colour="red")), [])
+        self.assertEqual(self.f.state, READY)

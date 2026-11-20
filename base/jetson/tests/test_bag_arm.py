@@ -766,3 +766,29 @@ def wait_until(check, timeout=5.0):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LookBagsTest(unittest.TestCase):
+    """look_bags: every bag in the front camera for the flow's 'which one?', without moving the arm."""
+
+    def run_look(self, look):
+        arm = ApiArm()
+        jobs = bag_arm.Jobs(make(arm), log=lambda _s: None, look=look)
+        jobs.on_command(json.dumps({"action": "look_bags", "params": {}}))
+        if getattr(jobs, "look_thread", None) is not None:
+            jobs.look_thread.join(10)
+        return arm
+
+    def test_the_bags_go_out_as_one_event_and_the_arm_stays(self):
+        bags = [{"colour": "blue", "side": "left", "x": 0.3, "y": 0.1, "ok": True, "box": [1, 2, 3, 4], "why": ""}]
+        arm = self.run_look(lambda: {"ok": True, "bags": bags})
+        name, code, data = arm.sent[-1].split("|", 2)
+        self.assertEqual((name, code), ("bags_seen", "OK"))
+        self.assertEqual(json.loads(data), {"bags": [{"colour": "blue", "side": "left", "x": 0.3, "y": 0.1, "ok": True}]})
+        self.assertEqual(arm.tasks, [])
+
+    def test_a_failed_look_or_none_is_failed(self):
+        self.assertEqual(self.run_look(lambda: {"ok": False, "why": "no frame | camera"}).sent[-1],
+                         "bags_seen|FAILED|no frame / camera")
+        self.assertTrue(self.run_look(lambda: 1 / 0).sent[-1].startswith("bags_seen|FAILED|"))
+        self.assertTrue(self.run_look(None).sent[-1].startswith("bags_seen|FAILED|"))
