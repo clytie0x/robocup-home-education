@@ -1,0 +1,50 @@
+{
+  "calibrated": true,
+  "fx": 522.7004622679294,
+  "cx": 296.70882730620366,
+  "cy": 241.09751641118947,
+  "width": 640,
+  "height": 480,
+  "x": 0.225,
+  "y": -0.0009974647691394832,
+  "z": 0.83,
+  "yaw_deg": -0.2975755040136706,
+  "pitch_deg": 47.65724106386179,
+  "roll_deg": 0.9615972633301483,
+  "mirror": false,
+  "dist_model": "fisheye",
+  "dist": [
+    -0.12000174022745945,
+    0.05392880504627527,
+    0.0,
+    0.0
+  ],
+  "info": {
+    "camera": "HD USB Camera 32e4:9320 serial 2020032001 (/dev/video0), swapped in about 12:00 ICT 2026-11-20; frames 640x480 from webcam_view /snap.jpg",
+    "date": "2026-11-20",
+    "method": "19 red discs at taped floor points, 3 frames (tools/front_cam_bag_cal.py discs; calibration session discs.json)",
+    "measured": {
+      "z": "0.83 m, owner's tape, floor to lens centre",
+      "x": "0.225 m = F 0.375 m (0.20 LiDAR-F + 0.175 lidar_x) - 0.15 m lens behind F, owner's tape"
+    },
+    "from_tile_fit": "fx, cx, cy, fisheye k1 k2 and roll 0.96 deg held from docs/calibration/front_camera_fisheye_candidate_2026-11-20.json",
+    "fitted": [
+      "y",
+      "yaw",
+      "pitch"
+    ],
+    "std": {
+      "y_m": 0.0028,
+      "yaw_deg": 0.207,
+      "pitch_deg": 0.06
+    },
+    "rms_px": 2.297,
+    "worst_px": 5.73,
+    "floor_error_cm": {
+      "median": 0.62,
+      "max": 1.86
+    },
+    "check": "all-free fit gave z 0.821, lens 0.157 m behind F: agrees with the tape",
+    "needs_code": "dist_model fisheye: front_camera.py / bag_camera.py from 77a8cc4 or later"
+  }
+}
