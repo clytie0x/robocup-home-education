@@ -25,6 +25,7 @@ Commands go down the left column; status comes back the same way.
         v                                              | starts 8 programs, POST /arm
      wheels (serial), LiDAR (serial), Xtion (USB)      v
                                                  bag_arm.py 127.0.0.1:5607 -> ROS /arm/* (domain 42) -> arm
+                                                 hmc_flow.py 127.0.0.1:5608 <- POST /flow (park, speech heard, say)
                                                  webcam_view.py :8082 (arm camera)
                                                  hmc_flow, voice, base_bridge (ROS topics /robot/command, /robot/event)
 ```
@@ -41,6 +42,7 @@ Commands go down the left column; status comes back the same way.
 | run_follow (bag look) | front_camera in bag_arm | TCP | Jetson 5606 | bag top from the front camera | once per bag |
 | console | agent | HTTP JSON | Jetson 8090 | programs, /arm, status | on demand, status every 3 s (REFRESH) |
 | agent | bag_arm | TCP JSON line (127.0.0.1) | Jetson 5607 | arm commands | on demand |
+| agent | hmc_flow | TCP JSON line (127.0.0.1) | Jetson 5608 | the console executive's park lease, speech heard, say | on demand, while a console run polls |
 | agent | base_bridge | UDP (127.0.0.1) | Jetson 5605 | hold before a restart | rare |
 | bag_arm, front_camera, console | webcam_view | HTTP JPEG | Jetson 8082 | arm camera frames | on demand |
 | voice stt_node | whisper-server | HTTP (127.0.0.1) | Jetson 8080 | speech to text | per sentence |

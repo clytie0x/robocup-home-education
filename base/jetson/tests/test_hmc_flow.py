@@ -1038,6 +1038,124 @@ class ParkTests(unittest.TestCase):
         self.assertTrue(any(kind == "cmd" for kind, _value in heard))
 
 
+class ConsoleLeaseTests(unittest.TestCase):
+    """The console executive's requests on FLOW_CMD (HmcFlow.on_command): a park lease, the speech relay, say."""
+
+    def setUp(self):
+        self.f = HmcFlow()
+        self.f.start(0.0)
+        self.f.on_event("base_link_ok", 0.1)
+
+    def test_own_parks_for_ttl_and_the_tick_ends_the_lease_once(self):
+        answer, _out = self.f.on_command({"cmd": "own", "ttl": 2}, 1.0)
+        self.assertEqual(answer, {"ok": True, "parked": True, "seq": 0})
+        self.assertTrue(self.f.parked)
+        self.assertEqual(self.f.on_tick(2.9), [])
+        self.assertTrue(self.f.parked)
+        ended = self.f.on_tick(3.0)
+        self.assertFalse(self.f.parked)
+        self.assertEqual([kind for kind, _value in ended], ["log"])
+        self.assertNotIn("log", [kind for kind, _value in self.f.on_tick(3.2)])
+        self.assertIn("follow_me", actions(self.f.on_heard("follow me", 3.5)))
+
+    def test_ttl_is_clamped_to_1_to_30_and_defaults_to_5(self):
+        for cmd, until in (({"cmd": "own", "ttl": 0.1}, 11.0), ({"cmd": "own", "ttl": 100}, 40.0),
+                           ({"cmd": "own"}, 15.0), ({"cmd": "own", "ttl": "x"}, 15.0),
+                           ({"cmd": "own", "ttl": True}, 15.0), ({"cmd": "heard", "after": 0, "ttl": 50}, 40.0)):
+            f = HmcFlow()
+            f.start(0.0)
+            f.on_command(cmd, 10.0)
+            f.on_tick(until - 0.01)
+            self.assertTrue(f.parked, cmd)
+            f.on_tick(until)
+            self.assertFalse(f.parked, cmd)
+
+    def test_heard_renews_the_lease(self):
+        self.f.on_command({"cmd": "own", "ttl": 2}, 1.0)
+        self.f.on_command({"cmd": "heard", "after": 0, "ttl": 2}, 2.5)
+        self.assertEqual(self.f.on_tick(4.0), [])
+        self.assertTrue(self.f.parked)
+        self.f.on_tick(4.5)
+        self.assertFalse(self.f.parked)
+
+    def test_speech_while_parked_is_kept_for_the_console_not_handled(self):
+        self.f.on_command({"cmd": "own"}, 1.0)
+        out = self.f.on_heard("follow me", 1.5) + self.f.on_heard("take the red bag", 1.6)
+        self.assertEqual((actions(out), says(out), forwarded(out)), ([], [], []))
+        self.assertEqual(self.f.state, READY)
+        self.assertIn("log", [kind for kind, _value in out])
+        answer, _out = self.f.on_command({"cmd": "heard", "after": 0}, 2.0)
+        self.assertEqual(answer, {"ok": True, "parked": True, "seq": 2, "items": [
+            {"seq": 1, "text": "follow me", "t": 1.5}, {"seq": 2, "text": "take the red bag", "t": 1.6}]})
+        self.assertEqual(self.f.on_command({"cmd": "heard", "after": 1}, 2.1)[0]["items"],
+                         [{"seq": 2, "text": "take the red bag", "t": 1.6}])
+        self.assertEqual(self.f.on_command({"cmd": "heard", "after": 2}, 2.2)[0], {
+            "ok": True, "parked": True, "seq": 2, "items": []})
+        self.assertEqual(self.f.on_command({"cmd": "own"}, 2.3)[0]["seq"], 2)
+
+    def test_at_most_20_in_an_answer_and_the_last_50_kept(self):
+        self.f.on_command({"cmd": "own", "ttl": 30}, 1.0)
+        for n in range(1, 61):
+            self.f.on_heard("line %d" % n, 2.0 + n * 0.01)
+        pages = []
+        for after in (0, 30, 50, 60):
+            answer = self.f.on_command({"cmd": "heard", "after": after}, 3.0)[0]
+            self.assertEqual(answer["seq"], 60)
+            pages.append([item["seq"] for item in answer["items"]])
+        self.assertEqual(pages, [list(range(11, 31)), list(range(31, 51)), list(range(51, 61)), []])
+        self.assertEqual(self.f.on_command({"cmd": "heard", "after": 59}, 3.0)[0]["items"],
+                         [{"seq": 60, "text": "line 60", "t": 2.6}])
+
+    def test_speech_while_not_parked_is_handled_as_before_and_not_kept(self):
+        self.assertIn("follow_me", actions(self.f.on_heard("follow me", 1.0)))
+        self.assertEqual(forwarded(self.f.on_heard("what a nice day", 1.1)), ["what a nice day"])
+        self.assertEqual(self.f.on_command({"cmd": "own"}, 2.0)[0]["seq"], 0)
+        self.assertEqual(self.f.on_command({"cmd": "heard", "after": 0}, 2.1)[0]["items"], [])
+
+    def test_say_only_while_parked(self):
+        self.assertEqual(self.f.on_command({"cmd": "say", "text": "Hello."}, 1.0),
+                         ({"ok": False, "error": "not parked"}, []))
+        self.f.on_command({"cmd": "own"}, 1.0)
+        self.assertEqual(self.f.on_command({"cmd": "say", "text": "I will follow you."}, 1.1),
+                         ({"ok": True}, [("say", "I will follow you.")]))
+        for bad in ({"cmd": "say"}, {"cmd": "say", "text": ""}, {"cmd": "say", "text": "  "},
+                    {"cmd": "say", "text": 5}, {"cmd": "say", "text": ["x"]}):
+            self.assertEqual(self.f.on_command(bad, 1.2),
+                             ({"ok": False, "error": "text must be a non-empty string"}, []), bad)
+
+    def test_release_unknown_and_bad_requests(self):
+        self.f.on_command({"cmd": "own", "ttl": 30}, 1.0)
+        self.assertEqual(self.f.on_command({"cmd": "release"}, 2.0)[0], {"ok": True, "parked": False})
+        self.assertFalse(self.f.parked)
+        self.assertIn("follow_me", actions(self.f.on_heard("follow me", 2.1)))
+        self.assertEqual(self.f.on_command({"cmd": "dance"}, 3.0), ({"ok": False, "error": "unknown cmd"}, []))
+        self.assertEqual(self.f.on_command({}, 3.0), ({"ok": False, "error": "unknown cmd"}, []))
+        for bad in (None, [], "own", 5):
+            self.assertEqual(self.f.on_command(bad, 3.0), ({"ok": False, "error": "bad request"}, []), bad)
+
+    def test_a_leased_flow_does_not_act(self):
+        self.f.on_command({"cmd": "own", "ttl": 30}, 1.0)
+        self.assertEqual(actions(self.f.on_intent({"action": "follow_me"}, 2.0)), [])
+        self.assertEqual(self.f.on_event("see_person", 2.0), [("log", "(parked)")])
+        self.assertEqual(self.f.on_status({"link": True, "locked": True, "search": True}, 2.0), [])
+        self.assertEqual(self.f.on_tick(3.0), [])
+        self.assertEqual(self.f.state, READY)
+
+    def test_the_events_park_without_a_lease_and_keep_speech_too(self):
+        self.f.on_command({"cmd": "own", "ttl": 2}, 1.0)
+        self.f.on_event("console_owns_run", 1.5)
+        self.f.on_tick(10.0)
+        self.assertTrue(self.f.parked)  # console_owns_run parks until console_released, as before
+        self.f.on_heard("stop", 10.5)
+        self.assertEqual(self.f.on_command({"cmd": "heard", "after": 0}, 11.0)[0]["items"],
+                         [{"seq": 1, "text": "stop", "t": 10.5}])
+        self.f.on_event("console_released", 12.0)
+        self.assertFalse(self.f.parked)
+        self.f.on_event("console_owns_run", 13.0)  # no lease left over from the heard above
+        self.f.on_tick(60.0)
+        self.assertTrue(self.f.parked)
+
+
 if __name__ == "__main__":
     unittest.main()
 

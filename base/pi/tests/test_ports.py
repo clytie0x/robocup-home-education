@@ -57,7 +57,7 @@ class PortsTest(unittest.TestCase):
     def test_the_table_has_the_known_ports(self):
         pi, jetson = ([getattr(ports, n) for n in ports.HOSTS[h]] for h in ("pi", "jetson"))
         self.assertEqual(sorted(pi), [5603, 5604, 5610, 8080, 8081])
-        self.assertEqual(sorted(jetson), [5601, 5602, 5605, 5606, 5607, 8080, 8081, 8082, 8090, 8091])
+        self.assertEqual(sorted(jetson), [5601, 5602, 5605, 5606, 5607, 5608, 8080, 8081, 8082, 8090, 8091])
 
     def test_scan_finds_a_literal(self):
         table = set(numbers().values())
