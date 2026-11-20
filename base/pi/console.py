@@ -175,6 +175,7 @@ TOOL_CHECKS = {
                               "--max-speed": "speed", "--velocity-loop": "flag", "--yes-owner-at-robot": "flag"}),
     "approach": (True, [], {"--to": "number", "--yes-close-approach": "flag"}),
     "back_up": (True, [], {"--metres": "number", "--yes-back-up": "flag"}),
+    "joystick_drive": (True, [], {"--max-speed": "speed", "--seconds": "number", "--yes-owner-at-robot": "flag"}),  # --dry and --device stay out
     "lap_check": (True, [], {"--seconds": "number", "--yes-floor-run": "flag"}),
     "walk_check": (False, [], {"--seconds": "number"}),
 }

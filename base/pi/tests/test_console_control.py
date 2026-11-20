@@ -369,6 +369,17 @@ class CheckArgsTest(unittest.TestCase):
         self.assertIsNone(self.check("air_check", []))
         self.assertIsNone(self.check(["wheel"], []))
 
+    def test_joystick(self):
+        flag = "--yes-owner-at-robot"
+        cmd, label, moves = self.check("joystick_drive", ["--max-speed", "0.08", "--seconds", "120", flag], page=True)
+        self.assertTrue(moves)
+        self.assertEqual([Path(a).name for a in cmd[1::2][:3]], ["job_guard.py", "safe_run.py", "joystick_drive.py"])
+        for args in (["--dry"], ["--device", "/dev/input/js1"], ["--max-speed", "0.3"], ["--seconds", "1e9"], ["extra"]):
+            with self.assertRaises(ValueError, msg=args):
+                self.check("joystick_drive", args + [flag], page=True)
+        with self.assertRaises(ValueError):
+            self.check("joystick_drive", [flag])  # the presence flag never comes from a program
+
 
 class RobotctlTest(unittest.TestCase):
     def test_mapping(self):

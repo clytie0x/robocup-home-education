@@ -1304,7 +1304,9 @@ for (const b of document.querySelectorAll("[data-check]")) {
   b.addEventListener("click", async () => {
     const check = b.dataset.check;
     if (check === "wheel" && !(await confirmBox("ทดสอบล้อไหม", "หุ่นจะเดินหน้าราว 4 ซม. พื้นที่โล่งและสายไฟปลอดภัยแล้วใช่ไหม", "ใช่ ทดสอบเลย", true))) return;
-    const r = await post("/api/check/start", { check });
+    if (check === "joystick_drive" && !(await confirmBox("ขับด้วยจอยไหม", "หุ่นจะขยับตามจอย มีคนอยู่ข้างหุ่น พื้นที่โล่ง และสายไฟปลอดภัยแล้วใช่ไหม", "ใช่ เริ่มเลย", true))) return;
+    const args = check === "joystick_drive" ? ["--max-speed", "0.08", "--yes-owner-at-robot"] : [];
+    const r = await post("/api/check/start", { check, args });
     if (r && !r.error) toast("เริ่มตรวจแล้ว");
   });
 }
