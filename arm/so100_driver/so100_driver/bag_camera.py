@@ -728,12 +728,16 @@ class CameraBag:
                 continue                           # (the dry run picks the way; never stop half-way there)
             try:
                 self.tip(pre_r, close_z + pre_z, pitch, roll, "ไปเหนือถุง", sim=sim)
-            except Failed:
+            except Failed as exc:
+                if exc.code != "UNREACHABLE":      # a stop, a driver fault, too hot: end here (review 2026-11-19)
+                    raise
                 continue
             try:
                 self.tip(r, close_z + 0.10, pitch, roll, "เหนือถุง", sim=sim)
                 return
-            except Failed:
+            except Failed as exc:
+                if exc.code != "UNREACHABLE":
+                    raise
                 continue
         raise Failed(f"ไปเหนือผนังหน้าถุงไม่ได้ (ปลายก้าม {r:.3f} ม. จากแกนหมุน)", "UNREACHABLE")
 
@@ -918,7 +922,9 @@ class CameraBag:
             try:
                 self.tip(r, cz + dz, pitch, roll, "ยกถุงตรงขึ้น", pull_in=0.03, speed=self.speed("lift"))
                 lifted_to = dz
-            except Failed:
+            except Failed as exc:
+                if exc.code != "UNREACHABLE":      # only "out of reach" ends the lift early; a stop ends the pick
+                    raise
                 break
         time.sleep(0.5)
         return lifted_to
@@ -936,7 +942,9 @@ class CameraBag:
                     self.tip(r, tz, pitch, roll, "เก็บถุงไว้ด้านข้าง (หลบ LiDAR)", pull_in=0.06,
                              speed=self.speed("held"))
                     held["theta"] = self.theta
-                except Failed:
+                except Failed as exc:
+                    if exc.code != "UNREACHABLE":  # a stop while holding the bag: no swing to the other side
+                        raise
                     moved_ok = False
                     break
             if moved_ok:
