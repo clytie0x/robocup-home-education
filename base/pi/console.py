@@ -92,6 +92,8 @@ FILES = {
 }
 COMMANDS = ("follow", "wait", "resume", "return", "bag", "bag_again", "bag_near")
 MISSIONS = ("full", "follow_only", "bag_only")
+RETURN_S = 180  # s more for run_follow in the full mission: hmc.flow RETURN_BUDGET, the way back after the clock
+EXECUTIVE_SAYS = ("I will go back to the start now.", "I am back at the start.")  # hmc.hri lines hmc.flow says
 MISSION_LABEL = {"full": "โจทย์จริง HMC", "follow_only": "ตามคนอย่างเดียว", "bag_only": "หาและหยิบถุง"}
 NO_PIN = ("/api/stop", "/api/arm/stop", "/api/bank/full", "/api/bank/reading")  # STOPs, and the owner's battery marks
 CLIENT = re.compile(r"^[\w.@:%-]{1,64}$")  # a program's name (X-HMC-Client), e.g. robotctl's "xohm@192.168.31.50"
@@ -148,7 +150,8 @@ def task_command(drive, speed, minutes, p, py=sys.executable, virtual=None, miss
     # follow_only omits --remote so Jetson hmc_flow / voice cannot trigger bag picking or interfere
     remote_flag = [] if mission == "follow_only" else ["--remote"]
     run = [py, str(HERE / "run_follow.py")] + (["--drive"] if drive else []) + [
-        "--seconds", str(int(round(minutes * 60))), "--max-speed", "%.2f" % speed, *remote_flag,
+        "--seconds", str(int(round(minutes * 60 + (RETURN_S if mission == "full" else 0)))),
+        "--max-speed", "%.2f" % speed, *remote_flag,
         "--dashboard-host", "127.0.0.1"]  # its page skips the PIN: only the console may reach it
     if virtual is not None:
         if not _one_computer(virtual):
@@ -1180,6 +1183,23 @@ def voice_commands(root=LOG_ROOT, size=RUN_TAIL):
     return out
 
 
+def run_end_record(root=LOG_ROOT):
+    """The newest run log's last record with "end" (a no_path dump may follow it), or None. run_follow's page goes
+    with the run, often before the console's next read of it: its at_start and its end are still in the log."""
+    try:
+        newest = max((d for d in Path(root).iterdir() if RUN_NAME.match(d.name) and d.is_dir()), default=None)
+    except OSError:
+        return None
+    for text in reversed(tail_lines(newest / "log.jsonl", 3, RUN_TAIL) if newest else []):
+        try:
+            record = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and "end" in record:
+            return record
+    return None
+
+
 def list_runs(root=LOG_ROOT, limit=20):
     """The newest run_follow log folders: [{"name", "start", "seconds", "end", "size"}]."""
     try:
@@ -1312,23 +1332,46 @@ def _mission_status(body):
         record = body
     if record is None:
         return None
-    status = {"link": True}
+    remote = record.get("remote")  # --remote runs: false when a command now would not move the robot (silence hold)
+    status = {"link": not isinstance(remote, dict) or remote.get("supervised") is not False}
     if "locked" in record:
         status["locked"] = bool(record.get("locked"))
     if "at_start" in record:
         status["at_start"] = bool(record.get("at_start"))
+    if isinstance(record.get("mode"), str):
+        status["mode"] = record["mode"]  # hmc.follower's mode: "search" is the brain looking for a lost operator
+    if isinstance(record.get("said"), list):
+        status["said"] = record["said"]  # the brain's newest [n, text] lines
     end = record.get("end")
     if end:
         status["end"] = str(end)
     wheels = record.get("wheels")
     if isinstance(wheels, str) and wheels:
         status["wheels"] = wheels
-    pose = record.get("believed") if isinstance(record.get("believed"), dict) else record.get("pose")
-    if isinstance(pose, dict):
+    pose = record.get("believed") if record.get("believed") is not None else record.get("pose")
+    if isinstance(pose, (dict, list)):  # run_follow's are [x, y, heading] lists; hmc.flow takes both
         status["pose"] = pose
     if isinstance(record.get("bag_task"), dict):
         status["bag_task"] = record["bag_task"]  # the executive does not read it: Console._bag_events does
     return status
+
+
+def precheck_report(jetson, wheel, mission, drive):
+    """The executive's precheck from what the console already knows (hmc.flow fails a key only when it is False;
+    unknown stays out). A full mission needs the Jetson agent and its detector (the looks the operator is learned
+    by); a drive needs a last wheel test that did not find the motors without power. Without the base bridge the
+    first follow me is refused anyway (remote.supervised)."""
+    report = {"link": True}
+    if drive and isinstance(wheel, dict) and wheel.get("verdict") == "no_power":
+        report["motor_ok"] = False
+    if mission != "full" or not isinstance(jetson, dict) or jetson.get("checked") is None:
+        return report
+    agent = jetson.get("agent")
+    if not isinstance(agent, dict):
+        report["agent"] = False
+    elif ((agent.get("programs") or {}).get("detector") or {}).get("running") is False:
+        report["reid"] = False
+    return report
 
 
 _RUN_ACTION = {"follow_me": "follow", "wait": "wait", "resume": "resume", "go_back": "return", "stop": "wait"}
@@ -1355,6 +1398,7 @@ class Console:
         self.mission = _load_mission()()
         self._mission_stop = threading.Event()
         self._mission_saw_run = False
+        self._said_n = 0  # the brain's last line sent to the voice
         self._voice_on = False  # this run's say lines go to the parked Jetson flow (_own_flow, _voice_loop)
         self._voice_run = 0  # the run the voice thread serves: a newer run's start ends it
         self._says = queue.SimpleQueue()  # say lines for the voice thread, in order
@@ -1748,9 +1792,10 @@ class Console:
         if task:
             code, status = self.run_status()
             record = status.get("record") if code == 200 and isinstance(status, dict) else None
-            if not isinstance(record, dict):
+            ended = cmd == "drop_bag" and status == {"state": "idle"}  # run_follow ended at the start: nothing moves
+            if not isinstance(record, dict) and not ended:
                 return 503, {"error": "the run's status does not answer: cannot tell whether a bag task moves the base"}
-            if record.get("phase") == "bag":
+            if (record or {}).get("phase") == "bag":
                 return 409, {"error": "a bag task is moving the base: the arm waits until it ended"}
         if cmd == "bagpick":
             putback = body.get("putback", False)
@@ -1818,7 +1863,10 @@ class Console:
                 result = ((status.get("record") or {}).get("bag_task") or {}).get("result")
                 if isinstance(result, dict) and "ok" in result:
                     if result.get("ok") and drive:
-                        self.bag_job("pick_bag", {}, task=True)
+                        code, answer = self.bag_job("pick_bag", {}, task=True)
+                        drop = self.drop_default()
+                        if code == 200 and isinstance(answer, dict) and answer.get("ok") is True and drop.get("x") is not None:
+                            self.bag_job("drop_bag", {"x": drop["x"], "y": drop["y"]}, task=True)  # the arm is free again
                     return
             time.sleep(0.5)
 
@@ -1878,6 +1926,9 @@ class Console:
                     self._mission_saw_run = True
                 elif self._mission_saw_run:
                     self._mission_saw_run = False
+                    last = _mission_status(run_end_record(self.log_root))  # the page is gone: at_start, end in the log
+                    if last is not None:
+                        self._apply(self.mission.on_status(last, now))
                     self._apply(self.mission.on_event(
                         "base_run_ended|BASE_RUN_ENDED|the run ended", now))
                     continue
@@ -1894,10 +1945,21 @@ class Console:
                 if status is None:
                     continue
                 self._apply(self.mission.on_status(status, time.monotonic()))
+                self._brain_says(status.get("said"))
                 for event in self._bag_events(status.get("bag_task")):
                     self._apply(self.mission.on_event(event, time.monotonic()))
             except Exception:
                 continue
+
+    def _brain_says(self, said):
+        """The follower brain's new lines (wait for me, please let me pass, come back) to the voice, each once. The
+        two the executive says itself are left out."""
+        for item in said or ():
+            if not (isinstance(item, list) and len(item) == 2 and isinstance(item[0], int)) or item[0] <= self._said_n:
+                continue
+            self._said_n = item[0]
+            if self._voice_on and isinstance(item[1], str) and item[1] not in EXECUTIVE_SAYS:
+                self._says.put(item[1])
 
     def _apply(self, outputs):
         """Drive run_follow and the arm from the executive; its say lines go to the voice thread. Never stop-all."""
@@ -1923,7 +1985,7 @@ class Console:
             except Exception:
                 continue
 
-    def _begin_mission(self, minutes, mission="full"):
+    def _begin_mission(self, minutes, mission="full", drive=True, speed=None):
         """Reset the executive for the run that just started. The task clock is at most 5:00."""
         job = (self.jobs.status().get("job") or {})
         stem = Path(str(job.get("log") or "")).stem
@@ -1937,11 +1999,14 @@ class Console:
         except OSError:
             pass
         self._mission_saw_run = False
+        self._said_n = 0  # the brain's last line sent to the voice
         self._bag_seen = self._bag_asked = self._bag_said = None
         voice_off = self._own_flow(mission == "full")  # first: the start's own lines are said through it
         # This call runs only after the Pi base program has started, so the local link is up.
         # A later status or NO_LINK can take it down again.
-        self._apply(self.mission.start(time.monotonic(), report={"link": True}, run_id=run_id, limit_s=limit))
+        report = precheck_report(self.jetson.snapshot(), wheel_test_last(self.log_root / "wheel-test" / "last.json"),
+                                 mission, drive)
+        self._apply(self.mission.start(time.monotonic(), report=report, run_id=run_id, limit_s=limit, top_speed=speed))
         if voice_off:
             self._park_flow()
             self._apply(self.mission.on_event("voice_relay_off|" + voice_off, time.monotonic()))
@@ -1985,12 +2050,14 @@ class Console:
         """One run's voice thread, every FLOW_POLL s: the executive's say lines out in order, then one read of what
         the parked flow heard after seq (it renews the lease), each line to the executive. A failed call never ends
         the run: logged once when lost and once when back. It ends one round after the run did (a terminal state,
-        STOP, or the run job's end) with one release, at a newer run's start, or with the console."""
+        STOP, or the run job's end, except on the way back or at the drop: run_follow ends at the start, then the arm
+        drops the bag and the executive says so) with one release, at a newer run's start, or with the console."""
         lost = saw_run = ending = False
         while not self._mission_stop.wait(FLOW_POLL) and self._voice_run == run:
             live = self.live_from_run()
             saw_run = saw_run or live
-            over = not self.mission.running or (saw_run and not live)
+            home = getattr(self.mission, "state", None) in ("RETURNING", "DROPPING")
+            over = not self.mission.running or (saw_run and not live and not home)
             calls = []
             while not self._says.empty():
                 calls.append({"cmd": "say", "text": self._says.get()})
@@ -2032,6 +2099,9 @@ class Console:
         with self._arm_lock:
             if not self.mission.running:
                 return  # STOP or the run's end came while an earlier job held the arm
+            drop = self.drop_default() if action == "drop_bag" else {}
+            if drop.get("x") is not None:
+                params = {"x": drop["x"], "y": drop["y"]}  # so100_ik.reachable_drop, as the Jetson flow drops
             try:  # pick_bag's x and y are the run's reached bag (bag_reached): measured, as bag_job's own from the run
                 code, answer = self.bag_job(action, dict(params, measured=True), task=True)
             except Exception as error:
@@ -2140,7 +2210,7 @@ class Console:
                                                          "virtual": {"host": pc, "port": VIRTUAL_PORT} if virtual else None})
             if not error:
                 self.commander = None  # a new run: no tab leads it until one sends a command
-                self._begin_mission(body.get("minutes"), mission)
+                self._begin_mission(body.get("minutes"), mission, body["drive"], body["speed"])
                 if mission == "bag_only":
                     threading.Thread(target=self._bag_only_worker, args=(body["drive"],), daemon=True).start()
             return (409 if error else 200), {"error": error}

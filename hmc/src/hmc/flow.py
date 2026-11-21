@@ -17,6 +17,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from hmc import hri
+
 ICT = timezone(timedelta(hours=7))
 LIMIT_S = 300.0  # the rulebook 5:00
 RETURN_BUDGET = 180.0  # extra seconds to try to get home after a fault or the clock
@@ -73,7 +75,7 @@ REASONS = {
     "BASE_LINK_DOWN": {
         "en": "The base link is not up, so following and the bag search stay off.",
         "th": "ลิงก์ไปฐานไม่พร้อม จึงยังไม่ตามและยังไม่หาถุง",
-        "fix": "Start the Pi base program.",
+        "fix": "Start the Pi base program, and the base bridge on the Jetson tab: without it the base holds still.",
         "level": "error",
         "outcome": "FAILED",
     },
@@ -419,6 +421,7 @@ class HmcFlow:
         self.running = False
 
     def _cleared(self, now):
+        self.pace = None  # m/s the operator is asked to walk at (hri.PACE_SHARE of the top speed), or None
         self.t0 = None
         self.last_now = now
         self.outcome = None
@@ -556,14 +559,17 @@ class HmcFlow:
 
     # --- public inputs ----------------------------------------------------
 
-    def start(self, now, report=None, run_id=None, limit_s=None):
-        """Reset and start a run. report fails a precheck only when a key is False."""
+    def start(self, now, report=None, run_id=None, limit_s=None, top_speed=None):
+        """Reset and start a run. report fails a precheck only when a key is False. top_speed (m/s) sets the pace
+        the operator is asked to walk at once the robot follows."""
         with self._lock:
             keep_log, keep_id = self.log_path, self.run_id
             self._cleared(now)
             self.log_path, self.run_id = keep_log, run_id or keep_id
             if limit_s is not None:
                 self.limit_s = float(limit_s)
+            if top_speed:
+                self.pace = hri.PACE_SHARE * float(top_speed)
             self.t0 = now
             self.running = True
             self.last_now = now
@@ -887,7 +893,8 @@ class HmcFlow:
 
     def _locked(self, now):
         if self.state == "ENROLLING":
-            return self._enter("FOLLOWING", now, say="I will follow you.")
+            out = self._enter("FOLLOWING", now, say="I will follow you.")
+            return out + ([("say", hri.walk_slowly_text(self.pace))] if self.pace else [])
         if self.state == "LOST_SEARCH":
             self.come_back_said = False
             return self._enter("FOLLOWING", now, say="I see you again. I will follow you.")
@@ -934,7 +941,7 @@ class HmcFlow:
             mapped = code
         else:
             mapped = code_from_pi_end(detail or code)
-        if self.state in TERMINAL or not self.running:
+        if self.state in TERMINAL or not self.running or self.state == "DROPPING":  # the drop needs no base
             self._log("ignored", self.state, code=mapped, detail=self._saw_end)
             return [("log", "(base run ended in %s: expected)" % self.state)]
         return self._finish(now, mapped, self._saw_end)
@@ -1065,8 +1072,11 @@ class HmcFlow:
             elif self.link_lost_at is None:
                 self.link_ok = False
                 self.link_lost_at = now
-        if status.get("locked"):
+        searching = status.get("mode") == "search"  # hmc.follower Mode.SEARCH: the brain lost the operator, looks
+        if status.get("locked") and not searching:
             outs += self._locked(now)
+        if searching and self.state == "FOLLOWING":
+            outs += self._event("lost_person", "", "", {}, now)
         if status.get("at_start") and self.state == "RETURNING":
             outs += self._arrived_home(now)
         wheels = status.get("wheels")
@@ -1098,9 +1108,8 @@ class HmcFlow:
         if state == "LOST_SEARCH" and not self.come_back_said and self.deadline is not None \
                 and now >= self.deadline:
             self.come_back_said = True
-            self._set_reason("OPERATOR_LOST", "search budget")
-            self.last_say = "Please come back."
-            return [("say", "Please come back.")]
+            self._set_reason("OPERATOR_LOST", "search budget")  # the brain asks them back once (hri.COME_BACK_TEXT)
+            return []
         if state == "CONFIRM_CAR" and now - self.last_prompt >= CONFIRM_S:
             self.confirm_asks += 1
             self.last_prompt = now

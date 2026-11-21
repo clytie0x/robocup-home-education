@@ -202,15 +202,22 @@ class Log:
         self.file.close()
 
 
+SAID_KEPT = 3  # the brain's newest lines on every record: the console reads about one record in five
+
+
 class Speech:
-    """What the brain says. Printed and logged for now; the voice work plugs in here later."""
+    """What the brain says: printed, logged, and the newest SAID_KEPT lines on each record as [n, text] (n counts
+    from 1 each run), which the console sends on to the Jetson's voice."""
 
     def __init__(self, log):
         self.log = log
+        self.said, self.count = [], 0
 
     def say(self, time, text):
         print("[%.1f] SAY: %s" % (time, text))
         self.log.write({"time": time, "say": text})
+        self.count += 1
+        self.said = (self.said + [[self.count, text]])[-SAID_KEPT:]
 
 
 def _no_jpeg(frame):
@@ -237,6 +244,7 @@ class State:
         # (navigation.follow_step -> Robot.drive_toward uses distance(robot.pos, target)).
         # follow_gap is measured from the robot's front edge, so add the centre-to-front length.
         self.speech = Speech(log)
+        self.reid = self.reid_logged = None  # the re-id model the operator's look is learned with; the last switch logged
         self.follower = Follower(self.body.robot, self.speech, follow_distance=p["follow_gap"] + safety.FRONT,
                                  search_again_every=SEARCH_AGAIN_EVERY, restart_gap=RESTART_GAP,
                                  wait_gap=WAIT_GAP, go_on_gap=GO_ON_GAP)
@@ -464,6 +472,25 @@ def _remote_commands(state, now):
             state.silent = False
             state.log.write({"time": now, "remote": "silence hold released by %s" % cmd})
     return taken
+
+
+def _one_model(state, answer, now):
+    """Looks only from the re-id model the operator's look is learned with. reid.py's fallbacks can switch models
+    mid-run, and two OSNet models give looks of the same length that cannot be compared: those looks are left out
+    (the person, the LiDAR track and the clothes stay), and each switch is logged once."""
+    model = getattr(answer, "reid", None)
+    if model is None:
+        return answer
+    if not state.follower.operator_look.count or state.reid is None:
+        state.reid = model  # nothing learned yet (or learned before the first answer that named its model)
+        return answer
+    if model == state.reid:
+        return answer
+    if state.reid_logged != model:
+        state.reid_logged = model
+        state.log.write({"time": now, "reid": "model %s, the look was learned with %s: looks not compared" % (
+            model, state.reid)})
+    return dataclasses.replace(answer, people=[dataclasses.replace(s, look=None) for s in answer.people])
 
 
 def _bag_refused(state, cmd):
@@ -785,7 +812,7 @@ def cycle(state, now):
         state.cable.update(pose[2], now, pose)  # the odometry pose, never the keyframe-corrected one
     scan = state.lidar.latest()
     frame = state.camera.latest()
-    answer = state.link.latest() if state.link is not None else None
+    answer = _one_model(state, state.link.latest() if state.link is not None else None, now)
     link_alive = state.link is not None and state.link.alive(now, p["jetson_silence"])
     sensed = scan  # what the senses read; the safety stop, the motion, the keyframes and the logs keep the real scan
     if state.virtual is not None:  # --virtual-operator: the simulated person in the scan and the camera answer
@@ -1028,6 +1055,8 @@ def cycle(state, now):
         "believed": list(believed),  # the pose the brain used: odometry moved by the keyframe corrections
         "breadcrumbs": len(follower.route.points),
         "target": None if state.returner is None or state.returner.target is None else list(state.returner.target),
+        "at_start": state.returner is not None and state.returner.done,  # back at the start (the status line's at_start)
+        "said": list(state.speech.said),  # the brain's newest lines, for the voice
         "keyframe": report,  # the match against the nearest keyframe (RETURN), or None
         "queue": state.queue.last_tail[1] if state.joined and state.queue.last_tail else None,  # tail's id
         "wheels": state.wheels_alarm,  # "not turning" or "fault 03" while held for it (_watch_wheels), else None
@@ -1045,7 +1074,9 @@ def cycle(state, now):
         record["virtual_pointing"] = state.virtual.report.get("pointing")  # [x, y] in place of the camera's pointing
     if state.remote is not None:
         record["remote"] = {"waiting": state.waiting, "held": _held_now(state), "silent_s": round(state.remote.silent(now), 2),
-                            "last_cmd": state.ack}
+                            "last_cmd": state.ack,
+                            # a command now would move the robot: the client was heard lately, or the page polls
+                            "supervised": state.remote.silent(now) <= REMOTE_SILENCE or state.controls.page_alive(now)}
     if state.phase == DONE:
         _stop_wheels(state)
         record["end"] = "done: back at the start"

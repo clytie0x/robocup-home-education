@@ -245,7 +245,8 @@ def test_link_back_inside_the_grace_stays(tmp_path):
     assert flow.reason is None
 
 
-def test_lost_operator_asks_them_back_and_stays(tmp_path):
+def test_lost_operator_waits_for_the_brains_one_ask_and_stays(tmp_path):
+    # the follower brain asks them back once (hri.COME_BACK_TEXT, -150 when the run scores on): no second ask here
     flow = begin(tmp_path, "lost")
     follow(flow, 2.0)
     flow.on_event("lost_person", 5.0)
@@ -255,9 +256,35 @@ def test_lost_operator_asks_them_back_and_stays(tmp_path):
     assert flow.state == "LOST_SEARCH"
     assert flow.running
     assert flow.reason["code"] == "OPERATOR_LOST"
-    assert says(out) == ["Please come back."]
+    assert says(out) == []
     flow.on_event("locked", 30.0)
     assert flow.state == "FOLLOWING"
+
+
+def test_the_operator_is_asked_to_walk_at_a_pace_the_base_can_follow(tmp_path):
+    flow = fresh(tmp_path, "pace")
+    flow.start(0.0, report=OK, top_speed=0.12)
+    flow.on_heard("follow me", 1.0)
+    out = flow.on_event("locked", 1.1)
+    assert says(out) == ["I will follow you.", "Please walk slowly, at about 0.1 metres per second, so I can follow you."]
+    quiet = begin(tmp_path, "no_pace")  # no top speed given: no number to ask for
+    quiet.on_heard("follow me", 1.0)
+    assert says(quiet.on_event("locked", 1.1)) == ["I will follow you."]
+
+
+def test_the_brains_search_is_the_lost_operator(tmp_path):
+    flow = begin(tmp_path, "search")
+    follow(flow, 2.0)
+    flow.on_status({"link": True, "locked": False, "mode": "search"}, 5.0)
+    assert flow.state == "LOST_SEARCH"
+    flow.on_status({"link": True, "locked": True, "mode": "search"}, 5.5)  # the track, but still looking
+    assert flow.state == "LOST_SEARCH"
+    flow.on_status({"link": True, "locked": True, "mode": "follow"}, 6.0)
+    assert flow.state == "FOLLOWING"
+    flow.on_heard("this is the car", 7.0)
+    assert flow.state == "CONFIRM_CAR"
+    flow.on_status({"link": True, "locked": False, "mode": "search"}, 7.5)
+    assert flow.state == "CONFIRM_CAR"
 
 
 def test_pause_on_the_way_back_does_not_resume_itself(tmp_path):
@@ -315,7 +342,7 @@ def test_no_link_on_the_bag_search_does_not_resend_find_bag(tmp_path):
     to_point(flow)
     out = flow.on_event("bag_failed|NO_LINK|the link to the base is down", 6.0)
     assert flow.reason["code"] == "BASE_LINK_DOWN"
-    assert flow.reason["fix"] == "Start the Pi base program."
+    assert flow.reason["fix"] == REASONS["BASE_LINK_DOWN"]["fix"]
     assert flow.state == "POINTING"
     assert "find_bag" not in actions(out)
     assert "go_back" not in actions(out)
@@ -362,7 +389,7 @@ def test_an_unknown_link_does_not_start_following(tmp_path):
     assert actions(out) == []
     assert flow.reason["code"] == "BASE_LINK_DOWN"
     assert "ฐาน" in flow.reason["th"]
-    assert flow.reason["fix"] == "Start the Pi base program."
+    assert flow.reason["fix"] == REASONS["BASE_LINK_DOWN"]["fix"]
     flow.on_heard("follow me", 2.0)
     out = flow.on_heard("follow me", 3.0)
     assert says(out) == []
@@ -399,6 +426,23 @@ def test_a_pi_end_after_done_does_not_change_the_outcome(tmp_path):
     assert flow.state == "DONE"
     assert flow.outcome == "SUCCESS"
     assert flow.reason["code"] == "SUCCESS"
+
+
+def test_the_base_run_ending_at_the_start_does_not_fail_the_drop(tmp_path):
+    # the real run_follow reports at_start and ends (DONE) in the same cycle: the arm drops after the base stopped
+    flow = begin(tmp_path, "end_at_start")
+    follow(flow)
+    to_car(flow)
+    to_point(flow)
+    to_pick(flow)
+    flow.on_event("grab_success", 6.0)
+    out = flow.on_status({"link": True, "at_start": True, "end": "done: back at the start"}, 6.1)
+    assert flow.state == "DROPPING"
+    assert actions(out) == ["drop_bag"]
+    flow.on_event("base_run_ended|BASE_RUN_ENDED|the run ended", 6.5)
+    assert flow.state == "DROPPING"
+    flow.on_event("drop_done", 7.0)
+    assert (flow.state, flow.outcome) == ("DONE", "SUCCESS")
 
 
 def test_unknown_precheck_fields_still_start(tmp_path):

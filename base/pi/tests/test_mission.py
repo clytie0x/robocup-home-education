@@ -1,5 +1,6 @@
 """The console executive: start, GET /api/state, arm refusal, STOP without stop-all."""
 import json
+import sys
 import tempfile
 import threading
 import time
@@ -128,7 +129,8 @@ class MissionTest(unittest.TestCase):
             body = json.loads(raw)
             self.assertEqual(body["mission"]["state"], "READY")
             self.assertEqual(body["mission"]["reason"]["code"], "BASE_LINK_DOWN")
-            self.assertEqual(body["mission"]["reason"]["fix"], "Start the Pi base program.")
+            self.assertEqual(body["mission"]["reason"]["fix"],
+                             "Start the Pi base program, and the base bridge on the Jetson tab: without it the base holds still.")
         self.assertNotIn("follow", self.run.commands)
         code, raw = self.request("/api/mission/event", {"event": "base_link_ok"}, pin="2468")
         self.assertEqual(code, 200, raw)
@@ -136,6 +138,29 @@ class MissionTest(unittest.TestCase):
         body = json.loads(raw)
         self.assertEqual(body["mission"]["state"], "ENROLLING")
         self.assertIn("follow", self.run.commands)
+
+
+class PrecheckTest(unittest.TestCase):
+    """What the console knows at a run's start, as hmc.flow's precheck reads it: a key fails only when False."""
+
+    UP = {"agent": {"programs": {"detector": {"running": True}, "bridge": {"running": True}}}, "checked": 1.0}
+
+    def test_a_healthy_robot_passes_and_unknown_stays_unknown(self):
+        self.assertEqual(console.precheck_report(self.UP, {"verdict": "ok"}, "full", True), {"link": True})
+        not_asked = {"agent": None, "agent_error": "not asked yet", "checked": None}
+        self.assertEqual(console.precheck_report(not_asked, None, "full", True), {"link": True})
+
+    def test_what_would_fail_the_task_fails_the_start(self):
+        down = {"agent": None, "agent_error": "the Jetson does not answer", "checked": 1.0}
+        self.assertIs(console.precheck_report(down, None, "full", True)["agent"], False)
+        no_detector = {"agent": {"programs": {"detector": {"running": False}}}, "checked": 1.0}
+        self.assertIs(console.precheck_report(no_detector, None, "full", True)["reid"], False)
+        self.assertIs(console.precheck_report(self.UP, {"verdict": "no_power"}, "full", True)["motor_ok"], False)
+
+    def test_a_dry_run_and_the_step_missions_ask_less(self):
+        self.assertNotIn("motor_ok", console.precheck_report(self.UP, {"verdict": "no_power"}, "full", False))
+        down = {"agent": None, "agent_error": "the Jetson does not answer", "checked": 1.0}
+        self.assertEqual(console.precheck_report(down, None, "follow_only", True), {"link": True})
 
 
 class FlowAgent:
@@ -321,12 +346,120 @@ class RelayTest(unittest.TestCase):
         self.assertEqual([e for e in self.events if e.startswith("bag_")],
                          ["bag_chosen|LEFT|I see the bag on the left.", "bag_reached|OK|0.310,0.020,top=0.200"])
         self.assertEqual(self.flow.says().count("I see the bag on the left."), 1)
-        self.run.record = dict(self.run.record, phase="return", at_start=True)
+        self.console._drop = {"x": 0.38, "y": 0.0}  # so100_ik.reachable_drop
+        # as the real run_follow: at_start and its end in the same record, the base stopped (DONE)
+        self.run.record = dict(self.run.record, phase="done", at_start=True, end="done: back at the start")
         self.wait_until(lambda: self.state() == "DONE", "DONE after drop_done")
-        self.assertEqual(self.arm_posts()[1], ({"cmd": "drop_bag", "x": 0.31, "y": 0.0}, console.ARM_JOB_TIMEOUT))
+        self.assertEqual(self.arm_posts()[1], ({"cmd": "drop_bag", "x": 0.38, "y": 0.0}, console.ARM_JOB_TIMEOUT))
         self.assertIn("drop_done", self.events)
         self.assertEqual(self.mission()["outcome"], "SUCCESS")
         self.wait_until(lambda: self.flow.sent("release"), "release at DONE")
+
+    def test_a_run_that_ended_at_the_start_still_drops_and_says_so(self):
+        # run_follow ends in the cycle it arrives and its page goes with it: the console reads that end in its log
+        self.console._drop = {"x": 0.38, "y": 0.0}
+        self.to_pointing()
+        self.reach_bag()
+        self.wait_until(lambda: self.state() == "RETURNING", "RETURNING after grab_success")
+        self.run.record = dict(self.run.record, phase="return")
+        log = Path(self.console.mission.log_path).parent / "log.jsonl"
+        log.write_text(json.dumps({"time": 1.0, "phase": "done", "at_start": True,
+                                   "end": "done: back at the start"}) + "\n", encoding="utf-8")
+        self.jobs.running = None
+        self.wait_until(lambda: self.state() == "DONE", "DONE after drop_done")
+        self.assertEqual(self.arm_posts()[1], ({"cmd": "drop_bag", "x": 0.38, "y": 0.0}, console.ARM_JOB_TIMEOUT))
+        self.assertEqual(self.mission()["outcome"], "SUCCESS")
+        self.wait_until(lambda: "Here is your bag." in self.flow.says(), "the last line said")
+        self.assertIn("I am back at the start.", self.flow.says())
+        self.wait_until(lambda: self.flow.sent("release"), "release at DONE")
+        time.sleep(0.6)
+        self.assertEqual(len(self.flow.sent("release")), 1)
+
+    def test_the_car_is_stored_from_the_runs_believed_pose(self):
+        # run_follow's believed and pose are [x, y, heading] lists: the car pose must not stay empty
+        status = console._mission_status({"record": {"believed": [4.0, 1.5, 0.4], "pose": [3.9, 1.6, 0.3]}})
+        self.assertEqual(status["pose"], [4.0, 1.5, 0.4])
+        self.start()
+        self.run.record = {"phase": "follow", "believed": [4.0, 1.5, 0.4]}
+        time.sleep(0.6)  # one status read
+        for path, key, value in (("hear", "text", "follow me"), ("event", "event", "locked"), ("hear", "text", "stop"),
+                                 ("hear", "text", "yes")):
+            code, raw = self.request("/api/mission/" + path, {key: value}, pin="2468")
+            self.assertEqual(code, 200, raw)
+        self.assertEqual(self.state(), "AT_CAR")
+        self.assertEqual(self.console.mission.car_pose, {"x": 4.0, "y": 1.5, "heading": 0.4})
+
+    def test_bag_only_drive_picks_then_puts_the_bag_down(self):
+        # the step test of the bag: bag_near, the pick, then the drop, so the arm is free for the next try
+        self.console._drop = {"x": 0.38, "y": 0.0}
+        self.jobs.running = {"kind": "task", "label": "bag only"}
+        self.reach_bag()
+        code, raw = self.request("/api/task/start", {"drive": True, "speed": 0.08, "minutes": 5,
+                                                     "mission": "bag_only"}, pin="2468")
+        self.assertEqual(code, 200, raw)
+        self.wait_until(lambda: len(self.arm_posts()) == 2, "the pick, then the drop")
+        self.assertIn("bag_near", self.run.commands)
+        self.assertEqual([body for body, _ in self.arm_posts()],
+                         [{"cmd": "pick_bag", "x": 0.31, "y": 0.02, "top": 0.2}, {"cmd": "drop_bag", "x": 0.38, "y": 0.0}])
+
+    def test_a_run_nobody_supervises_refuses_to_follow_and_fails(self):
+        # no client heard lately and no page polling: run_follow holds still for the silence, so a follow would not
+        # move the robot. The executive must say so and fail, not wait forever with the wheels held.
+        flow = sys.modules[console._load_mission().__module__]
+        saved, flow.LINK_GRACE_S = flow.LINK_GRACE_S, 1.5
+        self.addCleanup(setattr, flow, "LINK_GRACE_S", saved)
+        self.start()
+        remote = {"waiting": False, "held": "silent", "silent_s": 3.0, "last_cmd": None}
+        self.run.record = {"phase": "idle", "remote": dict(remote, supervised=False)}
+        self.wait_until(lambda: self.console.mission.link_ok is False, "the base seen unsupervised")
+        code, raw = self.request("/api/mission/hear", {"text": "follow me"}, pin="2468")
+        self.assertEqual(code, 200, raw)
+        body = json.loads(raw)["mission"]
+        self.assertEqual((body["state"], body["reason"]["code"]), ("READY", "BASE_LINK_DOWN"))
+        self.assertIn("base bridge", body["reason"]["fix"])
+        self.assertNotIn("follow", self.run.commands)
+        self.wait_until(lambda: self.state() == "FAILED", "FAILED after the grace")
+        # supervised again in a new run: the follow goes out
+        self.start()
+        self.run.record = {"phase": "idle", "remote": dict(remote, held=None, silent_s=0.3, supervised=True)}
+        self.wait_until(lambda: self.console.mission.link_ok is True, "the base seen supervised")
+        code, raw = self.request("/api/mission/hear", {"text": "follow me"}, pin="2468")
+        self.assertEqual(json.loads(raw)["mission"]["state"], "ENROLLING")
+        self.assertIn("follow", self.run.commands)
+
+    def test_a_start_with_the_detector_down_fails_the_precheck(self):
+        self.console.jetson.agent = {"programs": {"detector": {"running": False}, "bridge": {"running": True}}}
+        self.console.jetson.checked = time.time()
+        self.start()
+        self.assertEqual((self.state(), self.mission()["reason"]["code"]), ("FAILED", "REID_DOWN"))
+        self.assertNotIn("follow", self.run.commands)
+
+    def test_the_brains_lines_are_said_once_and_its_search_is_the_lost_operator(self):
+        console._load_mission()
+        from hmc import hri
+        self.assertEqual(console.EXECUTIVE_SAYS, (hri.RETURN_TEXT, hri.ARRIVED_TEXT))
+        self.start()
+        self.flow.hear("follow me")
+        self.wait_until(lambda: self.state() == "ENROLLING", "ENROLLING")
+        self.run.record = {"phase": "follow", "locked": True, "mode": "follow",
+                           "said": [[1, hri.WAIT_TEXT], [2, hri.RETURN_TEXT]]}
+        self.wait_until(lambda: self.state() == "FOLLOWING", "FOLLOWING")
+        self.wait_until(lambda: hri.WAIT_TEXT in self.flow.says(), "the brain's line said")
+        time.sleep(1.2)  # more reads of the same record
+        self.assertEqual(self.flow.says().count(hri.WAIT_TEXT), 1)
+        self.assertNotIn(hri.RETURN_TEXT, self.flow.says())  # the executive says that one itself
+        self.run.record = {"phase": "follow", "locked": False, "mode": "search",
+                           "said": [[2, hri.RETURN_TEXT], [3, hri.COME_BACK_TEXT]]}
+        self.wait_until(lambda: self.state() == "LOST_SEARCH", "LOST_SEARCH")
+        self.wait_until(lambda: hri.COME_BACK_TEXT in self.flow.says(), "the one ask to come back")
+
+    def test_the_run_asks_for_a_pace_from_its_top_speed(self):
+        self.start()  # 0.08 m/s
+        self.flow.hear("follow me")
+        self.wait_until(lambda: self.state() == "ENROLLING", "ENROLLING")
+        self.run.record = {"phase": "follow", "locked": True, "mode": "follow"}
+        self.wait_until(lambda: "Please walk slowly, at about 0.06 metres per second, so I can follow you."
+                        in self.flow.says(), "the pace said after the lock")
 
     def test_a_missed_pick_measures_the_bag_again(self):
         self.flow.arm_answer = (409, {"ok": False, "error": "MISSED: closed on air", "code": "MISSED",

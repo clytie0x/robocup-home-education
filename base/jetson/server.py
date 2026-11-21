@@ -9,6 +9,8 @@ has "kp": 17 COCO keypoints [x, y, visibility] in the frame's pixels. Old client
 The real server also judges each frame's light (light.FrameGate): "quality": {"ok", "why", "luma"}, ok False for a
 frame too dark, too saturated or a flash, and gives each person "light", the mean luma of their box (light.box_light),
 so the Pi compares a look only in about the light the operator was learned in.
+"reid": "<backend> <engine file>" names the model the looks come from; reid.py's fallbacks can switch it
+mid-run, and the Pi then leaves out looks from a model other than the one the operator was learned with.
 
 Run: python3 server.py --fake      (answers one person in the middle, for testing the link)
      python3 server.py             (TensorRT detector and OSNet looks, see DETECTOR and REID; pose with POSE)
@@ -22,6 +24,7 @@ points at the bag.
 
 import argparse
 import json
+import os
 import socket
 import struct
 import threading
@@ -83,6 +86,8 @@ def seen_in(jpeg, detector, reid, pose=None, gate=None, normalise="none"):
         attach_keypoints(people, pose.poses(bgr))
     seen = {"people": people,
             "objects": [{"cls": o[5], "box": [float(v) for v in o[:4]], "conf": float(o[4])} for o in objects]}
+    if getattr(reid, "backend", None):  # the model the looks come from: the Pi never compares two models' looks
+        seen["reid"] = "%s %s" % (reid.backend, os.path.basename(getattr(reid, "path", "") or ""))
     if gate is not None:
         ok, why = gate.check(raw)
         seen["quality"] = {"ok": ok, "why": why, "luma": round(gate.mean, 1)}

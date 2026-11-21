@@ -25,7 +25,7 @@ BAG_VOTES = 5  # frames that must point at the same bag (and 3 more than at any 
 RAY_FRAMES = 5  # frames of the pointing arm we average before we look for the bag
 LOOK_ALONG_RAY = 2.0  # metres; to find the bag we look at this point along the arm
 # Pace. We ask the operator to walk a bit slower than we can drive, so we keep up.
-PACE_SHARE = 0.8  # the pace we ask for, as a share of our top speed
+PACE_SHARE = hri.PACE_SHARE  # the pace we ask for, as a share of our top speed
 
 
 class State(Enum):

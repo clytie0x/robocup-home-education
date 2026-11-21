@@ -1201,6 +1201,31 @@ class WheelWatch(Logged):
 
 
 
+class OneReIdModelTest(unittest.TestCase):
+    def test_looks_from_another_re_id_model_are_left_out_once_learned(self):
+        # reid.py's fallbacks switch OSNet models mid-run: the same 512 numbers, a different space
+        lines = []
+        state = SimpleNamespace(reid=None, reid_logged=None, log=SimpleNamespace(write=lines.append),
+                                follower=SimpleNamespace(operator_look=SimpleNamespace(count=0)))
+
+        def answer(model):
+            return Answer(1.0, [Seen(3.0, 0.9, LOOK, [0, 0, 1, 1])], reid=model)
+
+        first = answer("tensorrt osnet_ain.engine")
+        self.assertIs(run_follow._one_model(state, first, 1.0), first)  # nothing learned: adopted
+        self.assertEqual(state.reid, "tensorrt osnet_ain.engine")
+        state.follower.operator_look.count = 20
+        same = answer("tensorrt osnet_ain.engine")
+        self.assertIs(run_follow._one_model(state, same, 2.0), same)
+        for t in (3.0, 3.1):
+            got = run_follow._one_model(state, answer("tensorrt osnet_x0_25.engine"), t)
+            self.assertEqual([s.look for s in got.people], [None])
+            self.assertEqual(got.people[0].bearing_deg, 3.0)  # the person stays: only the look goes
+        self.assertEqual(len([line for line in lines if "reid" in line]), 1)  # logged once
+        old = answer(None)  # a server from before: nothing to compare
+        self.assertIs(run_follow._one_model(state, old, 4.0), old)
+
+
 class Remote(Logged):
     """--remote: the Jetson's commands over TCP instead of Enter (integration design D2)."""
 
@@ -1245,7 +1270,8 @@ class Remote(Logged):
         self.assertEqual(base.sent[-1], (0.1, 0.0))
         status = jetson.read()[-1]
         self.assertEqual((status["phase"], status["ack"], status["waiting"]), ("FOLLOW", "follow", False))
-        self.assertEqual(record["remote"], {"waiting": False, "held": None, "silent_s": 0.0, "last_cmd": "follow"})
+        self.assertEqual(record["remote"], {"waiting": False, "held": None, "silent_s": 0.0, "last_cmd": "follow",
+                                            "supervised": True})
 
     def test_idle_senses_and_enrols_the_operator_without_moving(self):
         base = FakeBase()
@@ -1302,6 +1328,14 @@ class Remote(Logged):
         self.assertEqual((status["phase"], status["ack"], status["waiting"], status["breadcrumbs"], status["at_start"]),
                          ("RETURN", "return", False, 5, False))
 
+    def test_the_brains_newest_lines_ride_on_every_record(self):
+        # the console reads one record every 0.5 s and sends each new line to the Jetson's voice once
+        state = self.remote_state(FakeBase(), brain=None)
+        for i, text in enumerate(("one.", "two.", "three.", "four.")):
+            state.speech.say(0.01 * i, text)
+        record = self.cycle(state, 0.0)
+        self.assertEqual(record["said"], [[2, "two."], [3, "three."], [4, "four."]])
+
     def test_back_at_the_start_reports_at_start_and_ends(self):
         base = FakeBase()
         state = self.remote_state(base, brain=None)
@@ -1311,6 +1345,7 @@ class Remote(Logged):
         jetson.cmd("return")  # before it moved: it is at the start at once
         record = self.cycle(state, 0.1)
         self.assertTrue(record["end"].startswith("done"), record)
+        self.assertIs(record["at_start"], True)  # in the record the console reads too, not only the status line
         self.assertEqual(base.stops, 1)  # S#
         status = jetson.read()[-1]
         self.assertEqual((status["phase"], status["at_start"], status["ack"]), ("DONE", True, "return"))
@@ -1375,7 +1410,8 @@ class Remote(Logged):
         replies = jetson.read()
         self.assertEqual(len([r for r in replies if "error" in r]), 5)
         self.assertEqual((record["phase"], record["v"], record["stop"]), ("follow", 0.1, None))
-        self.assertEqual(record["remote"], {"waiting": False, "held": None, "silent_s": 0.1, "last_cmd": "follow"})  # not heard
+        self.assertEqual(record["remote"], {"waiting": False, "held": None, "silent_s": 0.1, "last_cmd": "follow",
+                                            "supervised": True})  # not heard
 
     def test_a_second_client_replaces_the_first(self):
         state = self.remote_state(FakeBase())
@@ -1462,10 +1498,12 @@ class Remote(Logged):
         state = self.remote_state(base)
         record = self.quiet(state, 0.0, 2.1)
         self.assertEqual((record["phase"], record["stop"], record["remote"]["held"]), ("idle", "idle", "silent"))
+        self.assertIs(record["remote"]["supervised"], False)  # a command now would not move it: the console must know
         jetson = self.client()
         jetson.cmd("follow")
         record = self.cycle(state, 2.2)
         self.assertEqual((record["phase"], record["v"], record["stop"]), ("follow", 0.1, None))
+        self.assertIs(record["remote"]["supervised"], True)
 
     def test_only_malformed_lines_past_two_seconds_still_hold(self):
         base = FakeBase()
@@ -1709,10 +1747,12 @@ class Remote(Logged):
         state.controls.command("follow")
         record = self.polled(state, 2.2, 5.0)  # the page leads while it polls: the client's silence holds nothing
         self.assertEqual((record["phase"], record["v"], record["stop"]), ("follow", 0.1, None))
+        self.assertIs(record["remote"]["supervised"], True)
         record = self.polled(state, 5.1, 6.9, poll=False)  # the phone lost the Wi-Fi: under 2 s, still driving
         self.assertEqual(record["stop"], None)
         record = self.polled(state, 7.0, 7.0, poll=False)  # 2 s without a poll: the silence hold is back
         self.assertEqual((record["v"], record["stop"]), (0.0, "silent"))
+        self.assertIs(record["remote"]["supervised"], False)
         record = self.polled(state, 7.1, 7.5)  # polling again does not release it by itself
         self.assertEqual(record["stop"], "silent")
         state.controls.command("resume")

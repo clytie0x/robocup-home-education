@@ -183,6 +183,23 @@ class EnginePlanTests(unittest.TestCase):
         self.assertEqual(len(again[0]), 128)
         self.assertAlmostEqual(float(np.dot(again[0], again[0])), 1.0, places=5)
 
+    def test_the_fallback_engine_becomes_the_path_the_reply_names(self):
+        from unittest import mock
+
+        class Boom:
+            max_input_shape = (1, 3, 256, 128)
+            device_mismatch = False
+
+            def run(self, batch):
+                raise RuntimeError("TensorRT execute failed: CUDA 720")
+
+        loaded = mock.MagicMock(max_input_shape=(1, 3, 256, 128))
+        loaded.run.return_value = [np.ones((1, 4), np.float32)]
+        with mock.patch("engine.Engine", return_value=loaded):
+            model = reid.ReId("osnet_ain.engine", runner=Boom(), trtexec=False, fallback_path="osnet_x0_25.engine")
+            model.looks(np.zeros((40, 40, 3), np.uint8), [(0, 0, 10, 30)])
+        self.assertEqual((model.backend, model.path), ("tensorrt", "osnet_x0_25.engine"))
+
     def test_a_different_device_rebuilds_once_then_uses_the_histogram(self):
         import os
         import tempfile
