@@ -81,7 +81,11 @@ bag too tall for the image and bare floor are all refused.
 
 ## (2) RGB path (Jetson, `base/jetson/front_camera.py`)
 
-**Model.** Pinhole with fx = fy and cx, cy at the image centre ((W-1)/2, (H-1)/2). The camera sits at (x, y, z)
+**Where it looks.** Since 2026-11-18 the front camera looks down at the floor ahead from about 0.8 to 0.9 m up.
+Before that it looked straight ahead. See "Calibrating the front camera" for the two calibrations since.
+
+**Model.** Pinhole with fx = fy; cx, cy from the file, else the image centre ((W-1)/2, (H-1)/2). `dist_model`
+"fisheye" adds OpenCV's equidistant lens (k1..k4 in `dist`) to the projection and the ray. The camera sits at (x, y, z)
 in the robot frame and is turned by yaw (+ left), pitch (+ down) and roll (+ right side down). `mirror` is set
 when the image is flipped left-right. The model is stored in `~/hmc-follow/front_camera.json`. Without that file,
 or with `"calibrated": false`, `project` and `ray` raise `NotCalibrated`, and the service answers without a top.
@@ -141,6 +145,16 @@ segmenter that finds nothing, a missing frame and a missing calibration are all 
 
 ## Calibrating the front camera (`base/jetson/tools/front_cam_cal.py`, room lit)
 
+Since 2026-11-18 the camera looks down, and it is calibrated with red discs at taped floor points instead
+(`base/jetson/tools/front_cam_bag_cal.py discs`, the robot standing, no wall):
+- 2026-11-18, the AX1080P, pinhole: 61.4 deg down, lens 0.89 m up (owner's tape), rms 5.4 px
+  (`base/jetson/calibration/front-camera-2026-11-18/front_camera.json`).
+- 2026-11-20, a new camera (HD USB Camera 32e4:9320), fisheye: 47.7 deg down, lens 0.83 m up and 0.225 m ahead of
+  the turning centre (owner's tape), rms 2.3 px (`docs/calibration/front-camera-2026-11-20-discs/`). It needs the
+  fisheye code (77a8cc4) on the robot first. Its README of 2026-11-20 says it is not on the robot yet.
+
+The wall method below is from the camera that looked ahead.
+
 **Data so far** (this room). The front wall is 2.26 m ahead (LiDAR line fit). The wall-floor line, the bottom
 edge of a black baseboard, is seen in the image. On-the-spot turns of 0, 11.47 and 20.70 deg (LiDAR) moved a
 vertical cabinet edge to columns 627.5, 450.0 and 294.0.
@@ -190,14 +204,14 @@ rendered images, start fx 480, z 0.25, angles 0):
 So the three turns measured so far would not be enough even with clean floor-line pixels. Turns to both sides,
 or a second distance, are needed.
 
-**Not modelled.** Lens distortion is not modelled. The cabinet edge sat at column 627.5, at the image's edge,
-where a webcam distorts most. A high rms after a fit (over 1.5 px) is the sign of it, and then a radial term
-must be added.
+**Lens distortion.** The pinhole files model none. The cabinet edge sat at column 627.5, at the image's edge,
+where a webcam distorts most. A high rms after a fit (over 1.5 px) is the sign of it. The 2026-11-20 fisheye file
+carries k1, k2 from a tile fit (`docs/calibration/front_camera_fisheye_candidate_2026-11-20.md`).
 
 ## What still needs the robot and the lit room
 
-- The front camera calibration (above). No front_camera.json exists yet, so the RGB path answers "not
-  calibrated" until it does.
+- The new front camera's file on the robot (above), after the fisheye code. Without a calibrated
+  `~/hmc-follow/front_camera.json` the RGB path answers "not calibrated".
 - The depth path on the real bags:
   - the pink gift bag, the clear plastic bag (it may give little depth), and a dark bag;
   - the valid share and the confidence each one gets;
