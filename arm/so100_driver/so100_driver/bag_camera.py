@@ -35,11 +35,13 @@ fisheye when that file says dist_model "fisheye".
      No straight lift first, no Xtion check on the way (robot, 2026-11-20: the bag held in every pick). Then,
      from the side (the arm out of the front camera's picture): the bag must have left its place on the floor
      (spot_left), else (it slipped out) open, look again, next try. The result code is SUCCESS_UNVERIFIED when
-     the gripper closed but the camera could not tell (no picture, or the bag carried in front).
+     the gripper closed but the camera could not tell (no picture, the bag carried in front, or no bag found while
+     its old spot does not show the floor: bag_vision.spot_floor). The Xtion frames before the down move and after
+     the carry are saved with the trial (record only).
 bag_hover_only: stop with the jaws OPEN at the close height and hold still there (a test: hang a plumb line,
 measure how far the gap is from the wall); the log has the asked and the real (forward kinematics) gap middle.
 Put-down: one held move to 8 cm over the release height at the target, straight down until the bag's bottom is on
-the floor (PUT_DROP 0), open, back off.
+the floor (PUT_DROP 0, or earlier: a stall on that move is the touchdown), open, back off.
 """
 import copy
 import json
@@ -112,15 +114,20 @@ RIM_LO, RIM_HI = 0.15, 0.50       # m, a Pi-measured top inside this replaces ba
 PICK_TEMP_C = 55.0                # a pick waits while the hottest motor is at or above this
 DRIVER_TEMP_C = 60.0              # the driver's max_temp: it refuses a move at or above this
 HELD_CODES = ("SUCCESS", "SUCCESS_UNVERIFIED")
+# Share of the bag's old spot that must show something other than the bag (bag_vision.spot_floor) before a picture
+# with no bag found counts as "lifted". Robot Xtion frames 2026-11-19: 0.00 with the bag still standing (15:17),
+# 0.99 with it lifted (17:29).
+SPOT_FLOOR = 0.5
 
 
-def spot_left(start, now, min_overlap=0.5, same_rows=25.0):
+def spot_left(start, now, floor=None, min_overlap=0.5, same_rows=25.0, min_floor=SPOT_FLOOR):
     """Has the bag left the place it stood? start = its blob before the grasp (arm out of the picture), now
     = the bag blob in a picture with the arm turned aside (None: that picture shows no bag; a missing picture
     must not get here). False when a blob still covers most of the same columns with its top at about the
-    same rows (the bag stayed on the floor); True otherwise."""
+    same rows (the bag stayed on the floor); True otherwise. No bag found is True only when its spot shows the
+    floor (floor = bag_vision.spot_floor, at least min_floor); else None: a missed detection is no lift."""
     if now is None:
-        return True
+        return True if floor is not None and floor >= min_floor else None
     w = max(1.0, start["x1"] - start["x0"])
     overlap = (min(start["x1"], now["x1"]) - max(start["x0"], now["x0"])) / w
     return not (overlap > min_overlap and abs(now["y0"] - start["y0"]) < same_rows)
@@ -1042,7 +1049,18 @@ class CameraBag:
         if im is None:
             return None
         model, path = self.vision_model()
-        return spot_left(start, bv.find_bag(im, model=model, tuned_engine=path))
+        now = bv.find_bag(im, model=model, tuned_engine=path)
+        floor = None
+        if now is None and start.get("frame") is not None:
+            floor = bv.spot_floor(start["frame"], im, (start["x0"], start["y0"], start["x1"], start["y1"]))
+            self._note_spot("front", floor)
+        return spot_left(start, now, floor)
+
+    def _note_spot(self, camera, floor):
+        """Keep a spot_floor share on the trial JSON (the robot test compares it with the pictures)."""
+        trial = getattr(self, "_trial", None)
+        if trial is not None and floor is not None:
+            trial.setdefault("spot_floor", {})[camera] = round(float(floor), 3)
 
     # ------------------------------------------------------------------ where is the bag
     def in_view(self, cam, q):
@@ -1073,6 +1091,8 @@ class CameraBag:
             return None, None
         model, path = self.vision_model()
         b = bv.find_bag(im, model=model, tuned_engine=path)
+        if b is not None:
+            b["frame"] = im                       # the hold check compares the bag's spot with this picture
         if b is None or cam is None:
             return b, None
         cam = cam.for_image(im)
@@ -1402,6 +1422,8 @@ class CameraBag:
             # The dry run is the same tip(sim=) sequence as the old steps. A plan that cannot reach the handle
             # falls back to those steps.
             planned = self.plan_handle_lift(r, cz, pitch, roll)
+            # the Xtion (under the deck) before and after the pick, kept for the record: does the bag leave the floor
+            xtion_before = self._keep_frame("xtion_before", self.xtion())
             self._phase("down")
             self.n.progress(2, 5, "down", f"ลองที่ {i + 1}/{len(tries)}: เล็งที่หูถุงแล้วลงจับในท่าเดียว (ทิศ "
                             f"{math.degrees(self.theta):+.0f}°, ปลายก้าม {r * 100:.1f} ซม., หมุนก้าม {roll:+.0f}°)")
@@ -1449,6 +1471,9 @@ class CameraBag:
                                 carry_s=line_seconds(len(path), self.speed("held")))
             self.n.line(path, "ยกถุงไปถือด้านข้าง (หลบ LiDAR)", self.speed("held"), JOINT_STEP)
             self.theta = hold_th
+            xtion_floor = bv.spot_floor(xtion_before, self._keep_frame("xtion_after", self.xtion()))
+            self._note_spot("xtion", xtion_floor)
+            self.n.get_logger().info(f"xtion spot {i + 1}: share no longer the bag {xtion_floor} (record only)")
             self._phase("check")
             self.n.progress(5, 5, "check", "เช็กด้วยกล้องว่าถุงพ้นจากที่เดิม...")
             # Held up at the side: the bag must have left its place on the floor (ALWAYS checked: a slip in the
@@ -1531,6 +1556,14 @@ class CameraBag:
                 placed_r = cand_r
                 break
             except Failed as exc:
+                if exc.code == "COLLISION":
+                    # the arm stalled on the way straight down: the bag's bottom is on the floor already (its wall
+                    # slid down the jaws on the carry). That is the touchdown PUT_DROP 0 asks for: let go here
+                    # (robot 2026-11-20: shoulder_lift 9 and 8 deg short, the bag kept pressed on the floor). The
+                    # gripper command clears the driver's fault hold.
+                    self.n.say(f"ก้นถุงถึงพื้นก่อนถึงระดับวาง ({exc}): ปล่อยตรงนี้")
+                    placed_r = cand_r
+                    break
                 if exc.code != "UNREACHABLE":
                     raise
         else:
