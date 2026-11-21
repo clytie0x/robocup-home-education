@@ -11,6 +11,7 @@ PASS_TEXT = "Please let me pass."
 ARRIVED_TEXT = "I am back at the start."
 _SLOW_START = "Please walk slowly, at about "
 _SLOW_END = " metres per second, so I can follow you."
+PACE_SHARE = 0.8  # the pace we ask for, as a share of our top speed
 
 
 def walk_slowly_text(speed: float) -> str:

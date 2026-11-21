@@ -1985,7 +1985,7 @@ class Console:
             except Exception:
                 continue
 
-    def _begin_mission(self, minutes, mission="full", drive=True):
+    def _begin_mission(self, minutes, mission="full", drive=True, speed=None):
         """Reset the executive for the run that just started. The task clock is at most 5:00."""
         job = (self.jobs.status().get("job") or {})
         stem = Path(str(job.get("log") or "")).stem
@@ -2006,7 +2006,7 @@ class Console:
         # A later status or NO_LINK can take it down again.
         report = precheck_report(self.jetson.snapshot(), wheel_test_last(self.log_root / "wheel-test" / "last.json"),
                                  mission, drive)
-        self._apply(self.mission.start(time.monotonic(), report=report, run_id=run_id, limit_s=limit))
+        self._apply(self.mission.start(time.monotonic(), report=report, run_id=run_id, limit_s=limit, top_speed=speed))
         if voice_off:
             self._park_flow()
             self._apply(self.mission.on_event("voice_relay_off|" + voice_off, time.monotonic()))
@@ -2210,7 +2210,7 @@ class Console:
                                                          "virtual": {"host": pc, "port": VIRTUAL_PORT} if virtual else None})
             if not error:
                 self.commander = None  # a new run: no tab leads it until one sends a command
-                self._begin_mission(body.get("minutes"), mission, body["drive"])
+                self._begin_mission(body.get("minutes"), mission, body["drive"], body["speed"])
                 if mission == "bag_only":
                     threading.Thread(target=self._bag_only_worker, args=(body["drive"],), daemon=True).start()
             return (409 if error else 200), {"error": error}

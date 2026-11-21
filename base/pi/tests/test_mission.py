@@ -453,6 +453,14 @@ class RelayTest(unittest.TestCase):
         self.wait_until(lambda: self.state() == "LOST_SEARCH", "LOST_SEARCH")
         self.wait_until(lambda: hri.COME_BACK_TEXT in self.flow.says(), "the one ask to come back")
 
+    def test_the_run_asks_for_a_pace_from_its_top_speed(self):
+        self.start()  # 0.08 m/s
+        self.flow.hear("follow me")
+        self.wait_until(lambda: self.state() == "ENROLLING", "ENROLLING")
+        self.run.record = {"phase": "follow", "locked": True, "mode": "follow"}
+        self.wait_until(lambda: "Please walk slowly, at about 0.06 metres per second, so I can follow you."
+                        in self.flow.says(), "the pace said after the lock")
+
     def test_a_missed_pick_measures_the_bag_again(self):
         self.flow.arm_answer = (409, {"ok": False, "error": "MISSED: closed on air", "code": "MISSED",
                                       "message": "closed on air"})

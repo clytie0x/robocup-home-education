@@ -17,6 +17,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from hmc import hri
+
 ICT = timezone(timedelta(hours=7))
 LIMIT_S = 300.0  # the rulebook 5:00
 RETURN_BUDGET = 180.0  # extra seconds to try to get home after a fault or the clock
@@ -419,6 +421,7 @@ class HmcFlow:
         self.running = False
 
     def _cleared(self, now):
+        self.pace = None  # m/s the operator is asked to walk at (hri.PACE_SHARE of the top speed), or None
         self.t0 = None
         self.last_now = now
         self.outcome = None
@@ -556,14 +559,17 @@ class HmcFlow:
 
     # --- public inputs ----------------------------------------------------
 
-    def start(self, now, report=None, run_id=None, limit_s=None):
-        """Reset and start a run. report fails a precheck only when a key is False."""
+    def start(self, now, report=None, run_id=None, limit_s=None, top_speed=None):
+        """Reset and start a run. report fails a precheck only when a key is False. top_speed (m/s) sets the pace
+        the operator is asked to walk at once the robot follows."""
         with self._lock:
             keep_log, keep_id = self.log_path, self.run_id
             self._cleared(now)
             self.log_path, self.run_id = keep_log, run_id or keep_id
             if limit_s is not None:
                 self.limit_s = float(limit_s)
+            if top_speed:
+                self.pace = hri.PACE_SHARE * float(top_speed)
             self.t0 = now
             self.running = True
             self.last_now = now
@@ -887,7 +893,8 @@ class HmcFlow:
 
     def _locked(self, now):
         if self.state == "ENROLLING":
-            return self._enter("FOLLOWING", now, say="I will follow you.")
+            out = self._enter("FOLLOWING", now, say="I will follow you.")
+            return out + ([("say", hri.walk_slowly_text(self.pace))] if self.pace else [])
         if self.state == "LOST_SEARCH":
             self.come_back_said = False
             return self._enter("FOLLOWING", now, say="I see you again. I will follow you.")

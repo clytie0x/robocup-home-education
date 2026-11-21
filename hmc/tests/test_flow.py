@@ -261,6 +261,17 @@ def test_lost_operator_waits_for_the_brains_one_ask_and_stays(tmp_path):
     assert flow.state == "FOLLOWING"
 
 
+def test_the_operator_is_asked_to_walk_at_a_pace_the_base_can_follow(tmp_path):
+    flow = fresh(tmp_path, "pace")
+    flow.start(0.0, report=OK, top_speed=0.12)
+    flow.on_heard("follow me", 1.0)
+    out = flow.on_event("locked", 1.1)
+    assert says(out) == ["I will follow you.", "Please walk slowly, at about 0.1 metres per second, so I can follow you."]
+    quiet = begin(tmp_path, "no_pace")  # no top speed given: no number to ask for
+    quiet.on_heard("follow me", 1.0)
+    assert says(quiet.on_event("locked", 1.1)) == ["I will follow you."]
+
+
 def test_the_brains_search_is_the_lost_operator(tmp_path):
     flow = begin(tmp_path, "search")
     follow(flow, 2.0)
