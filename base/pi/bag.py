@@ -35,6 +35,7 @@ points, along the ray from the laser (an assumption: a gift bag about 0.10 m dee
 Frames: base (x ahead, y left, origin at the turning centre) for everything given and reported; the bag is kept
 in the odometry frame, which never jumps, so the robot's own motion moves it in the base frame.
 """
+import copy
 import importlib.util
 import json
 import math
@@ -77,6 +78,8 @@ NO_BAG_S = 2.0  # s of steady pointing with no bag near it: NO_BAG
 APPROACH_S = 120.0  # s from the choice to reached
 MAX_TRAVEL = 4.0  # m driven from the choice
 LOST_S = 1.5  # s without a LiDAR return from a bag the LiDAR had seen: LOST_BAG
+BLOCKED_S = 1.0  # s run_follow's obstacle stop must last in the turn or the drive before it is BLOCKED (on 2026-11-19
+                 # 16 of 18 bag_near tasks failed on one stopped cycle, the robot's own rear-left return)
 EXCLUDE_R = 0.15  # m around the bag centre: its own points, left out of the stop while creeping
 MIN_FACE_GAP = 0.02  # m between the front edge and the bag's nearest point: the creep stops there whatever x says
 # Finding and tracking
@@ -214,18 +217,53 @@ def virtual_pointing(spot, operator, height=1.4):
     return pointing.Pointing(tuple(spot), 1.0, "right", (ox, oy, height), (ox, oy), (ox, oy, height - 0.3))
 
 
+class Unranged:
+    """camera_pointing's answer when no LiDAR operator can give the range: the one camera person's keypoints, their
+    camera bearing and the frame size. ranged() takes the range from the LiDAR cluster on that bearing."""
+
+    def __init__(self, kp, bearing_deg, frame):
+        self.kp, self.bearing_deg, self.frame = kp, bearing_deg, frame
+
+
 def camera_pointing(answer, operator, frame, p):
-    """The operator's pointing from the Jetson's keypoints: the camera person nearest the operator's bearing."""
-    if answer is None or operator is None:
+    """The operator's pointing from the Jetson's keypoints: the camera person nearest the operator's bearing.
+
+    No LiDAR operator, or no camera person within 10 deg of it (run 20261119-162535: the track sat on the gift bag
+    1.19 m ahead, the operator 18 deg from it in the camera, NOT_POINTED after 20 s): the one camera person with
+    keypoints as an Unranged, for ranged(). Two or more people in view: None, nobody can say who points."""
+    if answer is None:
         return None
-    bearing = math.degrees(math.atan2(operator[1] - p["camera_y"], operator[0] - p["camera_x"]))
-    people = [s for s in answer.people if getattr(s, "kp", None) is not None and abs(s.bearing_deg - bearing) <= 10.0]
+    people = []
+    if operator is not None:
+        bearing = math.degrees(math.atan2(operator[1] - p["camera_y"], operator[0] - p["camera_x"]))
+        people = [s for s in answer.people if getattr(s, "kp", None) is not None and abs(s.bearing_deg - bearing) <= 10.0]
     if not people:
-        return None
+        alone = answer.people[0] if len(answer.people) == 1 else None
+        if alone is None or getattr(alone, "kp", None) is None:
+            return None
+        return Unranged(alone.kp, alone.bearing_deg, frame)
     best = min(people, key=lambda s: abs(s.bearing_deg - bearing))
     r = math.hypot(*operator)
     try:
         return pointing.pointing(best.kp, r, math.degrees(math.atan2(operator[1], operator[0])), p, frame[0], frame[1])
+    except (ValueError, TypeError, IndexError):
+        return None
+
+
+def ranged(found, clusters, p, max_deg=10.0):
+    """An Unranged as a pointing.Pointing, ranged from the LiDAR cluster nearest its camera bearing (within max_deg,
+    seen from the camera), or None when no cluster is there; any other found as it is."""
+    if not isinstance(found, Unranged):
+        return found
+    near = [(abs(math.degrees(math.atan2(c[1] - p["camera_y"], c[0] - p["camera_x"])) - found.bearing_deg), tuple(c))
+            for c in clusters]
+    near = [n for n in near if n[0] <= max_deg]
+    if not near:
+        return None
+    c = min(near)[1]
+    try:
+        return pointing.pointing(found.kp, math.hypot(*c), math.degrees(math.atan2(c[1], c[0])), p, found.frame[0],
+                                 found.frame[1])
     except (ValueError, TypeError, IndexError):
         return None
 
@@ -259,6 +297,7 @@ class BagTask:
         self.turn_sent = False
         self.settle_since = None
         self.sent = (0.0, 0.0)
+        self.blocked_since = None  # when the current run of obstacle stops began (BLOCKED_S)
         self.why = None  # what the last step did, for the log
         self.wants_pose = mode == "point"  # ask the Jetson for keypoints (only while looking for the pointing)
         self.measured = None  # the look's outcome {"top", "top_by", "yaw_odom"}; {} when not looked; None: not yet
@@ -340,11 +379,15 @@ class BagTask:
     def after(self, now, stop, sent):
         """What run_follow really sent this cycle, and why it stopped the command (its stop reason) or None."""
         self.sent = tuple(sent)
-        if self.done or stop is None:
+        if self.done:
             return
         if stop == "obstacle" and self.state in (FAR, CREEP_STATE, TURN_STATE):
-            self._fail("BLOCKED", "something is in my way")
-        elif self.state == SETTLE and (sent[0] or sent[1]):
+            self.blocked_since = now if self.blocked_since is None else self.blocked_since
+            if now - self.blocked_since >= BLOCKED_S - 1e-6:
+                self._fail("BLOCKED", "something is in my way")
+            return
+        self.blocked_since = None
+        if stop is not None and self.state == SETTLE and (sent[0] or sent[1]):
             self.settle_since = None
 
     # ------------------------------------------------------------ states
@@ -369,9 +412,12 @@ class BagTask:
             if self.no_bag_since is not None:
                 return self._fail("NO_BAG", "no bag where you point")
             return self._fail("NOT_POINTED", "no steady pointing in %.0f s" % POINTING_S)
-        found = self.steady.add(now, view.found)
+        found = self.steady.add(now, ranged(view.found, view.clusters, self.p))
         if found is None:
             return self._stand()
+        if view.operator is None or math.dist(view.operator, found.operator) > OPERATOR_KEEP:
+            view = copy.copy(view)  # ranged from the camera person: their legs are left out, not the track's spot
+            view.operator = found.operator
         candidates = self._candidates(view, found.point)
         choice = pointing.choose_bag(found, candidates, near_m=NEAR_M)
         if choice is None:

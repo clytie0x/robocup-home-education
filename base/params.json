@@ -35,7 +35,8 @@
     "sectors": [
       {"name": "arm", "min_deg": 32, "max_deg": 55, "max_m": 0.36},
       {"name": "cable", "min_deg": -55, "max_deg": -32, "max_m": 0.36},
-      {"name": "bag", "min_deg": -15, "max_deg": 15, "max_m": 0.30}
+      {"name": "bag", "min_deg": -15, "max_deg": 15, "max_m": 0.30},
+      {"name": "rear_left_body", "min_deg": 150, "max_deg": 158, "max_m": 0.26}
     ],
     "polygons": []
   }
