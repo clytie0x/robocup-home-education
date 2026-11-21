@@ -48,6 +48,9 @@ Root causes, from replayed frames, scans and logs:
 |---|---|---|---|
 | 12:21 | bcba098 | `bag_near` waits for the first scan | VERSION.json on both hosts, `NO_SCAN_S` in the Pi's `bag.py` |
 | 13:16 | 87ace05 | The executive's chain (PR #29), the detector names its re-id model | VERSION.json on both hosts; console restarted with the new code; detector restarted; one frame sent to port 5601 answered `"reid": "tensorrt osnet_ain_x1_0_msmt17_256x128.engine"` |
+| 13:27 | 154ffc8 | main after PR #24, #27, #28, #29 (the Jetson's bag dataset tools; no Pi file changed) | VERSION.json on both hosts; console untouched (same process); Jetson programs all running |
+| 13:59 | 30cd478 | PR #32: pointing without a LiDAR lock, BLOCKED after 1 s, the rear-left self mask, the narrow senses hold; `--params` (the Pi's params.json equalled git at 154ffc8 byte for byte) | VERSION.json; `rear_left_body` in the Pi's params.json; the new code in `bag.py` and `senses.py` |
+| 14:12 | 4934b53 | PR #33: an overhang out of view close by stays in the obstacle memory | VERSION.json on both hosts; on the Pi with its own params and Python, a belt 0.6 m ahead was still kept after 60 s |
 
 ## Next robot checks (owner and helpers present)
 
