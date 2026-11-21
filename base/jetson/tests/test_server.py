@@ -152,6 +152,14 @@ class PoseAndBagTests(unittest.TestCase):
         self.assertEqual(server.seen_in(b"broken", FakeDetector(), FakeReId()),
                          {"people": [], "objects": [], "empty": "the frame could not be decoded"})
 
+    def test_the_reply_names_the_re_id_model_that_made_the_looks(self):
+        class Named(FakeReId):
+            backend, path = "tensorrt", "/home/robotpsu/hmc-follow/models/osnet_ain_x1_0_msmt17_256x128.engine"
+
+        seen = server.seen_in(jpeg_320x240(), FakeDetector(), Named())
+        self.assertEqual(seen["reid"], "tensorrt osnet_ain_x1_0_msmt17_256x128.engine")
+        self.assertNotIn("reid", server.seen_in(jpeg_320x240(), FakeDetector(), FakeReId()))  # unnamed: left out
+
     def test_keypoints_go_to_the_person_box_they_overlap(self):
         class Pose:
             def poses(self, bgr):

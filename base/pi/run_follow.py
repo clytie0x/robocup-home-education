@@ -244,6 +244,7 @@ class State:
         # (navigation.follow_step -> Robot.drive_toward uses distance(robot.pos, target)).
         # follow_gap is measured from the robot's front edge, so add the centre-to-front length.
         self.speech = Speech(log)
+        self.reid = self.reid_logged = None  # the re-id model the operator's look is learned with; the last switch logged
         self.follower = Follower(self.body.robot, self.speech, follow_distance=p["follow_gap"] + safety.FRONT,
                                  search_again_every=SEARCH_AGAIN_EVERY, restart_gap=RESTART_GAP,
                                  wait_gap=WAIT_GAP, go_on_gap=GO_ON_GAP)
@@ -471,6 +472,25 @@ def _remote_commands(state, now):
             state.silent = False
             state.log.write({"time": now, "remote": "silence hold released by %s" % cmd})
     return taken
+
+
+def _one_model(state, answer, now):
+    """Looks only from the re-id model the operator's look is learned with. reid.py's fallbacks can switch models
+    mid-run, and two OSNet models give looks of the same length that cannot be compared: those looks are left out
+    (the person, the LiDAR track and the clothes stay), and each switch is logged once."""
+    model = getattr(answer, "reid", None)
+    if model is None:
+        return answer
+    if not state.follower.operator_look.count or state.reid is None:
+        state.reid = model  # nothing learned yet (or learned before the first answer that named its model)
+        return answer
+    if model == state.reid:
+        return answer
+    if state.reid_logged != model:
+        state.reid_logged = model
+        state.log.write({"time": now, "reid": "model %s, the look was learned with %s: looks not compared" % (
+            model, state.reid)})
+    return dataclasses.replace(answer, people=[dataclasses.replace(s, look=None) for s in answer.people])
 
 
 def _bag_refused(state, cmd):
@@ -792,7 +812,7 @@ def cycle(state, now):
         state.cable.update(pose[2], now, pose)  # the odometry pose, never the keyframe-corrected one
     scan = state.lidar.latest()
     frame = state.camera.latest()
-    answer = state.link.latest() if state.link is not None else None
+    answer = _one_model(state, state.link.latest() if state.link is not None else None, now)
     link_alive = state.link is not None and state.link.alive(now, p["jetson_silence"])
     sensed = scan  # what the senses read; the safety stop, the motion, the keyframes and the logs keep the real scan
     if state.virtual is not None:  # --virtual-operator: the simulated person in the scan and the camera answer

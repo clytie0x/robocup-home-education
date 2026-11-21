@@ -48,6 +48,7 @@ class Answer:
     good: bool = True  # False: the Jetson judged the frame too dark, saturated or a flash (light.FrameGate)
     why: str = None  # "dark", "saturated" or "flash" when not good
     empty: str = None  # why people is empty ("the frame could not be decoded", a detector score, ...)
+    reid: str = None  # the re-id model the looks come from ("<backend> <file>"); None from an older server
 
 
 def bearing_deg(box, width, hfov_deg):
@@ -259,7 +260,7 @@ class JetsonLink:
                    for o in reply.get("objects", [])]
         with self._lock:
             self._answer = Answer(reply["t"], people, objects, good, None if good else quality.get("why"),
-                                  reply.get("empty"))
+                                  reply.get("empty"), reply.get("reid"))
             self._last_reply = self._clock()
             self.reply_times.append(self._last_reply)
             while self.reply_times and self.reply_times[0] <= self._last_reply - REPLY_WINDOW_S:

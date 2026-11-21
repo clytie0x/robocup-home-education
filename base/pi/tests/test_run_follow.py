@@ -1201,6 +1201,31 @@ class WheelWatch(Logged):
 
 
 
+class OneReIdModelTest(unittest.TestCase):
+    def test_looks_from_another_re_id_model_are_left_out_once_learned(self):
+        # reid.py's fallbacks switch OSNet models mid-run: the same 512 numbers, a different space
+        lines = []
+        state = SimpleNamespace(reid=None, reid_logged=None, log=SimpleNamespace(write=lines.append),
+                                follower=SimpleNamespace(operator_look=SimpleNamespace(count=0)))
+
+        def answer(model):
+            return Answer(1.0, [Seen(3.0, 0.9, LOOK, [0, 0, 1, 1])], reid=model)
+
+        first = answer("tensorrt osnet_ain.engine")
+        self.assertIs(run_follow._one_model(state, first, 1.0), first)  # nothing learned: adopted
+        self.assertEqual(state.reid, "tensorrt osnet_ain.engine")
+        state.follower.operator_look.count = 20
+        same = answer("tensorrt osnet_ain.engine")
+        self.assertIs(run_follow._one_model(state, same, 2.0), same)
+        for t in (3.0, 3.1):
+            got = run_follow._one_model(state, answer("tensorrt osnet_x0_25.engine"), t)
+            self.assertEqual([s.look for s in got.people], [None])
+            self.assertEqual(got.people[0].bearing_deg, 3.0)  # the person stays: only the look goes
+        self.assertEqual(len([line for line in lines if "reid" in line]), 1)  # logged once
+        old = answer(None)  # a server from before: nothing to compare
+        self.assertIs(run_follow._one_model(state, old, 4.0), old)
+
+
 class Remote(Logged):
     """--remote: the Jetson's commands over TCP instead of Enter (integration design D2)."""
 

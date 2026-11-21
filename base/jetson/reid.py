@@ -243,9 +243,10 @@ class ReId:
                 return
             except (EngineError, OSError, RuntimeError, ImportError) as exc2:
                 self.why = "%s; %s failed (%s)" % (self.why, X1_NAME, exc2)
+        fallback = self._fallback_path
         engine = self._load_fallback(exc)
         if engine is not None:
-            self._engine = engine
+            self._engine, self.path = engine, fallback  # the reply names the model by this path
             self.backend = "tensorrt"
             self.why = None
             return

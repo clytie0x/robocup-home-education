@@ -197,6 +197,17 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(answer.people[0].kp, kp)
         self.assertEqual(answer.people[0].light, 182.5)
 
+    def test_the_reply_names_the_re_id_model_and_an_old_one_names_none(self):
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        reply = {"seq": 1, "t": 4.0, "reid": "tensorrt osnet_ain_x1_0_msmt17_256x128.engine",
+                 "people": [{"box": [140, 0, 180, 240], "conf": 0.9, "look": [0.5]}]}
+        jl = self.make_link(raw_server([framed(reply)], stop))
+        jl.send(make_frame(4.0))
+        self.assertTrue(wait_for(lambda: jl.alive(time.monotonic(), 5)))
+        self.assertEqual(jl.latest().reid, "tensorrt osnet_ain_x1_0_msmt17_256x128.engine")
+        self.assertIsNone(link.Answer(1.0, []).reid)
+
     def test_an_old_reply_without_bags_or_keypoints_still_works(self):
         jl = self.make_link()
         jl.send(make_frame(1.0))
