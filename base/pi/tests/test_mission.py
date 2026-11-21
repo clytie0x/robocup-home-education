@@ -296,7 +296,8 @@ class RelayTest(unittest.TestCase):
         self.start()
         self.flow.hear("follow me")
         self.wait_until(lambda: self.state() == "ENROLLING", "ENROLLING")
-        self.assertIn("follow", self.run.commands)
+        # the state changes first, then the same thread sends the command: wait for it, never read it at once
+        self.wait_until(lambda: "follow" in self.run.commands, "the follow command sent")
         self.wait_until(lambda: "I will follow you. Please stand in front of me." in self.flow.says(), "its line said")
         self.wait_until(lambda: self.flow.sent("heard")[-1]["after"] == 1, "the next read after seq 1")
 
@@ -341,7 +342,8 @@ class RelayTest(unittest.TestCase):
         self.assertEqual(self.arm_posts(), [({"cmd": "pick_bag", "x": 0.31, "y": 0.02, "top": 0.2},
                                              console.ARM_JOB_TIMEOUT)])
         self.assertTrue(self.console.mission.carrying)
-        self.assertEqual(self.run.commands[-1], "return")
+        # the state changes first, then the arm job's thread sends go_back (40 runs under load: 2 read "bag" here)
+        self.wait_until(lambda: self.run.commands[-1:] == ["return"], "the return command sent")
         time.sleep(1.2)  # more status reads of the same bag task
         self.assertEqual([e for e in self.events if e.startswith("bag_")],
                          ["bag_chosen|LEFT|I see the bag on the left.", "bag_reached|OK|0.310,0.020,top=0.200"])
