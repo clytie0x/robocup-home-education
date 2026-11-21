@@ -356,6 +356,56 @@ class CameraPointing(unittest.TestCase):
                                               (320, 240), P))  # no keypoints on this frame
         self.assertIsNone(bag.camera_pointing(answer, None, (320, 240), P))
 
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, TESTS)
+        try:
+            import test_pointing
+        finally:
+            sys.path.remove(TESTS)
+        cls.body = staticmethod(test_pointing.body)
+
+    def test_with_the_track_on_the_bag_the_one_person_in_view_is_ranged_from_the_lidar(self):
+        """Run 20261119-162535, NOT_POINTED: the LiDAR operator track sat on the gift bag 1.19 m ahead while the
+        operator stood at 2.95 m, 18 deg from it in the camera, so the 10 deg gate refused them for 20 s. The one
+        camera person is now ranged from the LiDAR cluster on their own bearing (their legs in the recorded scan)."""
+        with open(os.path.join(os.path.dirname(__file__), "fixtures", "pointing-track-on-the-bag-2026-11-19.json")) as f:
+            rec = json.load(f)
+        on_bag = geometry.odom_to_base(rec["operator"], rec["pose"])
+        clusters = bag.lidar_clusters(rec["scan"], P)
+        person = min(clusters, key=lambda c: math.dist(c, (2.96, 0.27)))  # a leg of theirs, 2.98 m away
+        target = (person[0], person[1] + 1.0)  # the frame shows a phone in their hands, so the pointing arm is drawn
+        answer = Answer(0.0, [Seen(rec["person_bearing_deg"], 0.9, (1.0,), rec["person_box"], self.body(person, target, p=P))])
+        found = bag.ranged(bag.camera_pointing(answer, on_bag, (320, 240), P), clusters, P)
+        self.assertLess(math.dist(found.point, target), 0.15)  # ranged from the bag (1.19 m) it was 1.96 m off
+        self.assertGreater(math.hypot(*found.operator), 2.9)
+
+    def test_with_the_track_on_the_bag_the_pointed_bag_is_still_chosen(self):
+        person, spot = (2.5, -0.3), (2.5, 0.7)  # the bag 1 m beside the operator, and the track sits on it
+        scan = scan_at((0.0, 0.0, 0.0), [spot, person])
+        clusters = bag.lidar_clusters(scan, P)
+        on_bag = min(clusters, key=lambda c: math.dist(c, spot))
+        bearing = math.degrees(math.atan2(person[1] - P["camera_y"], person[0] - P["camera_x"]))
+        answer = Answer(0.0, [Seen(bearing, 0.9, (1.0,), [0, 0, 1, 1], self.body(person, spot, p=P))])
+        task = new_task()
+        for i in range(20):
+            found = bag.camera_pointing(answer, on_bag, (320, 240), P)
+            task.step(bag.View(i * PERIOD, (0.0, 0.0, 0.0), seen=run_follow.scan_points(scan, P), clusters=clusters,
+                               operator=on_bag, found=found))
+            if task.chosen is not None:
+                break
+        self.assertIsNotNone(task.chosen, task.result)  # the track's spot is not taken for the operator's legs
+        self.assertLess(math.dist((task.chosen["x"], task.chosen["y"]), bag.centre_of(on_bag, P)), 0.05)
+
+    def test_without_the_operator_only_one_person_in_view_is_taken(self):
+        kp = self.body((2.5, 0.0), (2.5, 1.0), p=P)
+        one = Seen(-1.1, 0.9, (1.0,), [0, 0, 1, 1], kp)
+        self.assertIsNotNone(bag.camera_pointing(Answer(0.0, [one]), None, (320, 240), P))
+        two = Answer(0.0, [one, Seen(20.0, 0.9, (1.0,), [0, 0, 1, 1], kp)])
+        self.assertIsNone(bag.camera_pointing(two, None, (320, 240), P))
+        self.assertIsNone(bag.camera_pointing(two, (1.0, -0.4), (320, 240), P))  # the track on something else
+        self.assertIsNone(bag.ranged(bag.camera_pointing(Answer(0.0, [one]), None, (320, 240), P), [], P))  # no LiDAR
+
 
 class FakeLook:
     """Answers a task's front camera request at once with `answer` (None: never answers)."""
