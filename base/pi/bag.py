@@ -78,6 +78,8 @@ NO_BAG_S = 2.0  # s of steady pointing with no bag near it: NO_BAG
 APPROACH_S = 120.0  # s from the choice to reached
 MAX_TRAVEL = 4.0  # m driven from the choice
 LOST_S = 1.5  # s without a LiDAR return from a bag the LiDAR had seen: LOST_BAG
+BLOCKED_S = 1.0  # s run_follow's obstacle stop must last in the turn or the drive before it is BLOCKED (on 2026-11-19
+                 # 16 of 18 bag_near tasks failed on one stopped cycle, the robot's own rear-left return)
 EXCLUDE_R = 0.15  # m around the bag centre: its own points, left out of the stop while creeping
 MIN_FACE_GAP = 0.02  # m between the front edge and the bag's nearest point: the creep stops there whatever x says
 # Finding and tracking
@@ -295,6 +297,7 @@ class BagTask:
         self.turn_sent = False
         self.settle_since = None
         self.sent = (0.0, 0.0)
+        self.blocked_since = None  # when the current run of obstacle stops began (BLOCKED_S)
         self.why = None  # what the last step did, for the log
         self.wants_pose = mode == "point"  # ask the Jetson for keypoints (only while looking for the pointing)
         self.measured = None  # the look's outcome {"top", "top_by", "yaw_odom"}; {} when not looked; None: not yet
@@ -376,11 +379,15 @@ class BagTask:
     def after(self, now, stop, sent):
         """What run_follow really sent this cycle, and why it stopped the command (its stop reason) or None."""
         self.sent = tuple(sent)
-        if self.done or stop is None:
+        if self.done:
             return
         if stop == "obstacle" and self.state in (FAR, CREEP_STATE, TURN_STATE):
-            self._fail("BLOCKED", "something is in my way")
-        elif self.state == SETTLE and (sent[0] or sent[1]):
+            self.blocked_since = now if self.blocked_since is None else self.blocked_since
+            if now - self.blocked_since >= BLOCKED_S - 1e-6:
+                self._fail("BLOCKED", "something is in my way")
+            return
+        self.blocked_since = None
+        if stop is not None and self.state == SETTLE and (sent[0] or sent[1]):
             self.settle_since = None
 
     # ------------------------------------------------------------ states

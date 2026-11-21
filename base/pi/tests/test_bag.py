@@ -8,6 +8,7 @@ import unittest
 import numpy
 
 import bag
+import footprint
 import geometry
 import params
 import run_follow
@@ -212,6 +213,46 @@ class Approach(unittest.TestCase):
         task = world.run(new_task())
         self.assertEqual(task.result["code"], "BLOCKED")
         self.assertLess(world.pose[0], 1.0 - safety.FRONT - safety.clearance(P) + 0.02)
+
+    def test_a_short_obstacle_stop_does_not_fail_the_task(self):
+        """16 of 18 bag_near tasks on 2026-11-19 failed BLOCKED on one stopped cycle, before the robot moved. A stop
+        that clears within bag.BLOCKED_S lets the task go on; a lasting one still fails it (the pole above)."""
+        world = World([(1.5, 0.0145)], operator=(1.7, 0.9), point=(1.5, 0.0145))
+        far = {}
+
+        def passer_by(w):  # in front of the robot for the first 0.5 s of the far drive, then gone
+            if task.state == bag.FAR:
+                far.setdefault("t", w.t)
+            return [geometry.base_to_odom((safety.FRONT + 0.05, 0.0), w.pose)] if "t" in far and w.t < far["t"] + 0.5 else []
+
+        world.extra = passer_by
+        task = new_task()
+        world.run(task)
+        self.assertIn((0.0, 0.0), world.sent[int(far["t"] / PERIOD):])  # it did stop for them
+        self.assertEqual(task.result["code"], "OK", task.result)
+
+    def test_the_obstacle_stop_must_last_before_it_is_blocked(self):
+        task = new_task()
+        task.state = bag.TURN_STATE
+        task.after(0.0, "obstacle", (0.0, 0.0))
+        self.assertFalse(task.done)
+        task.after(0.5, None, (0.0, 0.2))  # clear again: the count starts over
+        task.after(0.6, "obstacle", (0.0, 0.0))
+        task.after(1.5, "obstacle", (0.0, 0.0))
+        self.assertFalse(task.done)
+        task.after(0.6 + bag.BLOCKED_S, "obstacle", (0.0, 0.0))
+        self.assertEqual(task.result["code"], "BLOCKED")
+
+    def test_the_rear_left_body_return_does_not_stop_the_turn_to_the_bag(self):
+        """Run 20261119-150547: bag_near BLOCKED on its first cycle, a left turn toward the bag at y 0.068. The return
+        at 153 deg, 0.246 m (1.8 cm past the outline, outside the 1.5 cm skin) is the robot: that spot read 0.200 to
+        0.246 m at 151.6 to 155.2 deg in every saved scan of 11-19 that has it (15 scans, 12:03 to 16:28)."""
+        with open(os.path.join(os.path.dirname(__file__), "fixtures", "bag-near-rear-left-body-2026-11-19.json")) as f:
+            rec = json.load(f)
+        kept = footprint.drop_self(run_follow.scan_points(rec["scan"], P), P)
+        self.assertFalse(safety.must_stop(kept, 0.0, 0.2, P, cycle=run_follow.SLOW_CYCLE))
+        beyond = [[0.27 * math.cos(math.radians(153.0)), 0.27 * math.sin(math.radians(153.0))]]
+        self.assertTrue(safety.must_stop(footprint.drop_self(beyond, P), 0.0, 0.2, P, cycle=run_follow.SLOW_CYCLE))
 
     def test_a_bag_that_vanishes_is_lost(self):
         world = World([(2.0, 0.8)], operator=(2.6, 0.2), point=(2.0, 0.8))
