@@ -311,6 +311,16 @@ class Gaps(unittest.TestCase):
         got = read(s, 0.2, scan_of(person(*stranger)), Answer(0.2, [seen(*stranger, OPERATOR)]))
         self.assertTrue(s.locked)  # the look agrees: keep it
 
+    def test_the_log_says_which_check_refused_the_fix(self):
+        s = enrolled()
+        read(s, 0.1, scan_of(person(1.5, -0.45)))
+        self.assertTrue(s.why.startswith("fix rejected: a jump of 0.4"), s.why)
+        s = enrolled()
+        read(s, 0.1, scan_of())  # gap
+        stranger = (1.5, -0.25)
+        read(s, 0.2, scan_of(person(*stranger)), Answer(0.2, [seen(*stranger, OTHER)]))
+        self.assertEqual(s.why, "fix rejected: the camera's look after a gap")
+
 
 class Merge(unittest.TestCase):
     """Spec criterion 4: a second person stands next to the operator, then they walk apart.
@@ -741,6 +751,40 @@ class TwoAtTheTrack(unittest.TestCase):
         s = ready()
         read(s, 0.0, scan_of([chair]), answer)  # without the depth, the bearing alone locks onto the chair
         self.assertTrue(s.locked)
+
+
+class NeverAPerson(unittest.TestCase):
+    """Run 20261119-155758 at 6881.5 s ("I lost you" 17 s later): the operator stood 1.69 m ahead, the gift bag
+    0.34 m to their right (scans 940 to 960; frame 960 shows the bag), never counted as a person (the log's people
+    list stayed empty), and the camera saw one person. The operator stepped onto the bag, the LiDAR made one object
+    of them, "someone next to the operator vanished" dropped the track. In the field the bag was neither an object
+    nor watched, the log does not say why; here it stands just past the camera's clear-view edge for the same."""
+
+    BAG = (1.235, -0.44)  # lidar frame, 22 deg right in the camera at 1.3 m
+    START, BESIDE, ON = (1.235, 0.5), (1.235, -0.10), (1.235, -0.15)  # the operator: away, 0.34 m beside, at it
+
+    def scene(self, answer_for, link=True):
+        s = enrolled(*self.START)
+        for i in range(31):
+            t = round(0.1 * (i + 1), 1)
+            k = min(i, 10) / 10
+            op = self.ON if i == 30 else (self.START[0], self.START[1] + k * (self.BESIDE[1] - self.START[1]))
+            things = person(*op) + ([] if i == 30 else [self.BAG])
+            read(s, t, scan_of(things), answer_for(t, op) if link else None, link_alive=link)
+        return s
+
+    def test_the_bag_merging_with_the_operator_holds_instead_of_dropping(self):
+        s = self.scene(lambda t, op: Answer(t, [seen(*op, OPERATOR)]))
+        self.assertTrue(s.locked, s.why)
+        self.assertTrue(s.ambiguous)  # held still, as for a still thing the camera watches
+        self.assertIn("never a person", s.why)
+
+    def test_a_second_camera_person_there_still_drops_it(self):
+        s = self.scene(lambda t, op: Answer(t, [seen(*op, OPERATOR), seen(op[0], op[1] - 0.25, OTHER)]))
+        self.assertFalse(s.locked)
+
+    def test_without_a_fresh_answer_it_still_drops(self):
+        self.assertFalse(self.scene(lambda t, op: None, link=False).locked)
 
 
 class Ids(unittest.TestCase):

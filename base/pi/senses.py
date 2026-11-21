@@ -292,7 +292,7 @@ class RealSenses:
             fixed = pos is not None and self.tracker.seen_at == now
             if fixed and (not self._fix_ok(now, pos, predicted, last_fix, cands, score) or self._is_furniture(pos)):
                 self.tracker = self._new_tracker()  # lost: only a camera look can lock again (rule 4)
-                self.why = "fix rejected"
+                self.why = "fix rejected: " + (self._fix_why or "furniture")
                 if self._operator_at is not None and any(math.dist(geometry.base_to_odom(self._base(c), pose), self._operator_at) <= COMPANY for c in cands):
                     self._merged = [self._operator_at, now, set()]  # someone else stood where the operator was
             elif fixed:
@@ -348,7 +348,7 @@ class RealSenses:
                 paired.append((near[0], l))
         twice = {c for c, _ in paired if sum(1 for d, _ in paired if d == c) > 1}
         looks = {pid_of[c]: l for c, l in paired if c not in twice}  # two camera people on one track: whose look is it?
-        mixed, drop = self._mixed_up(now, operator, everybody)  # furniture too: it may be a stranger who never moved
+        mixed, drop = self._mixed_up(now, operator, everybody, seen)  # furniture too: it may be a stranger who never moved
         if mixed:
             # They may now be one LiDAR object; when it splits, nobody can say which piece is the
             # operator (spec criterion 4). Drop the track and hold: only a camera look may lock again.
@@ -466,7 +466,7 @@ class RealSenses:
         self._set_down = {pid: (pt, t) for pid, (pt, t) in self._set_down.items() if now - t <= SET_DOWN_KEEP}
         return any(math.dist(at, pt) <= SET_DOWN_NEAR for pt, _ in self._set_down.values())
 
-    def _mixed_up(self, now, operator, measured):
+    def _mixed_up(self, now, operator, measured, seen=()):
         """(why, drop): the LiDAR may have mixed the operator up with someone next to them.
 
         Vanished: someone within COMPANY of the operator is gone from the scan (or missed a scan since).
@@ -475,7 +475,8 @@ class RealSenses:
         the two of them came apart, and the track may be on either piece.
         Both need an id COMPANY_MIN old (split: an unbroken run), so a leg the pairing missed for a scan or two does not count.
         An object (while the camera answers) never counts; a still thing the camera is watching to tell
-        (SET_DOWN_S) only holds: drop is False then.
+        (SET_DOWN_S) only holds: drop is False then. So does a thing never counted as a person while a fresh camera has
+        the operator in view and sees at most one person within MATCH_DEG of them (_one_person_at).
         """
         if operator is None:  # no fix this cycle: keep what we knew, judge on the next fix
             return None, False
@@ -507,7 +508,22 @@ class RealSenses:
         why = "someone next to the operator vanished" if vanished else "split next to the operator"
         if all(pid in self._watched for pid in vanished | split):
             return why + ": a still thing, the camera is looking", False
+        if all(pid in self.tracks.tracks and pid not in self._person for pid in vanished | split) and self._one_person_at(
+                operator, seen):
+            return why + ": never a person, the camera sees one person there", False
         return why, True
+
+    def _one_person_at(self, operator, seen):
+        """Does the camera, answering fresh, have the operator's odometry point in view and see at most one person
+        within MATCH_DEG of it? Run 20261119-155758: the gift bag beside the operator merged with them in the LiDAR
+        while the camera saw one person, and the track was dropped."""
+        if not self._camera_fresh:
+            return False
+        x, y = geometry.odom_to_base(operator, self._pose)
+        bearing = math.degrees(math.atan2(y - self.p["camera_y"], x - self.p["camera_x"]))
+        if abs(bearing) > self.p["camera_hfov_deg"] / 2:
+            return False  # out of the camera's view: it cannot tell
+        return sum(1 for person in seen if abs(person[0] - bearing) <= MATCH_DEG) <= 1
 
     def _follow_merge(self, now, measured, people):
         """Keep the merged spot on the people there as they move; forget it once they stand apart or left, or on a lock."""
@@ -564,17 +580,22 @@ class RealSenses:
         return LegTracker(lost_after=self.p["track_coast_max"])
 
     def _fix_ok(self, now, pos, predicted, last_fix, cands, score):
-        """May the track take this fix? Any jump, or a doubtful fix after a gap, drops the track."""
+        """May the track take this fix? Any jump, or a doubtful fix after a gap, drops the track. _fix_why says which
+        check refused it, for the log."""
+        self._fix_why = None
         if math.dist(pos, predicted) > self.p["track_jump"]:
+            self._fix_why = "a jump of %.2f m" % math.dist(pos, predicted)
             return False
         if self._last_now is None or last_fix >= self._last_now:
             return True  # the previous cycle had a fix too: no gap
         if pos != min(cands, key=lambda c: math.dist(c, predicted)):
+            self._fix_why = "not the nearest after a gap"
             return False
         for person in self._fresh(now, self._answer, LOOK_KEEP):
             bearing, l = person[0], person[1]
             # bearing only: a range up to LOOK_KEEP old says little about where someone is now
             if l is not None and abs(self._camera_bearing(pos) - bearing) <= MATCH_DEG and score(l) < LOOK_MATCH:
+                self._fix_why = "the camera's look after a gap"
                 return False  # the camera says the one at the track now is someone else
         return True
 
