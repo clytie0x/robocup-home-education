@@ -140,6 +140,29 @@ class MissionTest(unittest.TestCase):
         self.assertIn("follow", self.run.commands)
 
 
+class PrecheckTest(unittest.TestCase):
+    """What the console knows at a run's start, as hmc.flow's precheck reads it: a key fails only when False."""
+
+    UP = {"agent": {"programs": {"detector": {"running": True}, "bridge": {"running": True}}}, "checked": 1.0}
+
+    def test_a_healthy_robot_passes_and_unknown_stays_unknown(self):
+        self.assertEqual(console.precheck_report(self.UP, {"verdict": "ok"}, "full", True), {"link": True})
+        not_asked = {"agent": None, "agent_error": "not asked yet", "checked": None}
+        self.assertEqual(console.precheck_report(not_asked, None, "full", True), {"link": True})
+
+    def test_what_would_fail_the_task_fails_the_start(self):
+        down = {"agent": None, "agent_error": "the Jetson does not answer", "checked": 1.0}
+        self.assertIs(console.precheck_report(down, None, "full", True)["agent"], False)
+        no_detector = {"agent": {"programs": {"detector": {"running": False}}}, "checked": 1.0}
+        self.assertIs(console.precheck_report(no_detector, None, "full", True)["reid"], False)
+        self.assertIs(console.precheck_report(self.UP, {"verdict": "no_power"}, "full", True)["motor_ok"], False)
+
+    def test_a_dry_run_and_the_step_missions_ask_less(self):
+        self.assertNotIn("motor_ok", console.precheck_report(self.UP, {"verdict": "no_power"}, "full", False))
+        down = {"agent": None, "agent_error": "the Jetson does not answer", "checked": 1.0}
+        self.assertEqual(console.precheck_report(down, None, "follow_only", True), {"link": True})
+
+
 class FlowAgent:
     """agent.py's POST /flow (the parked Jetson flow: own, heard, say, release), /stop and /arm, as console.Jetson's
     fetch sees them. Every call is kept as (path, body, timeout)."""
@@ -403,6 +426,13 @@ class RelayTest(unittest.TestCase):
         code, raw = self.request("/api/mission/hear", {"text": "follow me"}, pin="2468")
         self.assertEqual(json.loads(raw)["mission"]["state"], "ENROLLING")
         self.assertIn("follow", self.run.commands)
+
+    def test_a_start_with_the_detector_down_fails_the_precheck(self):
+        self.console.jetson.agent = {"programs": {"detector": {"running": False}, "bridge": {"running": True}}}
+        self.console.jetson.checked = time.time()
+        self.start()
+        self.assertEqual((self.state(), self.mission()["reason"]["code"]), ("FAILED", "REID_DOWN"))
+        self.assertNotIn("follow", self.run.commands)
 
     def test_a_missed_pick_measures_the_bag_again(self):
         self.flow.arm_answer = (409, {"ok": False, "error": "MISSED: closed on air", "code": "MISSED",

@@ -1351,6 +1351,24 @@ def _mission_status(body):
     return status
 
 
+def precheck_report(jetson, wheel, mission, drive):
+    """The executive's precheck from what the console already knows (hmc.flow fails a key only when it is False;
+    unknown stays out). A full mission needs the Jetson agent and its detector (the looks the operator is learned
+    by); a drive needs a last wheel test that did not find the motors without power. Without the base bridge the
+    first follow me is refused anyway (remote.supervised)."""
+    report = {"link": True}
+    if drive and isinstance(wheel, dict) and wheel.get("verdict") == "no_power":
+        report["motor_ok"] = False
+    if mission != "full" or not isinstance(jetson, dict) or jetson.get("checked") is None:
+        return report
+    agent = jetson.get("agent")
+    if not isinstance(agent, dict):
+        report["agent"] = False
+    elif ((agent.get("programs") or {}).get("detector") or {}).get("running") is False:
+        report["reid"] = False
+    return report
+
+
 _RUN_ACTION = {"follow_me": "follow", "wait": "wait", "resume": "resume", "go_back": "return", "stop": "wait"}
 
 
@@ -1950,7 +1968,7 @@ class Console:
             except Exception:
                 continue
 
-    def _begin_mission(self, minutes, mission="full"):
+    def _begin_mission(self, minutes, mission="full", drive=True):
         """Reset the executive for the run that just started. The task clock is at most 5:00."""
         job = (self.jobs.status().get("job") or {})
         stem = Path(str(job.get("log") or "")).stem
@@ -1968,7 +1986,9 @@ class Console:
         voice_off = self._own_flow(mission == "full")  # first: the start's own lines are said through it
         # This call runs only after the Pi base program has started, so the local link is up.
         # A later status or NO_LINK can take it down again.
-        self._apply(self.mission.start(time.monotonic(), report={"link": True}, run_id=run_id, limit_s=limit))
+        report = precheck_report(self.jetson.snapshot(), wheel_test_last(self.log_root / "wheel-test" / "last.json"),
+                                 mission, drive)
+        self._apply(self.mission.start(time.monotonic(), report=report, run_id=run_id, limit_s=limit))
         if voice_off:
             self._park_flow()
             self._apply(self.mission.on_event("voice_relay_off|" + voice_off, time.monotonic()))
@@ -2172,7 +2192,7 @@ class Console:
                                                          "virtual": {"host": pc, "port": VIRTUAL_PORT} if virtual else None})
             if not error:
                 self.commander = None  # a new run: no tab leads it until one sends a command
-                self._begin_mission(body.get("minutes"), mission)
+                self._begin_mission(body.get("minutes"), mission, body["drive"])
                 if mission == "bag_only":
                     threading.Thread(target=self._bag_only_worker, args=(body["drive"],), daemon=True).start()
             return (409 if error else 200), {"error": error}
