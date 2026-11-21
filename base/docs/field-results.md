@@ -22,9 +22,14 @@ image or a measured number stay out.
   4. restart only the Pi console, with `kill -TERM` of `console.py` (`run_console.sh` starts it again), because
      `hmc/flow.py` changed and the executive lives in the console. The Jetson needs no restart;
   5. add the deploy to the table below.
-- **Then the robot checks**, in the order of "Next robot checks" below, with the owner and helpers there. Merge the
-  arm PRs #21, #26 and #30 only after the pick check (item 4). The plan the work follows, with the status of
-  every item, is `base/docs/superpowers/plans/2026-11-21-help-me-carry-real-robot.md`.
+- **Then the robot checks**, in the order of "Next robot checks" below, with the owner and helpers there. The plan
+  the work follows, with the status of every item, is
+  `base/docs/superpowers/plans/2026-11-21-help-me-carry-real-robot.md`.
+- **The arm.** The owner asked for one base, so the arm PRs #21, #25, #26 and #30 were merged into main on 2026-11-21
+  before the pick check. main is now the only branch. The Jetson's arm already runs #26's code (copied there on
+  2026-11-21 at 00:05). #30 (the honest lift check, the Xtion images kept, letting go after a put-down collision) is
+  in main but not on the arm yet. Put it there with `base/tools/deploy.sh --arm` (it builds the arm packages; the
+  running arm stack keeps the old code until it is restarted), then do the pick check (item 4).
 
 ## 2026-11-21: review of the robot's logs since 2026-11-14
 
@@ -82,7 +87,8 @@ In this order; each one is written up here with its logs.
    heard, and the outcome is SUCCESS (`events.jsonl`).
 2. A run with the base bridge stopped: BASE_LINK_DOWN within about 7 s, and the wheels never move.
 3. While following, walk out of view: "Please wait for me." and the come-back line, each heard once.
-4. The pick (PRs #21, #26, #30): 5 picks per bag, Xtion before and after images saved. Label each pick lifted or
+4. The pick (PRs #21, #26, #30, merged; deploy with `--arm` first): 5 picks per bag, Xtion before and after images
+   saved. Label each pick lifted or
    not from the images. Record every put-down: did the bag stand, did it hit COLLISION?
 5. Calibration: the Xtion lens height (`camera_height`, 0.07 in `params.json` against about 0.105 in the docs),
    the LiDAR plane height, and the front camera's file (`~/hmc-follow/front_camera.json`).
