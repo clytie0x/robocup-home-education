@@ -1065,8 +1065,11 @@ class HmcFlow:
             elif self.link_lost_at is None:
                 self.link_ok = False
                 self.link_lost_at = now
-        if status.get("locked"):
+        searching = status.get("mode") == "search"  # hmc.follower Mode.SEARCH: the brain lost the operator, looks
+        if status.get("locked") and not searching:
             outs += self._locked(now)
+        if searching and self.state == "FOLLOWING":
+            outs += self._event("lost_person", "", "", {}, now)
         if status.get("at_start") and self.state == "RETURNING":
             outs += self._arrived_home(now)
         wheels = status.get("wheels")
@@ -1098,9 +1101,8 @@ class HmcFlow:
         if state == "LOST_SEARCH" and not self.come_back_said and self.deadline is not None \
                 and now >= self.deadline:
             self.come_back_said = True
-            self._set_reason("OPERATOR_LOST", "search budget")
-            self.last_say = "Please come back."
-            return [("say", "Please come back.")]
+            self._set_reason("OPERATOR_LOST", "search budget")  # the brain asks them back once (hri.COME_BACK_TEXT)
+            return []
         if state == "CONFIRM_CAR" and now - self.last_prompt >= CONFIRM_S:
             self.confirm_asks += 1
             self.last_prompt = now

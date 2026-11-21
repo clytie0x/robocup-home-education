@@ -245,7 +245,8 @@ def test_link_back_inside_the_grace_stays(tmp_path):
     assert flow.reason is None
 
 
-def test_lost_operator_asks_them_back_and_stays(tmp_path):
+def test_lost_operator_waits_for_the_brains_one_ask_and_stays(tmp_path):
+    # the follower brain asks them back once (hri.COME_BACK_TEXT, -150 when the run scores on): no second ask here
     flow = begin(tmp_path, "lost")
     follow(flow, 2.0)
     flow.on_event("lost_person", 5.0)
@@ -255,9 +256,24 @@ def test_lost_operator_asks_them_back_and_stays(tmp_path):
     assert flow.state == "LOST_SEARCH"
     assert flow.running
     assert flow.reason["code"] == "OPERATOR_LOST"
-    assert says(out) == ["Please come back."]
+    assert says(out) == []
     flow.on_event("locked", 30.0)
     assert flow.state == "FOLLOWING"
+
+
+def test_the_brains_search_is_the_lost_operator(tmp_path):
+    flow = begin(tmp_path, "search")
+    follow(flow, 2.0)
+    flow.on_status({"link": True, "locked": False, "mode": "search"}, 5.0)
+    assert flow.state == "LOST_SEARCH"
+    flow.on_status({"link": True, "locked": True, "mode": "search"}, 5.5)  # the track, but still looking
+    assert flow.state == "LOST_SEARCH"
+    flow.on_status({"link": True, "locked": True, "mode": "follow"}, 6.0)
+    assert flow.state == "FOLLOWING"
+    flow.on_heard("this is the car", 7.0)
+    assert flow.state == "CONFIRM_CAR"
+    flow.on_status({"link": True, "locked": False, "mode": "search"}, 7.5)
+    assert flow.state == "CONFIRM_CAR"
 
 
 def test_pause_on_the_way_back_does_not_resume_itself(tmp_path):

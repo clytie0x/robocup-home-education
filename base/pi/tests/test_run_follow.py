@@ -1303,6 +1303,14 @@ class Remote(Logged):
         self.assertEqual((status["phase"], status["ack"], status["waiting"], status["breadcrumbs"], status["at_start"]),
                          ("RETURN", "return", False, 5, False))
 
+    def test_the_brains_newest_lines_ride_on_every_record(self):
+        # the console reads one record every 0.5 s and sends each new line to the Jetson's voice once
+        state = self.remote_state(FakeBase(), brain=None)
+        for i, text in enumerate(("one.", "two.", "three.", "four.")):
+            state.speech.say(0.01 * i, text)
+        record = self.cycle(state, 0.0)
+        self.assertEqual(record["said"], [[2, "two."], [3, "three."], [4, "four."]])
+
     def test_back_at_the_start_reports_at_start_and_ends(self):
         base = FakeBase()
         state = self.remote_state(base, brain=None)

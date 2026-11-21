@@ -202,15 +202,22 @@ class Log:
         self.file.close()
 
 
+SAID_KEPT = 3  # the brain's newest lines on every record: the console reads about one record in five
+
+
 class Speech:
-    """What the brain says. Printed and logged for now; the voice work plugs in here later."""
+    """What the brain says: printed, logged, and the newest SAID_KEPT lines on each record as [n, text] (n counts
+    from 1 each run), which the console sends on to the Jetson's voice."""
 
     def __init__(self, log):
         self.log = log
+        self.said, self.count = [], 0
 
     def say(self, time, text):
         print("[%.1f] SAY: %s" % (time, text))
         self.log.write({"time": time, "say": text})
+        self.count += 1
+        self.said = (self.said + [[self.count, text]])[-SAID_KEPT:]
 
 
 def _no_jpeg(frame):
@@ -1029,6 +1036,7 @@ def cycle(state, now):
         "breadcrumbs": len(follower.route.points),
         "target": None if state.returner is None or state.returner.target is None else list(state.returner.target),
         "at_start": state.returner is not None and state.returner.done,  # back at the start (the status line's at_start)
+        "said": list(state.speech.said),  # the brain's newest lines, for the voice
         "keyframe": report,  # the match against the nearest keyframe (RETURN), or None
         "queue": state.queue.last_tail[1] if state.joined and state.queue.last_tail else None,  # tail's id
         "wheels": state.wheels_alarm,  # "not turning" or "fault 03" while held for it (_watch_wheels), else None

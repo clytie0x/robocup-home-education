@@ -434,6 +434,25 @@ class RelayTest(unittest.TestCase):
         self.assertEqual((self.state(), self.mission()["reason"]["code"]), ("FAILED", "REID_DOWN"))
         self.assertNotIn("follow", self.run.commands)
 
+    def test_the_brains_lines_are_said_once_and_its_search_is_the_lost_operator(self):
+        console._load_mission()
+        from hmc import hri
+        self.assertEqual(console.EXECUTIVE_SAYS, (hri.RETURN_TEXT, hri.ARRIVED_TEXT))
+        self.start()
+        self.flow.hear("follow me")
+        self.wait_until(lambda: self.state() == "ENROLLING", "ENROLLING")
+        self.run.record = {"phase": "follow", "locked": True, "mode": "follow",
+                           "said": [[1, hri.WAIT_TEXT], [2, hri.RETURN_TEXT]]}
+        self.wait_until(lambda: self.state() == "FOLLOWING", "FOLLOWING")
+        self.wait_until(lambda: hri.WAIT_TEXT in self.flow.says(), "the brain's line said")
+        time.sleep(1.2)  # more reads of the same record
+        self.assertEqual(self.flow.says().count(hri.WAIT_TEXT), 1)
+        self.assertNotIn(hri.RETURN_TEXT, self.flow.says())  # the executive says that one itself
+        self.run.record = {"phase": "follow", "locked": False, "mode": "search",
+                           "said": [[2, hri.RETURN_TEXT], [3, hri.COME_BACK_TEXT]]}
+        self.wait_until(lambda: self.state() == "LOST_SEARCH", "LOST_SEARCH")
+        self.wait_until(lambda: hri.COME_BACK_TEXT in self.flow.says(), "the one ask to come back")
+
     def test_a_missed_pick_measures_the_bag_again(self):
         self.flow.arm_answer = (409, {"ok": False, "error": "MISSED: closed on air", "code": "MISSED",
                                       "message": "closed on air"})

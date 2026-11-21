@@ -93,6 +93,7 @@ FILES = {
 COMMANDS = ("follow", "wait", "resume", "return", "bag", "bag_again", "bag_near")
 MISSIONS = ("full", "follow_only", "bag_only")
 RETURN_S = 180  # s more for run_follow in the full mission: hmc.flow RETURN_BUDGET, the way back after the clock
+EXECUTIVE_SAYS = ("I will go back to the start now.", "I am back at the start.")  # hmc.hri lines hmc.flow says
 MISSION_LABEL = {"full": "โจทย์จริง HMC", "follow_only": "ตามคนอย่างเดียว", "bag_only": "หาและหยิบถุง"}
 NO_PIN = ("/api/stop", "/api/arm/stop", "/api/bank/full", "/api/bank/reading")  # STOPs, and the owner's battery marks
 CLIENT = re.compile(r"^[\w.@:%-]{1,64}$")  # a program's name (X-HMC-Client), e.g. robotctl's "xohm@192.168.31.50"
@@ -1337,6 +1338,10 @@ def _mission_status(body):
         status["locked"] = bool(record.get("locked"))
     if "at_start" in record:
         status["at_start"] = bool(record.get("at_start"))
+    if isinstance(record.get("mode"), str):
+        status["mode"] = record["mode"]  # hmc.follower's mode: "search" is the brain looking for a lost operator
+    if isinstance(record.get("said"), list):
+        status["said"] = record["said"]  # the brain's newest [n, text] lines
     end = record.get("end")
     if end:
         status["end"] = str(end)
@@ -1393,6 +1398,7 @@ class Console:
         self.mission = _load_mission()()
         self._mission_stop = threading.Event()
         self._mission_saw_run = False
+        self._said_n = 0  # the brain's last line sent to the voice
         self._voice_on = False  # this run's say lines go to the parked Jetson flow (_own_flow, _voice_loop)
         self._voice_run = 0  # the run the voice thread serves: a newer run's start ends it
         self._says = queue.SimpleQueue()  # say lines for the voice thread, in order
@@ -1939,10 +1945,21 @@ class Console:
                 if status is None:
                     continue
                 self._apply(self.mission.on_status(status, time.monotonic()))
+                self._brain_says(status.get("said"))
                 for event in self._bag_events(status.get("bag_task")):
                     self._apply(self.mission.on_event(event, time.monotonic()))
             except Exception:
                 continue
+
+    def _brain_says(self, said):
+        """The follower brain's new lines (wait for me, please let me pass, come back) to the voice, each once. The
+        two the executive says itself are left out."""
+        for item in said or ():
+            if not (isinstance(item, list) and len(item) == 2 and isinstance(item[0], int)) or item[0] <= self._said_n:
+                continue
+            self._said_n = item[0]
+            if self._voice_on and isinstance(item[1], str) and item[1] not in EXECUTIVE_SAYS:
+                self._says.put(item[1])
 
     def _apply(self, outputs):
         """Drive run_follow and the arm from the executive; its say lines go to the voice thread. Never stop-all."""
@@ -1982,6 +1999,7 @@ class Console:
         except OSError:
             pass
         self._mission_saw_run = False
+        self._said_n = 0  # the brain's last line sent to the voice
         self._bag_seen = self._bag_asked = self._bag_said = None
         voice_off = self._own_flow(mission == "full")  # first: the start's own lines are said through it
         # This call runs only after the Pi base program has started, so the local link is up.
