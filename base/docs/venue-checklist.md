@@ -100,8 +100,10 @@ instead of after 20 s and 30 s; do not also keep the crontab lines.
 - Then Drive, only when the area is clear and the cable is safe. The console asks that
   question first. Speeds are 0.08 or 0.12 m/s and never above `max_speed` 0.12 in
   `base/params.json`.
-- The measured base does 0.12 to 0.13 m/s whatever is asked above that, and coasts 5 to 8.4 cm
-  after S# (hardware assessment 2026-11-13, Task 2). Leave that room.
+- The base tops out at about 0.12 m/s at full PWM, a hardware limit (hardware assessment,
+  2026-11-15). It coasted 5 to 8.4 cm after S# on the old firmware (Task 2). The floor stop on
+  the firmware flashed 2026-11-14 is not measured yet (`base/pi/tools/brake_distance.py`). Leave
+  that room.
 
 ## When something fails
 
@@ -110,9 +112,10 @@ instead of after 20 s and 30 s; do not also keep the crontab lines.
   the page can do nothing (`base/docs/robot-console.md`).
 - Console STOP: asks the run to end, sends SIGTERM after 3 s, SIGKILL 3 s later, then S#.
   Pressing it again kills at once. It is the normal end of a bad run, not the emergency stop.
-- The firmware has no command timeout of 1.5 s or less. A dead `run_follow`, a Pi power loss or
-  an unplugged CH340 leaves the base on its last command (hardware assessment 2026-11-13).
-  That is why the red button stays in reach.
+- The firmware flashed 2026-11-14 ramps to a stop when no valid F or B comes for 300 ms
+  (`COMMAND_TIMEOUT_MS` in `base/firmware/config.h`). Checked with the wheels lifted only
+  (hardware assessment, "New firmware flashed"). The red button stays in reach: it cuts the motor
+  power whatever the board does.
 - Scoring restart: one per attempt, only before a major scoring action. It subtracts 30 s from
   the total and points scored before it are dropped. Leave the arena with the robot and queue
   again (rulebook 3.7.9, restated in `hmc/docs/tasks/5.1-help-me-carry.md`).
