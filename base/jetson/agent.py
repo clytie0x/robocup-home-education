@@ -26,6 +26,10 @@ Programs (run from this folder, ~/hmc-follow; the ROS ones with /opt/ros/jazzy a
                                    or, for pick_bag and drop_bag (a whole bag job), ARM_JOB_TIMEOUT, for bagpick
                                    (the arm team's camera pick) ARM_BAGPICK_TIMEOUT
   GET  /arm                        {"cmd": "state"}'s answer: /arm/state, the joints (rad), "busy"
+  POST /flow {"cmd": ...}          the console executive's own, heard, say and release, relayed as one JSON line to
+                                   hmc_flow.py's command server (127.0.0.1:5608, see its docstring) and its answer
+                                   back with 200 (ok or not), 503 when the flow program does not answer, 502 when
+                                   it drops the line or answers no JSON object, 504 after FLOW_TIMEOUT
 
 GET /status (the robot console shows it; base/pi/telemetry.py stores the metrics). Every metric is a
 number or null, never a string; a missing source gives null (or an empty object):
@@ -127,6 +131,8 @@ ARM_CMD_PORT = ports.ARM_CMD  # bag_arm.py's command server (TCP 127.0.0.1)
 ARM_TIMEOUT = 90.0  # s: bag_arm's center takes at most 30 + 45 + 10 s
 ARM_JOB_TIMEOUT = 240.0  # s for pick_bag and drop_bag: home 60 + pick 150 + the camera looks (the flow's grab_timeout)
 ARM_BAGPICK_TIMEOUT = 330.0  # s for bagpick: bag_arm's BAGPICK_TIMEOUT 300 + its kill and answer
+FLOW_CMD_PORT = ports.FLOW_CMD  # hmc_flow.py's command server (TCP 127.0.0.1)
+FLOW_TIMEOUT = 3.0  # s: its answers come at once (no move waits)
 UP_WAIT = 60.0  # s start-all waits for the detector's port (the TensorRT engines take a while)
 SETTLE = 3.0  # s start-all waits after a program without a port, before the next
 
@@ -340,6 +346,31 @@ def arm_command(body, port=ARM_CMD_PORT, timeout=None):
     return (200 if out.get("ok") else 409), out
 
 
+def flow_command(body, port=FLOW_CMD_PORT, timeout=FLOW_TIMEOUT):
+    """(http code, answer) of one request sent to hmc_flow.py's command server: its answer is 200, ok or not."""
+    try:
+        s = socket.create_connection(("127.0.0.1", port), 2.0)
+    except OSError as error:  # refused, or on Windows a refused localhost connect that times out
+        return 503, {"ok": False, "error": "the flow program (hmc_flow.py) does not answer on 127.0.0.1:%d (start the "
+                     "flow program): %s" % (port, error)}
+    try:
+        with s:
+            s.settimeout(timeout)
+            s.sendall((json.dumps(body) + "\n").encode())
+            line = s.makefile("rb").readline(65536)
+    except socket.timeout:
+        return 504, {"ok": False, "error": "the flow program did not answer within %.0f s" % timeout}
+    except OSError as error:
+        return 502, {"ok": False, "error": "the flow program dropped the connection: %s" % error}
+    try:
+        out = json.loads(line)
+    except ValueError:
+        out = None
+    if not isinstance(out, dict):
+        return 502, {"ok": False, "error": "the flow program closed without a JSON object answer"}
+    return 200, out
+
+
 def _number(path, scale=1.0):
     """float(text of path) * scale, or None when it does not read (missing, "No data available", ...)."""
     try:
@@ -437,9 +468,9 @@ class Metrics:
 class Agent:
     def __init__(self, programs=None, logs=LOGS, order=None, popen=subprocess.Popen, clock=time.time,
                  sleep=time.sleep, port_open=port_open, metrics=None, find_outside=outside, hold=send_hold,
-                 read_args=cmdline, arm_port=ARM_CMD_PORT):
+                 read_args=cmdline, arm_port=ARM_CMD_PORT, flow_port=FLOW_CMD_PORT):
         programs = PROGRAMS if programs is None else programs
-        self.arm_port = arm_port
+        self.arm_port, self.flow_port = arm_port, flow_port
         self.programs = {}
         for name, (cmd, ros, port) in programs.items():
             self.programs[name] = Program(name, (ROS + cmd) if ros else cmd, logs, popen, clock, sleep)
@@ -597,6 +628,8 @@ def handler_for(agent, allow):
                 return self._send(400, {"error": "send a JSON object"})
             if self.path.strip("/") == "arm":
                 return self._send(*arm_command(body, agent.arm_port))
+            if self.path.strip("/") == "flow":
+                return self._send(*flow_command(body, agent.flow_port))
             code, out = agent.act(self.path.strip("/"), body.get("name"))
             self._send(code, out)
     return Handler

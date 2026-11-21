@@ -2,6 +2,7 @@
 import json
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -81,7 +82,8 @@ class MissionTest(unittest.TestCase):
         line = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
         self.assertIn("+07:00", line["ts"])
         self.assertEqual(line["src"], "hmc.flow")
-        self.assertEqual(parked, [("http://10.0.0.2:8090/stop", {"name": "flow"}, 0.4)])
+        self.assertEqual(parked, [("http://10.0.0.2:8090/flow", {"cmd": "own", "ttl": console.FLOW_LEASE},
+                                   console.FLOW_OWN_TIMEOUT), ("http://10.0.0.2:8090/stop", {"name": "flow"}, 0.4)])
         self.assertEqual(self.acts, [])
 
     def test_speech_drives_follow_and_stop_records_operator_stop(self):
@@ -134,3 +136,234 @@ class MissionTest(unittest.TestCase):
         body = json.loads(raw)
         self.assertEqual(body["mission"]["state"], "ENROLLING")
         self.assertIn("follow", self.run.commands)
+
+
+class FlowAgent:
+    """agent.py's POST /flow (the parked Jetson flow: own, heard, say, release), /stop and /arm, as console.Jetson's
+    fetch sees them. Every call is kept as (path, body, timeout)."""
+
+    def __init__(self):
+        self.calls, self.lines, self.seq = [], [], 0
+        self.flow_code = 200  # 404: an older agent without /flow
+        self.fail = False  # heard and say do not answer in time
+        self.arm_answer = (200, {"ok": True, "error": None, "code": "SUCCESS", "message": "holding"})
+        self.arm_error = None  # raised by a POST /arm instead of its answer
+        self.gate = threading.Event()  # a POST /arm answers once it is set
+        self.gate.set()
+
+    def hear(self, text):
+        self.seq += 1
+        self.lines.append({"seq": self.seq, "text": text, "t": time.time()})
+
+    def __call__(self, url, body=None, timeout=2.0):
+        path = url.split(":8090", 1)[1]
+        self.calls.append((path, body, timeout))
+        if path == "/arm":
+            if body is None:
+                return 200, {"busy": False, "state": "resting", "error": None}
+            self.gate.wait(10)
+            if self.arm_error is not None:
+                raise self.arm_error
+            return self.arm_answer
+        if path != "/flow":
+            return 200, {"error": None}
+        if self.flow_code != 200:
+            return self.flow_code, {"error": "not found"}
+        if body["cmd"] == "own":
+            return 200, {"ok": True, "parked": True, "seq": self.seq}
+        if body["cmd"] == "release":
+            return 200, {"ok": True, "parked": False}
+        if self.fail:
+            raise OSError("timed out")
+        if body["cmd"] == "heard":
+            items = [line for line in self.lines if line["seq"] > body["after"]][:20]
+            return 200, {"ok": True, "parked": True, "seq": self.seq, "items": items}
+        return 200, {"ok": True}
+
+    def sent(self, cmd):
+        return [body for path, body, _ in self.calls if path == "/flow" and body["cmd"] == cmd]
+
+    def says(self):
+        return [body["text"] for body in self.sent("say")]
+
+
+class RelayTest(unittest.TestCase):
+    """The console's half of the Jetson flow relay: speech in, say out, the lease; the arm's answer and the bag task's
+    progress fed back to the executive."""
+
+    setUp_console = MissionTest.setUp
+    tearDown = MissionTest.tearDown
+    request, start, mission = MissionTest.request, MissionTest.start, MissionTest.mission
+
+    def setUp(self):
+        self.setUp_console()
+        self.flow = FlowAgent()
+        self.console.jetson.fetch = self.flow
+        self.console.jetson.host = "10.0.0.2"
+        self.events = []
+        on_event = self.console.mission.on_event
+        self.console.mission.on_event = lambda ev, now: self.events.append(ev) or on_event(ev, now)
+
+    def wait_until(self, test, why, timeout=4.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            value = test()
+            if value:
+                return value
+            time.sleep(0.02)
+        self.fail("not within %.0f s: %s" % (timeout, why))
+
+    def state(self):
+        return self.console.mission.state
+
+    def logged(self, name):
+        """How many lines of the run's events.jsonl note an ignored event of this name."""
+        lines = [json.loads(line) for line in
+                 Path(self.console.mission.log_path).read_text(encoding="utf-8").splitlines()]
+        return sum(1 for line in lines if line["event"] == "ignored" and line["detail"] == name)
+
+    def to_pointing(self):
+        self.start()
+        for path, key, value in (("hear", "text", "follow me"), ("event", "event", "locked"), ("hear", "text", "stop"),
+                                 ("hear", "text", "yes"), ("hear", "text", "ready")):
+            code, raw = self.request("/api/mission/" + path, {key: value}, pin="2468")
+            self.assertEqual(code, 200, raw)
+        self.assertEqual(self.state(), "POINTING")
+        self.assertEqual(self.run.commands[-1], "bag")
+
+    def reach_bag(self, bag_id=12.5):
+        self.run.record = {"phase": "follow", "bag_task": {
+            "id": bag_id, "seq": 1, "mode": "point", "state": "reached",
+            "chosen": {"x": 0.9, "y": 0.1, "side": "left", "say": "I see the bag on the left."},
+            "result": {"ok": True, "code": "OK", "x": 0.31, "y": 0.02, "top": 0.2}}}
+
+    def arm_posts(self):
+        return [(body, timeout) for path, body, timeout in self.flow.calls if path == "/arm" and body is not None]
+
+    def test_start_owns_the_flow_and_its_lines_go_out_in_order(self):
+        self.start()
+        self.assertEqual(self.flow.calls[0], ("/flow", {"cmd": "own", "ttl": console.FLOW_LEASE},
+                                              console.FLOW_OWN_TIMEOUT))
+        self.wait_until(lambda: len(self.flow.sent("heard")) >= 2, "two reads of the speech")
+        self.assertEqual(self.flow.says(), ["Checking the base before we start.", "Say follow me when you are ready."])
+        self.assertEqual(self.flow.sent("heard")[0], {"cmd": "heard", "after": 0, "ttl": console.FLOW_LEASE})
+        self.assertNotIn("/stop", [path for path, _, _ in self.flow.calls])
+
+    def test_an_agent_without_flow_is_stopped_as_before_and_the_log_says_so(self):
+        self.flow.flow_code = 404
+        self.start()
+        self.assertEqual([(path, body) for path, body, _ in self.flow.calls],
+                         [("/flow", {"cmd": "own", "ttl": console.FLOW_LEASE}), ("/stop", {"name": "flow"})])
+        time.sleep(0.6)
+        self.assertEqual(len(self.flow.calls), 2)
+        self.assertEqual(self.logged("voice_relay_off"), 1)
+
+    def test_a_follow_only_run_keeps_voice_out_as_before(self):
+        code, raw = self.request("/api/task/start", {"drive": False, "speed": 0.08, "minutes": 5,
+                                                     "mission": "follow_only"}, pin="2468")
+        self.assertEqual(code, 200, raw)
+        self.assertEqual([(path, body) for path, body, _ in self.flow.calls], [("/stop", {"name": "flow"})])
+        time.sleep(0.6)
+        self.assertEqual(len(self.flow.calls), 1)
+        self.assertEqual(self.logged("voice_relay_off"), 1)
+
+    def test_heard_follow_me_moves_the_executive_on(self):
+        self.start()
+        self.flow.hear("follow me")
+        self.wait_until(lambda: self.state() == "ENROLLING", "ENROLLING")
+        self.assertIn("follow", self.run.commands)
+        self.wait_until(lambda: "I will follow you. Please stand in front of me." in self.flow.says(), "its line said")
+        self.wait_until(lambda: self.flow.sent("heard")[-1]["after"] == 1, "the next read after seq 1")
+
+    def test_a_failed_poll_does_not_end_the_run(self):
+        self.start()
+        self.wait_until(lambda: self.flow.sent("heard"), "a first read")
+        self.flow.fail = True
+        failed = len(self.flow.sent("heard"))
+        self.wait_until(lambda: len(self.flow.sent("heard")) >= failed + 3, "three failed reads")
+        self.assertTrue(self.mission()["active"])
+        self.assertEqual(self.state(), "READY")
+        self.flow.fail = False
+        self.flow.hear("follow me")
+        self.wait_until(lambda: self.state() == "ENROLLING", "ENROLLING after the relay is back")
+        self.assertEqual(self.logged("voice_relay_lost"), 1)
+        self.assertEqual(self.logged("voice_relay_ok"), 1)
+
+    def test_stop_releases_the_flow_once(self):
+        self.start()
+        self.wait_until(lambda: self.flow.sent("heard"), "a first read")
+        code, _ = self.request("/api/stop", {})
+        self.assertEqual(code, 200)
+        self.wait_until(lambda: self.flow.sent("release"), "release")
+        reads = len(self.flow.sent("heard"))
+        time.sleep(0.6)
+        self.assertEqual(len(self.flow.sent("release")), 1)
+        self.assertEqual(len(self.flow.sent("heard")), reads)
+        self.assertEqual(self.flow.says()[-1], "STOP was pressed. Motion has stopped.")
+
+    def test_the_end_of_the_run_job_releases_the_flow(self):
+        self.start()
+        self.wait_until(lambda: self.flow.sent("heard"), "a first read")
+        self.jobs.running = None
+        self.wait_until(lambda: self.flow.sent("release"), "release")
+        time.sleep(0.6)
+        self.assertEqual(len(self.flow.sent("release")), 1)
+
+    def test_a_reached_bag_is_picked_brought_back_and_dropped(self):
+        self.to_pointing()
+        self.reach_bag()
+        self.wait_until(lambda: self.state() == "RETURNING", "RETURNING after grab_success")
+        self.assertEqual(self.arm_posts(), [({"cmd": "pick_bag", "x": 0.31, "y": 0.02, "top": 0.2},
+                                             console.ARM_JOB_TIMEOUT)])
+        self.assertTrue(self.console.mission.carrying)
+        self.assertEqual(self.run.commands[-1], "return")
+        time.sleep(1.2)  # more status reads of the same bag task
+        self.assertEqual([e for e in self.events if e.startswith("bag_")],
+                         ["bag_chosen|LEFT|I see the bag on the left.", "bag_reached|OK|0.310,0.020,top=0.200"])
+        self.assertEqual(self.flow.says().count("I see the bag on the left."), 1)
+        self.run.record = dict(self.run.record, phase="return", at_start=True)
+        self.wait_until(lambda: self.state() == "DONE", "DONE after drop_done")
+        self.assertEqual(self.arm_posts()[1], ({"cmd": "drop_bag", "x": 0.31, "y": 0.0}, console.ARM_JOB_TIMEOUT))
+        self.assertIn("drop_done", self.events)
+        self.assertEqual(self.mission()["outcome"], "SUCCESS")
+        self.wait_until(lambda: self.flow.sent("release"), "release at DONE")
+
+    def test_a_missed_pick_measures_the_bag_again(self):
+        self.flow.arm_answer = (409, {"ok": False, "error": "MISSED: closed on air", "code": "MISSED",
+                                      "message": "closed on air"})
+        self.to_pointing()
+        self.reach_bag()
+        self.wait_until(lambda: "bag_again" in self.run.commands, "bag_again after the miss")
+        self.assertIn("grab_failed|MISSED|closed on air", self.events)
+        self.assertEqual(self.state(), "POINTING")
+        self.assertEqual(self.mission()["reason"]["code"], "PICK_MISSED")
+        self.reach_bag(bag_id=40.0)  # the second bag task: reported too
+        self.wait_until(lambda: len(self.arm_posts()) == 2, "the second pick")
+
+    def test_an_unreachable_bag_and_a_lost_agent_are_handed_over(self):
+        for answer, error, reason in (((409, {"ok": False, "code": "UNREACHABLE", "message": "too far"}), None,
+                                       "PICK_UNREACHABLE"), (None, OSError("timed out"), "PICK_TIMEOUT")):
+            with self.subTest(reason):
+                self.flow.arm_answer, self.flow.arm_error = answer, error
+                self.to_pointing()
+                self.reach_bag()
+                self.wait_until(lambda: self.state() == "HANDOVER", "HANDOVER")
+                self.assertEqual(self.mission()["reason"]["code"], reason)
+                self.request("/api/stop", {})
+                self.jobs.running = None
+                self.run.record = None
+
+    def test_the_mission_loop_ticks_while_a_slow_pick_runs(self):
+        self.flow.gate.clear()
+        self.to_pointing()
+        ticks = []
+        on_tick = self.console.mission.on_tick
+        self.console.mission.on_tick = lambda now: ticks.append(now) or on_tick(now)
+        self.reach_bag()
+        self.wait_until(self.arm_posts, "the pick sent")
+        ticks.clear()
+        time.sleep(1.3)
+        self.assertGreaterEqual(len(ticks), 2)
+        self.assertEqual(self.state(), "PICKING")
+        self.flow.gate.set()
+        self.wait_until(lambda: self.state() == "RETURNING", "RETURNING once the arm answered")

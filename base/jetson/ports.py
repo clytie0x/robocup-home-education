@@ -15,6 +15,7 @@ SLAM = 5602  # Jetson, slam_bridge.py, TCP length-prefixed JSON: scans in, map c
 HOLD = 5605  # Jetson 127.0.0.1, base_bridge.py's HoldListener, UDP: agent.py's b"hold"
 LOOK = 5606  # Jetson, front_camera.serve (started by bag_arm.py), TCP: bag top for the Pi's bag.py
 ARM_CMD = 5607  # Jetson 127.0.0.1, bag_arm.py's command server, TCP JSON line: agent.py's arm commands
+FLOW_CMD = 5608  # Jetson 127.0.0.1, hmc_flow.py's command server, TCP JSON line: agent.py's flow commands, speech and say for the console executive
 WHISPER = 8080  # Jetson 127.0.0.1, whisper-server (agent program "whisper"), HTTP: speech to text
 LLM = 8081  # Jetson 127.0.0.1, llama-server (voice/scripts/servers.sh), HTTP: the voice llm_node's brain
 WEBCAM = 8082  # Jetson, the arm team's ~/so100_ws/webcam_view.py, HTTP JPEG: arm camera frames
@@ -23,5 +24,5 @@ VOICE_PANEL = 8091  # Jetson, voice/scripts/control_panel.py (PANEL_PORT), HTTP:
 
 HOSTS = {  # the names of the ports each host listens on; a number twice on one host is a test failure
     "pi": ("CONSOLE", "DASHBOARD", "PLAN", "COMMAND", "VIRTUAL"),
-    "jetson": ("DETECTOR", "SLAM", "HOLD", "LOOK", "ARM_CMD", "WHISPER", "LLM", "WEBCAM", "AGENT", "VOICE_PANEL"),
+    "jetson": ("DETECTOR", "SLAM", "HOLD", "LOOK", "ARM_CMD", "FLOW_CMD", "WHISPER", "LLM", "WEBCAM", "AGENT", "VOICE_PANEL"),
 }

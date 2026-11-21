@@ -288,6 +288,24 @@ class Approach(unittest.TestCase):
             task = World(bags, operator=(-1.0, 1.0), point=None).run(new_task("near"))
             self.assertEqual(task.result["code"], "NO_BAG", bags)
 
+    def test_bag_near_waits_for_the_first_lidar_scan(self):
+        # 2026-11-20 22:59: the console sent bag_near 0.3 s into the run, the LiDAR's first scan came at 0.6 s
+        world = World([(1.0, 0.0)], operator=(-1.0, 1.0), point=None)
+        task = new_task("near")
+        for t in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5):
+            task.step(bag.View(t, world.pose))  # no scan yet
+            self.assertFalse(task.done, task.result)
+        world.t = 0.6
+        world.run(task)
+        self.assert_reached(task, world, 0)
+        task, t = new_task("near"), 0.0
+        while not task.done and t < 10.0:  # a LiDAR that never answers
+            task.step(bag.View(t, (0.0, 0.0, 0.0)))
+            t += 0.1
+        self.assertEqual(task.result["code"], "NO_BAG")
+        self.assertIn("LiDAR", task.result["message"])
+        self.assertAlmostEqual(t, bag.NO_SCAN_S, delta=0.25)
+
     def test_a_bag_only_the_camera_sees_is_reached_by_odometry(self):
         # The clear plastic bag stays under the LiDAR plane: only the detector's box finds it.
         world = World([(1.8, 0.4)], operator=(2.3, -0.3), point=(1.8, 0.4), seen_bags=[])

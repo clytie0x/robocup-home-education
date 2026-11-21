@@ -12,6 +12,15 @@ on /speech/text, so one sentence never triggers twice. Intents from the brain ar
 
 A full run is owned by the Pi console executive (hmc.flow). While that run is active this node
 stays quiet: a console_owns_run event parks it, and console_released lets it command again.
+The console reaches it through agent.py's POST /flow, relayed to this node's command server on TCP
+127.0.0.1:ports.FLOW_CMD (5608), one JSON object per line in, one JSON line out (on_command):
+  {"cmd": "own", "ttl": T}                park for T s (1 to 30, default 5) -> {"ok", "parked", "seq": newest heard}
+  {"cmd": "heard", "after": N, "ttl": T}  renew the park; what was heard since N -> {"ok", "parked", "seq", "items":
+                                          [{"seq", "text", "t"}, ...]} (oldest first, at most 20, of the last 50 kept)
+  {"cmd": "say", "text": "..."}           /tts/say, only while parked -> {"ok"} (else "error": "not parked")
+  {"cmd": "release"}                      un-park now -> {"ok", "parked": false}
+The park is a lease: not renewed, the tick ends it after T s. While parked, /speech/heard is kept for the console,
+neither handled nor sent to the brain.
 
 Start: the flow enters ready once tts_node says so on /tts/ready (latched, so the first line is heard), or after
 START_WAIT s without it (warning logged; lines are still published), and once one /base/status was read
@@ -114,6 +123,8 @@ BASE_LINK_SAY = "The base program is not running. Start the Pi base program."
 RESUME_AFTER_S = 20.0  # s into a "stop"/"wait" pause on the way back, the robot asks to be told to go on
 COME_BACK_TEXT = "Please come back."
 STEP_BACK_TEXT = "Please step back two steps and point at the bag."  # the camera sees the shoulder from about 2.2 m
+LEASE_MIN, LEASE_MAX, LEASE_DEFAULT = 1.0, 30.0, 5.0  # s of the console's park lease (on_command own / heard)
+HEARD_KEEP, HEARD_MAX = 50, 20  # speech kept while parked for the console, and sent in one heard answer
 
 # Other names teammates' nodes may send for the same event (copied from voice's flow_node).
 EVENT_ALIASES = {"drop_success": "drop_done", "grab_done": "grab_success", "pick_success": "grab_success",
@@ -228,6 +239,8 @@ class HmcFlow:
         self.paused_at = None
         self.pause_asked = False  # returning: "Say continue ..." said for this pause
         self.parked = False  # the console executive owns the run: this flow must not command
+        self.lease_until = None  # parked by the console's own / heard until then (None: no lease)
+        self.heard, self.heard_seq = [], 0  # speech heard while parked ({"seq", "text", "t"}), for the console
 
     # ---------------- helpers ----------------
     @staticmethod
@@ -396,7 +409,10 @@ class HmcFlow:
 
     def on_heard(self, text, now):
         """Raw speech. Handled here if it is a task word for this state, else forwarded to the brain."""
-        if self.parked:
+        if self.parked:  # kept for the console executive (on_command heard), not handled here
+            self.heard_seq += 1
+            self.heard.append({"seq": self.heard_seq, "text": text, "t": now})
+            del self.heard[:-HEARD_KEEP]
             return [("log", "(parked: the console executive owns this run)")]
         first = self._start_first(now)
         self.last_prompt = max(self.last_prompt, now)  # someone is talking: don't nag
@@ -498,10 +514,10 @@ class HmcFlow:
     def on_event(self, ev, now):
         name = ev.strip().split("|", 1)[0].strip().lower()
         if name == "console_owns_run":
-            self.parked = True
+            self.parked, self.lease_until = True, None  # until console_released, no lease
             return [("log", "(parked: the console executive owns this run)")]
         if name == "console_released":
-            self.parked = False
+            self.parked, self.lease_until = False, None
             return [("log", "(console released this run)")]
         if self.parked:
             return [("log", "(parked)")]
@@ -650,6 +666,9 @@ class HmcFlow:
         return out
 
     def on_tick(self, now):
+        if self.parked and self.lease_until is not None and now >= self.lease_until:
+            self.parked, self.lease_until = False, None  # as console_released
+            return [("log", "(the console's lease ran out: this flow commands again)")]
         if self.parked:
             return []
         s = self.state
@@ -680,13 +699,48 @@ class HmcFlow:
             return self._goto(ERROR, now, "Sorry, I could not put the bag down.")
         return []
 
+    def on_command(self, cmd, now):
+        """One request of the console executive on the command server (the module docstring): (answer, outputs)."""
+        if not isinstance(cmd, dict):
+            return {"ok": False, "error": "bad request"}, []
+        name = cmd.get("cmd")
+        if name in ("own", "heard"):
+            out = [] if self.parked else [("log", "(parked: the console executive owns this run)")]
+            ttl = cmd.get("ttl")
+            ttl = ttl if isinstance(ttl, (int, float)) and not isinstance(ttl, bool) else LEASE_DEFAULT
+            self.parked, self.lease_until = True, now + min(LEASE_MAX, max(LEASE_MIN, ttl))
+            answer = {"ok": True, "parked": True, "seq": self.heard_seq}
+            if name == "heard":
+                after = cmd.get("after")
+                after = after if isinstance(after, (int, float)) else 0
+                answer["items"] = [item for item in self.heard if item["seq"] > after][:HEARD_MAX]
+            return answer, out
+        if name == "say":
+            text = cmd.get("text")
+            if not isinstance(text, str) or not text.strip():
+                return {"ok": False, "error": "text must be a non-empty string"}, []
+            if not self.parked:  # the flow speaks for itself: two voices never talk over each other
+                return {"ok": False, "error": "not parked"}, []
+            return {"ok": True}, [("say", text)]
+        if name == "release":
+            out = [("log", "(console released this run)")] if self.parked else []
+            self.parked, self.lease_until = False, None
+            return {"ok": True, "parked": False}, out
+        return {"ok": False, "error": "unknown cmd"}, []
+
 
 def make_node():
     """The rclpy node, built here so the rest of the file imports without ROS."""
+    import threading
+    from types import SimpleNamespace
+
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
     from std_msgs.msg import Bool, String
+
+    import ports
+    from bag_arm import serve_commands  # its JSON line server (bag_arm imports no ROS at the top)
 
     class HmcFlowNode(Node):
         def __init__(self):
@@ -721,6 +775,12 @@ def make_node():
             self.create_subscription(Bool, "/tts/ready", self.on_tts_ready, latched)
             self.create_timer(0.2, self.on_tick)
             self.t0 = time.time()
+            self.logic_lock = threading.Lock()  # the command server's threads use the logic too
+            try:  # not a method named handle: rclpy's Node has its own
+                serve_commands(SimpleNamespace(handle=self.on_flow_cmd), ports.FLOW_CMD)
+                self.get_logger().info("the console executive's commands on TCP 127.0.0.1:%d" % ports.FLOW_CMD)
+            except OSError as exc:  # another copy serves it: this flow still runs, the console cannot reach it
+                self.get_logger().error("command server not started: %s" % exc)
 
         def emit(self, outputs):
             for kind, val in outputs:
@@ -739,7 +799,8 @@ def make_node():
                     self.get_logger().info(val)
 
         def on_heard(self, msg):
-            self.emit(self.logic.on_heard(msg.data, time.time()))
+            with self.logic_lock:
+                self.emit(self.logic.on_heard(msg.data, time.time()))
 
         def on_intent(self, msg):
             try:
@@ -747,12 +808,14 @@ def make_node():
             except json.JSONDecodeError:
                 self.get_logger().warn("bad intent: %s" % msg.data)
                 return
-            self.emit(self.logic.on_intent(intent, time.time()))
+            with self.logic_lock:
+                self.emit(self.logic.on_intent(intent, time.time()))
 
         def on_event(self, msg):
             if msg.data.strip().lower() not in ("see_person", "lost_person"):
                 self.get_logger().info("event: %s" % msg.data)
-            self.emit(self.logic.on_event(msg.data, time.time()))
+            with self.logic_lock:
+                self.emit(self.logic.on_event(msg.data, time.time()))
 
         def on_status(self, msg):
             try:
@@ -760,25 +823,38 @@ def make_node():
             except json.JSONDecodeError:
                 return
             if isinstance(status, dict):
-                self.emit(self.logic.on_status(status, time.time()))
+                with self.logic_lock:
+                    self.emit(self.logic.on_status(status, time.time()))
 
         def on_tts_ready(self, msg):
             self.tts_ready = self.tts_ready or bool(msg.data)
 
         def on_tick(self):
-            now = time.time()
-            if self.logic.state is None:  # wait for tts_node (first line heard) and one /base/status
-                if not should_start(self.tts_ready, now - self.t0, status_seen=self.logic.status_seen):
+            with self.logic_lock:
+                now = time.time()
+                if self.logic.state is None:  # wait for tts_node (first line heard) and one /base/status
+                    if not should_start(self.tts_ready, now - self.t0, status_seen=self.logic.status_seen):
+                        return
+                    if not self.tts_ready:
+                        self.get_logger().warn("no /tts/ready from tts_node after %.0f s: starting without voice"
+                                               % START_WAIT)
+                    if not self.logic.status_seen:
+                        self.get_logger().warn("no /base/status after %.0f s (base_bridge down?): starting without it"
+                                               % STATUS_WAIT)
+                    self.emit(self.logic.start(now))
                     return
-                if not self.tts_ready:
-                    self.get_logger().warn("no /tts/ready from tts_node after %.0f s: starting without voice"
-                                           % START_WAIT)
-                if not self.logic.status_seen:
-                    self.get_logger().warn("no /base/status after %.0f s (base_bridge down?): starting without it"
-                                           % STATUS_WAIT)
-                self.emit(self.logic.start(now))
-                return
-            self.emit(self.logic.on_tick(now))
+                self.emit(self.logic.on_tick(now))
+
+        def on_flow_cmd(self, line):
+            """One line on the command server, on its thread: the console's request, answered as a dict."""
+            try:
+                cmd = json.loads(line)
+            except ValueError:
+                cmd = None  # -> bad request
+            with self.logic_lock:
+                answer, out = self.logic.on_command(cmd, time.time())
+                self.emit(out)  # rclpy publishers may be used from any thread
+            return answer
 
     rclpy.init()
     return HmcFlowNode()

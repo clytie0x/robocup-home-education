@@ -625,5 +625,75 @@ class ArmRelayTest(unittest.TestCase):
         self.assertLess(took, 2.0)
 
 
+class FlowRelayTest(unittest.TestCase):
+    """POST /flow: the console executive's requests to hmc_flow.py's command server (FLOW_CMD)."""
+
+    def serve(self, flow_port, allow=("127.0.0.1",)):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        a = agent.Agent({}, logs=Path(tmp.name), find_outside=lambda ours: {}, flow_port=flow_port)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), agent.handler_for(a, allow))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return "http://127.0.0.1:%d" % server.server_address[1]
+
+    def raw_flow(self, data):
+        """A flow command server that reads one line, answers data as it is and closes."""
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        self.addCleanup(s.close)
+
+        def run():
+            conn, _ = s.accept()
+            with conn, conn.makefile("rwb") as f:
+                f.readline()
+                f.write(data)
+                f.flush()
+        threading.Thread(target=run, daemon=True).start()
+        return s.getsockname()[1]
+
+    def test_post_flow_goes_to_hmc_flow_and_its_answer_is_200(self):
+        fake = FakeBagArm(lambda cmd: {"ok": True, "parked": True, "seq": 3} if cmd["cmd"] == "own"
+                          else {"ok": False, "error": "not parked"})
+        self.addCleanup(fake.close)
+        base = self.serve(fake.port)
+        self.assertEqual(HttpTest.post(None, base + "/flow", {"cmd": "own", "ttl": 5}),
+                         (200, {"ok": True, "parked": True, "seq": 3}))
+        self.assertEqual(HttpTest.post(None, base + "/flow", {"cmd": "say", "text": "Hello."}),
+                         (200, {"ok": False, "error": "not parked"}))
+        self.assertEqual(fake.got, [{"cmd": "own", "ttl": 5}, {"cmd": "say", "text": "Hello."}])
+
+    def test_no_flow_program_is_503(self):
+        base = self.serve(free_port())
+        code, body = HttpTest.post(None, base + "/flow", {"cmd": "own"})
+        self.assertEqual(code, 503)
+        self.assertIn("flow program", body["error"])
+        self.assertIn("does not answer", body["error"])
+
+    def test_a_silent_flow_is_504(self):
+        self.assertEqual((agent.FLOW_CMD_PORT, agent.FLOW_TIMEOUT), (5608, 3.0))
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            code, body = agent.flow_command({"cmd": "heard", "after": 0}, s.getsockname()[1], timeout=0.3)
+        self.assertEqual(code, 504)
+        self.assertIn("did not answer", body["error"])
+
+    def test_a_malformed_answer_is_502(self):
+        for data in (b"not json\n", b"[1, 2]\n", b""):
+            code, body = agent.flow_command({"cmd": "own"}, self.raw_flow(data))
+            self.assertEqual(code, 502, data)
+            self.assertIn("flow program", body["error"])
+
+    def test_post_flow_only_from_the_allowed_addresses(self):
+        fake = FakeBagArm(lambda cmd: {"ok": True})
+        self.addCleanup(fake.close)
+        base = self.serve(fake.port, allow=("10.0.0.1",))
+        self.assertEqual(HttpTest.post(None, base + "/flow", {"cmd": "release"})[0], 403)
+        self.assertEqual(fake.got, [])
+
+
 if __name__ == "__main__":
     unittest.main()

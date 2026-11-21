@@ -31,6 +31,7 @@ import ipaddress
 import json
 import math
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -100,6 +101,10 @@ ARM_TIMEOUT = 95.0  # s: the agent answers an arm command when it is done, withi
 ARM_JOB_TIMEOUT = 245.0  # s: and a bag job within its ARM_JOB_TIMEOUT (240 s: home 60 + pick 150 + the camera looks)
 ARM_BAGPICK_TIMEOUT = 335.0  # s: and the arm team's bagpick within its ARM_BAGPICK_TIMEOUT (330 s)
 ARM_STOP_WAIT = 0.5  # s STOP's answer waits for the arm's stop; the base's stop is already under way
+FLOW_LEASE = 5.0  # s the Jetson flow stays parked (agent.py POST /flow) without the console's next read
+FLOW_POLL = 0.25  # s between two reads of what the parked flow heard
+FLOW_TIMEOUT = 4.0  # s for one /flow call: the agent answers 504 after 3 s without the flow program's reply
+FLOW_OWN_TIMEOUT = 1.0  # s a run's start waits for the own (and the end for the release); no answer: stopped as before
 COMMANDS_MAX = 200  # lines GET /api/commands gives at most
 RUN_TAIL = 1 << 20  # bytes at the end of the newest run log that GET /api/commands reads for the voice flow's commands
 VOICE_CLIENT = "voice (Jetson)"  # their client name in the command list
@@ -175,6 +180,7 @@ TOOL_CHECKS = {
                               "--max-speed": "speed", "--velocity-loop": "flag", "--yes-owner-at-robot": "flag"}),
     "approach": (True, [], {"--to": "number", "--yes-close-approach": "flag"}),
     "back_up": (True, [], {"--metres": "number", "--yes-back-up": "flag"}),
+    "joystick_drive": (True, [], {"--max-speed": "speed", "--seconds": "number", "--yes-owner-at-robot": "flag"}),  # --dry and --device stay out
     "lap_check": (True, [], {"--seconds": "number", "--yes-floor-run": "flag"}),
     "walk_check": (False, [], {"--seconds": "number"}),
 }
@@ -899,6 +905,22 @@ class Jetson:
             return code, answer
         return 502, {"error": last}
 
+    def flow(self, body, timeout=FLOW_TIMEOUT):
+        """(code, body) of the agent's POST /flow (the parked flow program: own, heard, say, release), sent as arm
+        sends a command: to the next address only when this one could not be reached, never a second time."""
+        last = "the Jetson does not answer"
+        for host in self.order():
+            try:
+                code, answer = self.fetch("http://%s:%d/flow" % (host, AGENT_PORT), body, timeout=timeout)
+            except urllib.error.URLError as error:  # no connection: the call was never sent
+                last = "no answer from agent.py on %s (%s)" % (host, error.reason)
+                continue
+            except (OSError, ValueError) as error:
+                return 504, {"error": "agent.py on %s did not answer in time (%s)" % (host, error)}
+            self.host = host
+            return code, answer
+        return 502, {"error": last}
+
     def webcam_url(self):
         return "http://%s:%d/stream" % (self.host or self.hosts[0], WEBCAM_PORT)
 
@@ -1304,6 +1326,8 @@ def _mission_status(body):
     pose = record.get("believed") if isinstance(record.get("believed"), dict) else record.get("pose")
     if isinstance(pose, dict):
         status["pose"] = pose
+    if isinstance(record.get("bag_task"), dict):
+        status["bag_task"] = record["bag_task"]  # the executive does not read it: Console._bag_events does
     return status
 
 
@@ -1331,6 +1355,11 @@ class Console:
         self.mission = _load_mission()()
         self._mission_stop = threading.Event()
         self._mission_saw_run = False
+        self._voice_on = False  # this run's say lines go to the parked Jetson flow (_own_flow, _voice_loop)
+        self._voice_run = 0  # the run the voice thread serves: a newer run's start ends it
+        self._says = queue.SimpleQueue()  # say lines for the voice thread, in order
+        self._arm_lock = threading.Lock()  # the executive's pick and drop: one at a time (_arm_job)
+        self._bag_seen = self._bag_asked = self._bag_said = None  # bag task ids (_bag_events)
         self._mission_thread = threading.Thread(target=self._mission_loop, daemon=True)
         self._mission_thread.start()
 
@@ -1518,7 +1547,9 @@ class Console:
             return self._drop
         try:
             import importlib.util
-            path = HERE.parent / "jetson" / "so100_ik.py"
+            path = HERE / "jetson" / "so100_ik.py"  # on the Pi: deploy.sh puts it beside console.py
+            if not path.exists():
+                path = HERE.parent / "jetson" / "so100_ik.py"  # in the repo
             spec = importlib.util.spec_from_file_location("so100_ik_console", path)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
@@ -1863,26 +1894,27 @@ class Console:
                 if status is None:
                     continue
                 self._apply(self.mission.on_status(status, time.monotonic()))
+                for event in self._bag_events(status.get("bag_task")):
+                    self._apply(self.mission.on_event(event, time.monotonic()))
             except Exception:
                 continue
 
     def _apply(self, outputs):
-        """Drive run_follow and the arm from the executive. Never stop-all."""
+        """Drive run_follow and the arm from the executive; its say lines go to the voice thread. Never stop-all."""
         for kind, value in outputs or ():
+            if kind == "say" and self._voice_on and isinstance(value, str):
+                self._says.put(value)
             if kind != "cmd" or not isinstance(value, dict):
                 continue
             action = value.get("action")
             params = value.get("params") if isinstance(value.get("params"), dict) else {}
             try:
-                if action in ("pick_bag", "drop_bag"):
-                    body = {"cmd": action}
-                    for key in ("x", "y", "top", "yaw"):
-                        if key in params and not isinstance(params[key], bool):
-                            body[key] = params[key]
-                    self.jetson.arm(body)
+                if action in ("pick_bag", "drop_bag"):  # a thread: the mission loop keeps the clock meanwhile
+                    threading.Thread(target=self._arm_job, args=(action, params), daemon=True).start()
                     continue
                 if action == "find_bag":
                     command = "bag_again" if params.get("again") else "bag"
+                    self._bag_asked = (self._bag_seen,)  # before it is sent: its task is the next new id
                 else:
                     command = _RUN_ACTION.get(action)
                 if command:
@@ -1891,7 +1923,7 @@ class Console:
             except Exception:
                 continue
 
-    def _begin_mission(self, minutes):
+    def _begin_mission(self, minutes, mission="full"):
         """Reset the executive for the run that just started. The task clock is at most 5:00."""
         job = (self.jobs.status().get("job") or {})
         stem = Path(str(job.get("log") or "")).stem
@@ -1905,10 +1937,14 @@ class Console:
         except OSError:
             pass
         self._mission_saw_run = False
+        self._bag_seen = self._bag_asked = self._bag_said = None
+        voice_off = self._own_flow(mission == "full")  # first: the start's own lines are said through it
         # This call runs only after the Pi base program has started, so the local link is up.
         # A later status or NO_LINK can take it down again.
         self._apply(self.mission.start(time.monotonic(), report={"link": True}, run_id=run_id, limit_s=limit))
-        self._park_flow()
+        if voice_off:
+            self._park_flow()
+            self._apply(self.mission.on_event("voice_relay_off|" + voice_off, time.monotonic()))
 
     def _stop_mission(self):
         self._apply(self.mission.stop(time.monotonic()))
@@ -1923,6 +1959,115 @@ class Console:
             fetch("http://%s:%d/stop" % (host, AGENT_PORT), {"name": "flow"}, timeout=0.4)
         except Exception:
             pass
+
+    def _own_flow(self, wanted=True):
+        """Park the Jetson flow program for this run (POST /flow own) and start the voice thread: None. Else why not
+        ("CODE|detail"): the caller then stops the flow program as before, and no speech reaches the executive."""
+        self._voice_run += 1  # an older run's voice thread ends, without its release
+        self._voice_on = False
+        if not wanted:  # follow_only and bag_only: speech must not steer them (task_command's --remote note)
+            return "NOT_FULL|speech reaches the executive in the full mission only"
+        if not getattr(self.jetson, "host", None):
+            return "NO_AGENT|the Jetson agent has not answered yet"
+        try:
+            code, answer = self.jetson.flow({"cmd": "own", "ttl": FLOW_LEASE}, timeout=FLOW_OWN_TIMEOUT)
+        except Exception as error:
+            code, answer = 0, {"error": str(error)}
+        if code != 200 or not isinstance(answer, dict) or answer.get("parked") is not True:
+            return "HTTP_%d|%s" % (code, answer.get("error") if isinstance(answer, dict) else answer)
+        seq = answer.get("seq") if isinstance(answer.get("seq"), int) else 0
+        self._says = queue.SimpleQueue()
+        self._voice_on = True
+        threading.Thread(target=self._voice_loop, args=(self._voice_run, seq), daemon=True).start()
+        return None
+
+    def _voice_loop(self, run, seq):
+        """One run's voice thread, every FLOW_POLL s: the executive's say lines out in order, then one read of what
+        the parked flow heard after seq (it renews the lease), each line to the executive. A failed call never ends
+        the run: logged once when lost and once when back. It ends one round after the run did (a terminal state,
+        STOP, or the run job's end) with one release, at a newer run's start, or with the console."""
+        lost = saw_run = ending = False
+        while not self._mission_stop.wait(FLOW_POLL) and self._voice_run == run:
+            live = self.live_from_run()
+            saw_run = saw_run or live
+            over = not self.mission.running or (saw_run and not live)
+            calls = []
+            while not self._says.empty():
+                calls.append({"cmd": "say", "text": self._says.get()})
+            if not over:
+                calls.append({"cmd": "heard", "after": seq, "ttl": FLOW_LEASE})
+            for body in calls:
+                try:
+                    code, answer = self.jetson.flow(body)
+                except Exception as error:
+                    code, answer = 0, {"error": str(error)}
+                ok = code == 200 and isinstance(answer, dict) and answer.get("ok") is True
+                if ok == lost:  # it changed: lost now, or back
+                    lost = not ok
+                    self._apply(self.mission.on_event("voice_relay_ok" if ok else "voice_relay_lost|HTTP_%d|%s" % (
+                        code, answer.get("error") if isinstance(answer, dict) else answer), time.monotonic()))
+                if not (ok and body["cmd"] == "heard"):
+                    continue
+                for item in answer.get("items") or ():
+                    if isinstance(item, dict) and isinstance(item.get("seq"), int) and item["seq"] > seq:
+                        seq = item["seq"]
+                        if isinstance(item.get("text"), str) and item["text"].strip():
+                            self._apply(self.mission.on_heard(item["text"], time.monotonic()))
+                if isinstance(answer.get("seq"), int) and answer["seq"] < seq:
+                    seq = answer["seq"]  # the flow program started again and counts from 0
+            if over and ending:
+                break
+            ending = over
+        if self._voice_run == run:
+            self._voice_on = False
+            try:
+                self.jetson.flow({"cmd": "release"}, timeout=FLOW_OWN_TIMEOUT)
+            except Exception:
+                pass
+
+    def _arm_job(self, action, params):
+        """The executive's pick_bag or drop_bag, one at a time, as the page's bag job of the task (bag_job: its checks,
+        its timeout), its answer back as the event the executive reads: grab_success or grab_failed|CODE|message,
+        drop_done or drop_failed|CODE|message. No answer in time, or no agent: TIMEOUT."""
+        with self._arm_lock:
+            if not self.mission.running:
+                return  # STOP or the run's end came while an earlier job held the arm
+            try:  # pick_bag's x and y are the run's reached bag (bag_reached): measured, as bag_job's own from the run
+                code, answer = self.bag_job(action, dict(params, measured=True), task=True)
+            except Exception as error:
+                code, answer = 0, {"error": str(error)}
+        answer = answer if isinstance(answer, dict) else {}
+        if code == 200 and answer.get("ok") is True:
+            event = "grab_success" if action == "pick_bag" else "drop_done"
+        else:
+            event = "%s|%s|%s" % ("grab_failed" if action == "pick_bag" else "drop_failed",
+                                  answer.get("code") or answer.get("reason")
+                                  or ("TIMEOUT" if code in (0, 502, 503, 504) else "REFUSED"),
+                                  answer.get("message") or answer.get("error") or "HTTP %d" % code)
+        self._apply(self.mission.on_event(event, time.monotonic()))
+
+    def _bag_events(self, bag):
+        """bag_chosen|SIDE|say, then bag_reached|CODE|x,y[,top=T][,yaw=Y] or bag_failed|CODE|message, once per bag
+        task that the executive's find_bag asked for (one whose id differs from the one seen when it was sent): the
+        rules and formats of base/jetson/base_bridge.py BridgeLogic._bag_events, from run_follow's record.bag_task."""
+        if not isinstance(bag, dict):
+            return []
+        self._bag_seen = bag.get("id")
+        if self._bag_asked is None or bag.get("id") == self._bag_asked[0]:
+            return []
+        out = []
+        chosen, result = bag.get("chosen"), bag.get("result")
+        if isinstance(chosen, dict) and self._bag_said != bag.get("id"):
+            self._bag_said = bag.get("id")
+            out.append("bag_chosen|%s|%s" % (str(chosen.get("side") or "none").upper(), chosen.get("say", "")))
+        if isinstance(result, dict):
+            self._bag_asked = None
+            if result.get("ok"):
+                extra = "".join(",%s=%.3f" % (k, result[k]) for k in ("top", "yaw") if result.get(k) is not None)
+                out.append("bag_reached|%s|%.3f,%.3f%s" % (result.get("code", "OK"), result["x"], result["y"], extra))
+            else:
+                out.append("bag_failed|%s|%s" % (result.get("code", "FAILED"), result.get("message", "")))
+        return out
 
     def post(self, path, body, session=None, client=None, program=None):
         """(code, body) for one POST from the page. session: the tab's X-HMC-Session token, if it has one.
@@ -1995,7 +2140,7 @@ class Console:
                                                          "virtual": {"host": pc, "port": VIRTUAL_PORT} if virtual else None})
             if not error:
                 self.commander = None  # a new run: no tab leads it until one sends a command
-                self._begin_mission(body.get("minutes"))
+                self._begin_mission(body.get("minutes"), mission)
                 if mission == "bag_only":
                     threading.Thread(target=self._bag_only_worker, args=(body["drive"],), daemon=True).start()
             return (409 if error else 200), {"error": error}
