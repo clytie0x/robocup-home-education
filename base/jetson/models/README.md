@@ -104,3 +104,16 @@ Engines are tied to this Jetson's TensorRT version; rebuild them after a TensorR
 
 `bench.py` reports `gpu_engines_buffers_mib`: engines plus device buffers, excluding the CUDA context (the first
 `cudaMemGetInfo` call creates the context before the baseline is taken). On the Orin the GPU shares RAM with the CPU.
+
+## Bag segmenter tools (front camera, laptop)
+
+The bag segmentation models (`bag11n-seg-v3_480x640.onnx` and later, classes bag and handle) are not in Git either:
+they are on the owner's laptop as split zips (join the parts into one zip to read them; the parts stay as they are).
+
+- `tools/capture_front.py OUT_DIR [--host 100.108.202.48|192.168.31.137]` collects new frames for training: it GETs
+  the Jetson's `:8082/snap.jpg` (nothing else) and keeps a frame only when the view changed (mean abs difference of
+  a grey thumbnail), as `OUT_DIR/front_YYYYMMDD-HHMMSS.jpg`.
+- `tools/eval_bag_seg.py FRAMES_DIR --out SHEETS_DIR --model A.onnx --model B.zip:member.onnx [--labels LABELS_DIR]`
+  runs the models on onnxruntime CPU (frame resized to 640 x 480, RGB / 255), prints each frame's bag and handle
+  scores and, with YOLO-seg labels, each model's bag recall and mean mask IoU at IoU 0.5 and its false bags on frames
+  with no bag; it writes contact sheets.
