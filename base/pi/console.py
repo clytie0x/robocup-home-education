@@ -1331,7 +1331,8 @@ def _mission_status(body):
         record = body
     if record is None:
         return None
-    status = {"link": True}
+    remote = record.get("remote")  # --remote runs: false when a command now would not move the robot (silence hold)
+    status = {"link": not isinstance(remote, dict) or remote.get("supervised") is not False}
     if "locked" in record:
         status["locked"] = bool(record.get("locked"))
     if "at_start" in record:

@@ -315,7 +315,7 @@ def test_no_link_on_the_bag_search_does_not_resend_find_bag(tmp_path):
     to_point(flow)
     out = flow.on_event("bag_failed|NO_LINK|the link to the base is down", 6.0)
     assert flow.reason["code"] == "BASE_LINK_DOWN"
-    assert flow.reason["fix"] == "Start the Pi base program."
+    assert flow.reason["fix"] == REASONS["BASE_LINK_DOWN"]["fix"]
     assert flow.state == "POINTING"
     assert "find_bag" not in actions(out)
     assert "go_back" not in actions(out)
@@ -362,7 +362,7 @@ def test_an_unknown_link_does_not_start_following(tmp_path):
     assert actions(out) == []
     assert flow.reason["code"] == "BASE_LINK_DOWN"
     assert "ฐาน" in flow.reason["th"]
-    assert flow.reason["fix"] == "Start the Pi base program."
+    assert flow.reason["fix"] == REASONS["BASE_LINK_DOWN"]["fix"]
     flow.on_heard("follow me", 2.0)
     out = flow.on_heard("follow me", 3.0)
     assert says(out) == []

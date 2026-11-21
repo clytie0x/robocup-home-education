@@ -30,4 +30,6 @@ While `mission.active` is true, or a task job is running, `POST /api/arm` (home,
 
 `events.jsonl` is one JSON object per line: `ts` (ICT, offset `+07:00`), `run_id`, `src` (`hmc.flow`), `state`, `event`, `code`, `detail`, `visible`, `say`, `level`, `outcome`.
 
+The base link the executive sees is down while run_follow's record says `remote.supervised` is false: no `--remote` client (the Jetson's base bridge) was heard for 2 s and no page polls, so run_follow holds still for the silence and a follow would not move the robot. "follow me" is then refused with `BASE_LINK_DOWN`, and after `LINK_GRACE_S` (4 s) the run fails, instead of waiting with the wheels held.
+
 `reason.code` is sticky. Each code has English (`en`), Thai (`th`), and a suggested fix (`fix`). The set includes `ODOM_STALE`, `BASE_LINK_DOWN`, `NO_LINK`, `TIME_LIMIT`, `OPERATOR_LOST`, `PICK_FAILED`, `OPERATOR_STOP`, `WHEEL_FAULT_02`, `WHEEL_FAULT_03`, `REID_DOWN`.

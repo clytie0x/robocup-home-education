@@ -1046,7 +1046,9 @@ def cycle(state, now):
         record["virtual_pointing"] = state.virtual.report.get("pointing")  # [x, y] in place of the camera's pointing
     if state.remote is not None:
         record["remote"] = {"waiting": state.waiting, "held": _held_now(state), "silent_s": round(state.remote.silent(now), 2),
-                            "last_cmd": state.ack}
+                            "last_cmd": state.ack,
+                            # a command now would move the robot: the client was heard lately, or the page polls
+                            "supervised": state.remote.silent(now) <= REMOTE_SILENCE or state.controls.page_alive(now)}
     if state.phase == DONE:
         _stop_wheels(state)
         record["end"] = "done: back at the start"

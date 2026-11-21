@@ -1245,7 +1245,8 @@ class Remote(Logged):
         self.assertEqual(base.sent[-1], (0.1, 0.0))
         status = jetson.read()[-1]
         self.assertEqual((status["phase"], status["ack"], status["waiting"]), ("FOLLOW", "follow", False))
-        self.assertEqual(record["remote"], {"waiting": False, "held": None, "silent_s": 0.0, "last_cmd": "follow"})
+        self.assertEqual(record["remote"], {"waiting": False, "held": None, "silent_s": 0.0, "last_cmd": "follow",
+                                            "supervised": True})
 
     def test_idle_senses_and_enrols_the_operator_without_moving(self):
         base = FakeBase()
@@ -1376,7 +1377,8 @@ class Remote(Logged):
         replies = jetson.read()
         self.assertEqual(len([r for r in replies if "error" in r]), 5)
         self.assertEqual((record["phase"], record["v"], record["stop"]), ("follow", 0.1, None))
-        self.assertEqual(record["remote"], {"waiting": False, "held": None, "silent_s": 0.1, "last_cmd": "follow"})  # not heard
+        self.assertEqual(record["remote"], {"waiting": False, "held": None, "silent_s": 0.1, "last_cmd": "follow",
+                                            "supervised": True})  # not heard
 
     def test_a_second_client_replaces_the_first(self):
         state = self.remote_state(FakeBase())
@@ -1463,10 +1465,12 @@ class Remote(Logged):
         state = self.remote_state(base)
         record = self.quiet(state, 0.0, 2.1)
         self.assertEqual((record["phase"], record["stop"], record["remote"]["held"]), ("idle", "idle", "silent"))
+        self.assertIs(record["remote"]["supervised"], False)  # a command now would not move it: the console must know
         jetson = self.client()
         jetson.cmd("follow")
         record = self.cycle(state, 2.2)
         self.assertEqual((record["phase"], record["v"], record["stop"]), ("follow", 0.1, None))
+        self.assertIs(record["remote"]["supervised"], True)
 
     def test_only_malformed_lines_past_two_seconds_still_hold(self):
         base = FakeBase()
@@ -1710,10 +1714,12 @@ class Remote(Logged):
         state.controls.command("follow")
         record = self.polled(state, 2.2, 5.0)  # the page leads while it polls: the client's silence holds nothing
         self.assertEqual((record["phase"], record["v"], record["stop"]), ("follow", 0.1, None))
+        self.assertIs(record["remote"]["supervised"], True)
         record = self.polled(state, 5.1, 6.9, poll=False)  # the phone lost the Wi-Fi: under 2 s, still driving
         self.assertEqual(record["stop"], None)
         record = self.polled(state, 7.0, 7.0, poll=False)  # 2 s without a poll: the silence hold is back
         self.assertEqual((record["v"], record["stop"]), (0.0, "silent"))
+        self.assertIs(record["remote"]["supervised"], False)
         record = self.polled(state, 7.1, 7.5)  # polling again does not release it by itself
         self.assertEqual(record["stop"], "silent")
         state.controls.command("resume")

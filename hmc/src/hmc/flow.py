@@ -73,7 +73,7 @@ REASONS = {
     "BASE_LINK_DOWN": {
         "en": "The base link is not up, so following and the bag search stay off.",
         "th": "ลิงก์ไปฐานไม่พร้อม จึงยังไม่ตามและยังไม่หาถุง",
-        "fix": "Start the Pi base program.",
+        "fix": "Start the Pi base program, and the base bridge on the Jetson tab: without it the base holds still.",
         "level": "error",
         "outcome": "FAILED",
     },

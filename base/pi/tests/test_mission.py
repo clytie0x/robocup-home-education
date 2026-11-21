@@ -1,5 +1,6 @@
 """The console executive: start, GET /api/state, arm refusal, STOP without stop-all."""
 import json
+import sys
 import tempfile
 import threading
 import time
@@ -128,7 +129,8 @@ class MissionTest(unittest.TestCase):
             body = json.loads(raw)
             self.assertEqual(body["mission"]["state"], "READY")
             self.assertEqual(body["mission"]["reason"]["code"], "BASE_LINK_DOWN")
-            self.assertEqual(body["mission"]["reason"]["fix"], "Start the Pi base program.")
+            self.assertEqual(body["mission"]["reason"]["fix"],
+                             "Start the Pi base program, and the base bridge on the Jetson tab: without it the base holds still.")
         self.assertNotIn("follow", self.run.commands)
         code, raw = self.request("/api/mission/event", {"event": "base_link_ok"}, pin="2468")
         self.assertEqual(code, 200, raw)
@@ -376,6 +378,31 @@ class RelayTest(unittest.TestCase):
         self.assertIn("bag_near", self.run.commands)
         self.assertEqual([body for body, _ in self.arm_posts()],
                          [{"cmd": "pick_bag", "x": 0.31, "y": 0.02, "top": 0.2}, {"cmd": "drop_bag", "x": 0.38, "y": 0.0}])
+
+    def test_a_run_nobody_supervises_refuses_to_follow_and_fails(self):
+        # no client heard lately and no page polling: run_follow holds still for the silence, so a follow would not
+        # move the robot. The executive must say so and fail, not wait forever with the wheels held.
+        flow = sys.modules[console._load_mission().__module__]
+        saved, flow.LINK_GRACE_S = flow.LINK_GRACE_S, 1.5
+        self.addCleanup(setattr, flow, "LINK_GRACE_S", saved)
+        self.start()
+        remote = {"waiting": False, "held": "silent", "silent_s": 3.0, "last_cmd": None}
+        self.run.record = {"phase": "idle", "remote": dict(remote, supervised=False)}
+        self.wait_until(lambda: self.console.mission.link_ok is False, "the base seen unsupervised")
+        code, raw = self.request("/api/mission/hear", {"text": "follow me"}, pin="2468")
+        self.assertEqual(code, 200, raw)
+        body = json.loads(raw)["mission"]
+        self.assertEqual((body["state"], body["reason"]["code"]), ("READY", "BASE_LINK_DOWN"))
+        self.assertIn("base bridge", body["reason"]["fix"])
+        self.assertNotIn("follow", self.run.commands)
+        self.wait_until(lambda: self.state() == "FAILED", "FAILED after the grace")
+        # supervised again in a new run: the follow goes out
+        self.start()
+        self.run.record = {"phase": "idle", "remote": dict(remote, held=None, silent_s=0.3, supervised=True)}
+        self.wait_until(lambda: self.console.mission.link_ok is True, "the base seen supervised")
+        code, raw = self.request("/api/mission/hear", {"text": "follow me"}, pin="2468")
+        self.assertEqual(json.loads(raw)["mission"]["state"], "ENROLLING")
+        self.assertIn("follow", self.run.commands)
 
     def test_a_missed_pick_measures_the_bag_again(self):
         self.flow.arm_answer = (409, {"ok": False, "error": "MISSED: closed on air", "code": "MISSED",
