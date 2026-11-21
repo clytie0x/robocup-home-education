@@ -142,10 +142,11 @@ HARD_BEND_SCALE = (0.3, 1.0)
 ACTION_LOW = (-0.04, -0.05, 0.17, -80.0, -30.0, 0.5)
 ACTION_HIGH = (0.04, 0.05, 0.25, -40.0, 30.0, 1.5)
 
-# Measured sim time of one nominal scripted try (approach, close, lift, 3 s hold).
-# A miss is charged at least this long, so quitting before the arm moves does not
-# outscore a real attempt. Success still uses the actual time, so faster wins.
-MINIMUM_TRY_S = 11.56
+# Measured sim time of one nominal scripted try at close height 0.21 m
+# (approach, close, lift, 3 s hold), remeasured 20 Nov 2026. A miss is charged
+# at least this long, so quitting before the arm moves does not outscore a real
+# attempt. Success still uses the actual time, so faster wins.
+MINIMUM_TRY_S = 9.56
 
 ARM_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
 ALL_JOINTS = ARM_JOINTS + ("gripper",)

@@ -1,0 +1,6 @@
+# Checkpoints from the close-height 0.21 retraining, 20 Nov 2026.
+# cd sim
+# python3 -u -m rl_grasp train --algo ppo --steps 50000 --seed 0 --workers 4 --tries 1 --out ../docs/rl-grasp/policies/ppo50k.pt
+# python3 -u -m rl_grasp train --algo sac --steps 50000 --seed 0 --workers 4 --tries 1 --out ../docs/rl-grasp/policies/sac50k.pt
+abe62ad40d60f24435f45e9f6622e3c63fb912df31f469266660af71eb441ad8  ppo50k.pt
+87ff2238aa9615e9229c76283a1732ba81c3e4a788f65d81da77f08bd6be92cc  sac50k.pt
