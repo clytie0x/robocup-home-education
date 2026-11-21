@@ -21,7 +21,9 @@ It runs on the Pi, which has the LiDAR clusters, the operator's LiDAR track and 
    `bag_only` sent `bag_near` 0.3 s into the run, before the first scan at 0.6 s, and got NO_BAG at once).
 2. BAG, pointing: the robot stands; every frame goes to the Jetson with `pose=True` (only now). The camera person
    nearest the operator's LiDAR bearing (within 10 deg) gives `pointing()`; `Steady` needs about 1 s. With
-   `--virtual-operator` the PC's pointed spot stands in for it (no camera). No steady pointing in 20 s: NOT_POINTED.
+   `--virtual-operator` the PC's pointed spot stands in for it (no camera). No steady pointing in 20 s: NOT_POINTED. No operator at all for the first 2 s (no LiDAR track and no camera
+   person to point, `NO_OPERATOR_S`): NO_OPERATOR at once, and the executive asks the operator to stand in front and
+   looks again (2026-11-19: 13 of 30 NOT_POINTED tasks began like that and waited 20 s for nothing).
 3. Candidates: the LiDAR clusters (`legs.clusters` of the scan, the operator's legs left out), and
    `bag_candidates` of the detector's bag boxes for a bag under the LiDAR plane. A cluster is the side of the bag
    facing the laser; the centre is taken 0.05 m behind it (`bag.BAG_HALF_DEPTH`, an assumption to measure).

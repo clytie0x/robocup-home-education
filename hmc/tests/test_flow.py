@@ -445,6 +445,17 @@ def test_the_base_run_ending_at_the_start_does_not_fail_the_drop(tmp_path):
     assert (flow.state, flow.outcome) == ("DONE", "SUCCESS")
 
 
+def test_nobody_to_point_asks_them_in_front_and_looks_again(tmp_path):
+    flow = begin(tmp_path, "no_operator")
+    follow(flow)
+    to_car(flow)
+    to_point(flow)
+    out = flow.on_event("bag_failed|NO_OPERATOR|nobody to point", 6.0)
+    assert flow.state == "POINTING"
+    assert says(out) == [REASONS["NO_OPERATOR"]["en"]]
+    assert actions(out) == ["find_bag"]
+
+
 def test_unknown_precheck_fields_still_start(tmp_path):
     flow = fresh(tmp_path, "dry")
     flow.start(0.0, report=None)
@@ -534,6 +545,7 @@ def _reach(tmp_path, code):
     to_point(flow)
     bag = {
         "NOT_POINTED": "NOT_POINTED",
+        "NO_OPERATOR": "NO_OPERATOR",
         "NO_BAG": "NO_BAG",
         "BLOCKED": "BLOCKED",
         "BAG_TIMEOUT": "TIMEOUT",

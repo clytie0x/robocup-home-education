@@ -106,9 +106,10 @@ def _drop_at():
 
 DROP_AT = _drop_at()  # m, robot frame: reachable place at the start of the task
 MAX_BAG_TRIES = 3  # bag_failed answered with "point again" this many times in a row, then at_car
-RETRY_CODES = ("NOT_POINTED", "NO_BAG", "BLOCKED", "TIMEOUT", "LOST_BAG")  # the Pi looked: point again
+RETRY_CODES = ("NOT_POINTED", "NO_OPERATOR", "NO_BAG", "BLOCKED", "TIMEOUT", "LOST_BAG")  # the Pi looked: point again
 REMEASURE_CODES = ("MISSED", "NOT_FOUND")  # a grab that missed: the Pi measures the bag once more
-BAG_REASONS = {"NOT_POINTED": "I did not see you point.", "NO_BAG": "I see no bag there.",
+BAG_REASONS = {"NOT_POINTED": "I did not see you point.", "NO_OPERATOR": "I cannot see you. Please stand in front of me.",
+               "NO_BAG": "I see no bag there.",
                "BLOCKED": "Something is in my way.", "TIMEOUT": "That took me too long.",
                "LOST_BAG": "I lost sight of the bag."}
 # s to wait for tts_node's /tts/ready before starting anyway: it may start late, crash or be absent,

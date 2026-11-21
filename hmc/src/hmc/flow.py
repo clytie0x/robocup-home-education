@@ -53,7 +53,7 @@ STEPS = (
     "DONE",
 )
 TERMINAL = ("DONE", "FAILED", "ABORTED")
-RETRY_BAG = ("NOT_POINTED", "NO_BAG", "BLOCKED", "BAG_TIMEOUT", "LOST_BAG", "TIMEOUT")
+RETRY_BAG = ("NOT_POINTED", "NO_OPERATOR", "NO_BAG", "BLOCKED", "BAG_TIMEOUT", "LOST_BAG", "TIMEOUT")
 REMEASURE = ("MISSED", "NOT_FOUND", "PICK_MISSED")
 
 # code -> operator text. outcome is SUCCESS, FAILED, or ABORTED when the code ends a run.
@@ -209,6 +209,13 @@ REASONS = {
         "en": "No pointing was seen.",
         "th": "ไม่เห็นการชี้",
         "fix": "Step back about two steps and point at the bag with a straight arm.",
+        "level": "warn",
+        "outcome": "FAILED",
+    },
+    "NO_OPERATOR": {
+        "en": "I cannot see you. Please stand in front of me and point at the bag.",
+        "th": "มองไม่เห็นผู้ควบคุม กรุณายืนตรงหน้าหุ่นแล้วชี้ที่ถุง",
+        "fix": "Stand 2 to 3 m in front of the robot, side on, phone down, and point with a straight arm.",
         "level": "warn",
         "outcome": "FAILED",
     },
