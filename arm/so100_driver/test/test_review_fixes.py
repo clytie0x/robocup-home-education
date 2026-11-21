@@ -68,24 +68,34 @@ class StopEndsTheBagPick(unittest.TestCase):
     def tearDown(self):
         bc.time.sleep = self.sleep
 
-    def test_stop_in_the_lift_ends_it(self):
+    def carry_camera(self, code):
+        node = NS(kin=NS(heading0=0, gripper_point=lambda q, local: [0.0, 0.0, 0.0]),
+                  joints={j: 0.0 for j in bc.ARM}, table_z=-0.331)
+        cam = bc.CameraBag(node)
+        cam.p = lambda name: {"bag_carry_bottom": 0.28}[name]
+        tried = []
+
+        def tip(*args, **kwargs):
+            tried.append(args[0])
+            raise Failed("stopped", code)
+
+        cam.tip = tip
+        return cam, tried
+
+    def test_a_stop_while_planning_the_carry_ends_it(self):
+        # the held move replaced the stepwise lift and swing (2026-11-20): only "out of reach" tries the next
+        # side, tilt or reach
         for code in ("STOPPED", "FAILED", "HOT", "COLLISION"):
-            cam, moves = self.camera("ยกถุงตรงขึ้น", code)
+            cam, tried = self.carry_camera(code)
             with self.assertRaises(Failed) as ctx:
-                cam._lift_stepwise(0.3, -0.12, -60, 180)
+                cam.carry_plan(0.3, -0.12, -60, 180)
             self.assertEqual(ctx.exception.code, code)
-            self.assertEqual(moves, ["ยกถุงตรงขึ้น"])        # no move after the failing one
+            self.assertEqual(len(tried), 1)
 
-    def test_out_of_reach_in_the_lift_stops_it_early(self):
-        cam, moves = self.camera("ยกถุงตรงขึ้น", "UNREACHABLE")
-        self.assertEqual(cam._lift_stepwise(0.3, -0.12, -60, 180), 0.0)
-
-    def test_stop_in_the_swing_does_not_try_the_other_side(self):
-        cam, moves = self.camera("เก็บถุงไว้ด้านข้าง (หลบ LiDAR)", "STOPPED")
-        cam.theta = 0.0
-        with self.assertRaises(Failed):
-            cam._swing_stepwise(0.3, 0.1, -35, 180, {})
-        self.assertEqual(len(moves), 1)
+    def test_out_of_reach_everywhere_is_no_carry(self):
+        cam, tried = self.carry_camera("UNREACHABLE")
+        self.assertIsNone(cam.carry_plan(0.3, -0.12, -60, 180))
+        self.assertEqual(len(tried), len(bc.CARRY_SIDES) * len(bc.CARRY_PITCHES) * len(bc.CARRY_R))
 
     def test_stop_on_the_way_above_the_bag_ends_it(self):
         cam, moves = self.camera("ไปเหนือถุง", "STOPPED")
