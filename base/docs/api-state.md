@@ -20,7 +20,7 @@ While `mission.active` is true, or a task job is running, `POST /api/arm` (home,
 | `step_total` | 11 |
 | `elapsed_s` | Seconds since start |
 | `remaining_s` | Seconds left on this run's clock |
-| `limit_s` | The cap: the asked length, and never more than 300 |
+| `limit_s` | The cap: the asked length, and never more than 300. In a `full` mission run_follow gets `RETURN_S` (180 s, the executive's `RETURN_BUDGET`) more, so it still drives the way back after the clock |
 | `reason` | `null`, or `{code, en, th, fix, detail, level}` |
 | `carrying` | The arm is holding the bag |
 | `car_pose` | `{x, y, heading}` after the operator confirms the car, else `null` |

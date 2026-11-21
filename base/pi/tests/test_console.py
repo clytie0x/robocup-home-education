@@ -258,8 +258,8 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(Path(cmd[1]).name, "job_guard.py")
         self.assertEqual(Path(cmd[3]).name, "safe_run.py")
         self.assertEqual(Path(cmd[5]).name, "run_follow.py")
-        self.assertEqual(cmd[6:], ["--drive", "--seconds", "300", "--max-speed", "0.12", "--remote",
-                                   "--dashboard-host", "127.0.0.1"])
+        self.assertEqual(cmd[6:], ["--drive", "--seconds", "480", "--max-speed", "0.12", "--remote",
+                                   "--dashboard-host", "127.0.0.1"])  # 5:00 and the executive's way back
 
     def test_the_runs_page_is_only_for_the_console(self):
         # run_follow's switches and task buttons (port 8080) skip the PIN: only this computer may reach them,
@@ -1008,6 +1008,16 @@ class GuardTest(unittest.TestCase):
 
 
 class MissionModesTest(unittest.TestCase):
+    def test_only_the_full_mission_gets_the_way_back_after_the_clock(self):
+        # the executive goes home for RETURN_BUDGET after 5:00: run_follow must still run then
+        flow = sys.modules[console._load_mission().__module__]
+        self.assertEqual(console.RETURN_S, flow.RETURN_BUDGET)
+        p = {"max_speed": 0.12}
+        for mission, seconds in (("full", "300"), ("bag_only", "120"), ("follow_only", "120")):
+            cmd, err = console.task_command(False, 0.08, 2, p, mission=mission)
+            self.assertIsNone(err)
+            self.assertEqual(cmd[cmd.index("--seconds") + 1], seconds, mission)
+
     def test_follow_only_omits_remote_while_full_and_bag_only_keep_it(self):
         p = {"max_speed": 0.12}
         cmd_full, err = console.task_command(False, 0.08, 5, p, mission="full")

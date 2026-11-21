@@ -92,6 +92,7 @@ FILES = {
 }
 COMMANDS = ("follow", "wait", "resume", "return", "bag", "bag_again", "bag_near")
 MISSIONS = ("full", "follow_only", "bag_only")
+RETURN_S = 180  # s more for run_follow in the full mission: hmc.flow RETURN_BUDGET, the way back after the clock
 MISSION_LABEL = {"full": "โจทย์จริง HMC", "follow_only": "ตามคนอย่างเดียว", "bag_only": "หาและหยิบถุง"}
 NO_PIN = ("/api/stop", "/api/arm/stop", "/api/bank/full", "/api/bank/reading")  # STOPs, and the owner's battery marks
 CLIENT = re.compile(r"^[\w.@:%-]{1,64}$")  # a program's name (X-HMC-Client), e.g. robotctl's "xohm@192.168.31.50"
@@ -148,7 +149,8 @@ def task_command(drive, speed, minutes, p, py=sys.executable, virtual=None, miss
     # follow_only omits --remote so Jetson hmc_flow / voice cannot trigger bag picking or interfere
     remote_flag = [] if mission == "follow_only" else ["--remote"]
     run = [py, str(HERE / "run_follow.py")] + (["--drive"] if drive else []) + [
-        "--seconds", str(int(round(minutes * 60))), "--max-speed", "%.2f" % speed, *remote_flag,
+        "--seconds", str(int(round(minutes * 60 + (RETURN_S if mission == "full" else 0)))),
+        "--max-speed", "%.2f" % speed, *remote_flag,
         "--dashboard-host", "127.0.0.1"]  # its page skips the PIN: only the console may reach it
     if virtual is not None:
         if not _one_computer(virtual):
