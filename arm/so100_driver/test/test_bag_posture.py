@@ -224,5 +224,58 @@ class SpotShowsFloorRealFrames(unittest.TestCase):
         self.assertIsNone(bc.bv.spot_floor(before, before[:100]))
 
 
+class PutDownTouchdown(unittest.TestCase):
+    """Robot 2026-11-20 22:55 and 22:56: Place stalled on its last move down (shoulder_lift 9 and 8 deg short:
+    COLLISION) with the bag held, and the bag stayed in the jaws pressed on the floor. With PUT_DROP 0 that move ends
+    with the bag's bottom on the floor only if the wall did not slip down the jaws on the carry; when it did, the
+    bottom touches first and the arm cannot go on. A stall there is the touchdown: let go and back off. A stop is
+    still a stop."""
+
+    def place(self, code):
+        done = []
+        node = NS(kin=NS(to_user=lambda xy: (0.35, 0.0)), joints={j: 0.0 for j in bc.ARM}, table_z=-0.331,
+                  holding={"roll": 180.0, "close_z": -0.125, "pitch": -70, "side": 1.0, "r": 0.26},
+                  grasped=None, progress=lambda *a: None, say=lambda s: None,
+                  gripper=lambda pos, what: done.append(("gripper", pos)),
+                  line=lambda path, what, *a: done.append(("line", what)))
+        cam = bc.CameraBag(node)
+        cam.p = lambda name: {"bag_cam_half_depth": 0.055, "bag_cam_close_h": 0.21}[name]
+        cam.speed = lambda kind: 0.6
+        cam.held_clear = lambda *a, **k: True
+
+        def tip(r, tz, pitch, roll, what, pull_in=0.0, speed=None, sim=None):
+            if sim is not None:
+                return [dict(sim)]
+            done.append(("tip", what))
+            if what == "วางถุงลงพื้น" and code:
+                raise Failed(f"{what}: shoulder_lift cannot reach its goal (off by 9 deg)", code)
+            return []
+
+        cam.tip = tip
+        return cam, node, done
+
+    def test_a_stall_on_the_last_move_down_lets_go_there(self):
+        cam, node, done = self.place("COLLISION")
+        self.assertEqual(cam.place(NS(x=0.0, y=0.0)), "วางถุงแล้ว")
+        self.assertIn(("gripper", 0.9), done)
+        self.assertIsNone(node.holding)
+        self.assertEqual(done[-1], ("tip", "ถอยขึ้น"))          # backs off after letting go
+
+    def test_a_stop_on_the_last_move_down_keeps_the_bag(self):
+        for code in ("STOPPED", "HOT", "FAILED"):
+            cam, node, done = self.place(code)
+            with self.assertRaises(Failed) as ctx:
+                cam.place(NS(x=0.0, y=0.0))
+            self.assertEqual(ctx.exception.code, code)
+            self.assertNotIn(("gripper", 0.9), done)
+            self.assertIsNotNone(node.holding)
+
+    def test_no_stall_is_the_plain_put_down(self):
+        cam, node, done = self.place(None)
+        self.assertEqual(cam.place(NS(x=0.0, y=0.0)), "วางถุงแล้ว")
+        self.assertEqual([d for d in done if d[0] != "line"], [("tip", "วางถุงลงพื้น"), ("gripper", 0.9),
+                                                             ("tip", "ถอยขึ้น")])
+
+
 if __name__ == "__main__":
     unittest.main()

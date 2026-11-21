@@ -41,7 +41,7 @@ fisheye when that file says dist_model "fisheye".
 bag_hover_only: stop with the jaws OPEN at the close height and hold still there (a test: hang a plumb line,
 measure how far the gap is from the wall); the log has the asked and the real (forward kinematics) gap middle.
 Put-down: one held move to 8 cm over the release height at the target, straight down until the bag's bottom is on
-the floor (PUT_DROP 0), open, back off.
+the floor (PUT_DROP 0, or earlier: a stall on that move is the touchdown), open, back off.
 """
 import copy
 import json
@@ -1556,6 +1556,14 @@ class CameraBag:
                 placed_r = cand_r
                 break
             except Failed as exc:
+                if exc.code == "COLLISION":
+                    # the arm stalled on the way straight down: the bag's bottom is on the floor already (its wall
+                    # slid down the jaws on the carry). That is the touchdown PUT_DROP 0 asks for: let go here
+                    # (robot 2026-11-20: shoulder_lift 9 and 8 deg short, the bag kept pressed on the floor). The
+                    # gripper command clears the driver's fault hold.
+                    self.n.say(f"ก้นถุงถึงพื้นก่อนถึงระดับวาง ({exc}): ปล่อยตรงนี้")
+                    placed_r = cand_r
+                    break
                 if exc.code != "UNREACHABLE":
                     raise
         else:
