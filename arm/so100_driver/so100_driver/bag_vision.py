@@ -717,6 +717,30 @@ def floor_lifted(before, after):
     return float(fa[:, cols].mean()), int(cols.sum())
 
 
+def spot_floor(before, after, box=None, band=0.12, min_bin=0.01):
+    """Share of the spot where the bag stood that no longer shows the bag in `after`: its pixels whose colour is
+    none of the spot's colours in `before` (Lab in 8 x 8 x 8 bins; a bin is the bag's when it holds min_bin of the
+    spot). box = (x0, y0, x1, y1) pixels of `before`; None = the bottom `band` of the frame, where the Xtion under
+    the deck sees the bag's foot. No floor colour is guessed: adaptive_floor_mask took a frame full of bag for
+    floor (Xtion, robot 2026-11-19 15:17: 0.86 "floor" before the close, then lifted() 0.93 with the bag still on
+    the floor). Those frames give 0.00 (15:17, not lifted) and 0.99 (17:29, lifted). None when a frame is missing,
+    the sizes differ or the spot is empty."""
+    if before is None or after is None or before.shape != after.shape:
+        return None
+    h, w = before.shape[:2]
+    x0, y0, x1, y1 = (0, int(h * (1 - band)), w, h) if box is None else (int(v) for v in box)
+    x0, y0, x1, y1 = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+
+    def bins(im):
+        return ((cv2.cvtColor(im[y0:y1, x0:x1], cv2.COLOR_BGR2LAB) // 32).astype(int) @ (64, 8, 1)).ravel()
+
+    k0, k1 = bins(before), bins(after)
+    bag = np.bincount(k0, minlength=512) / k0.size >= min_bin
+    return float(1.0 - bag[k1].mean())
+
+
 def floor_under_bag(xim):
     """Xtion frame: fraction of floor pixels in the bottom rows. High = the bag is off the floor."""
     return float(floor_mask(xim).mean())

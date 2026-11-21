@@ -151,11 +151,13 @@ class HoldCheckFromTheSide(unittest.TestCase):
 
     def test_spot_left(self):
         self.assertFalse(bc.spot_left(self.START, {"x0": 225.0, "x1": 450.0, "y0": 402.0}))   # still there
-        self.assertTrue(bc.spot_left(self.START, None))                                       # place empty
+        self.assertTrue(bc.spot_left(self.START, None, floor=0.9))                            # place empty
+        self.assertIsNone(bc.spot_left(self.START, None))                     # no bag found, spot not compared
+        self.assertIsNone(bc.spot_left(self.START, None, floor=0.1))          # no bag found, spot still looks bagged
         self.assertTrue(bc.spot_left(self.START, {"x0": 500.0, "x1": 640.0, "y0": 300.0}))   # seen elsewhere
         self.assertTrue(bc.spot_left(self.START, {"x0": 230.0, "x1": 440.0, "y0": 330.0}))   # up in the picture
 
-    def check(self, frame, blob, in_view=False):
+    def check(self, frame, blob, in_view=False, start=None):
         cam = bc.CameraBag(NS(kin=NS(heading0=0), joints={}))
         cam.p = lambda key: "calibration"
         cam.in_view = lambda *a: in_view
@@ -166,7 +168,7 @@ class HoldCheckFromTheSide(unittest.TestCase):
         bc.time.sleep = lambda _: None
         bc.bv.find_bag = lambda im, **k: blob
         try:
-            return cam.place_left(self.START)
+            return cam.place_left(start or self.START)
         finally:
             bc.FrontCamera.load, bc.time.sleep, bc.bv.find_bag = load, sleep, find
 
@@ -177,8 +179,49 @@ class HoldCheckFromTheSide(unittest.TestCase):
         self.assertIsNone(self.check(object(), None, in_view=True))
 
     def test_place_empty_and_bag_still_there(self):
-        self.assertTrue(self.check(object(), None))
+        before = np.zeros((480, 640, 3), np.uint8)
+        before[410:480, 220:448] = (40, 40, 200)                  # the bag where it stood
+        floor = np.zeros_like(before)                             # that spot shows the floor again
+        start = dict(self.START, y1=479.0, frame=before)
+        self.assertTrue(self.check(floor, None, start=start))
         self.assertFalse(self.check(object(), {"x0": 222.0, "x1": 446.0, "y0": 405.0}))
+
+    def test_no_bag_found_is_not_a_lift_while_its_spot_still_shows_it(self):
+        # a detector miss (the bag still standing) must not read as lifted; neither may a start without its picture
+        before = np.zeros((480, 640, 3), np.uint8)
+        before[410:480, 220:448] = (40, 40, 200)
+        start = dict(self.START, y1=479.0, frame=before)
+        self.assertIsNone(self.check(before.copy(), None, start=start))
+        self.assertIsNone(self.check(np.zeros_like(before), None))
+
+
+class SpotShowsFloorRealFrames(unittest.TestCase):
+    """The Xtion frames of two real picks (robot, 2026-11-19), before the close and after the 20 cm lift. 15:17: the
+    bag stayed on the floor (after: still only bag, its logo at the same height); the old check said lifted (0.93).
+    17:29: the bag hangs in the air (after: its bottom edge, the room below)."""
+
+    DATA = os.path.join(os.path.dirname(__file__), "data")
+
+    def frames(self, trial):
+        import cv2
+        return tuple(cv2.imread(os.path.join(self.DATA, f"{trial}_xtion_{k}.jpg")) for k in ("before", "after"))
+
+    def test_bag_still_standing_is_not_floor(self):
+        before, after = self.frames("20261119T151738-340935-1")
+        self.assertGreater(bc.bv.lifted(before, after)[0], 0.5)     # the old check: fooled
+        self.assertLess(bc.bv.spot_floor(before, after), bc.SPOT_FLOOR)
+        self.assertIsNone(bc.spot_left({"x0": 0.0, "x1": 1.0, "y0": 0.0}, None, bc.bv.spot_floor(before, after)))
+
+    def test_bag_lifted_shows_floor(self):
+        before, after = self.frames("20261119T172917-358088-2")
+        self.assertGreaterEqual(bc.bv.spot_floor(before, after), bc.SPOT_FLOOR)
+        self.assertTrue(bc.spot_left({"x0": 0.0, "x1": 1.0, "y0": 0.0}, None, bc.bv.spot_floor(before, after)))
+
+    def test_same_picture_is_no_floor_and_a_missing_one_is_none(self):
+        before, _after = self.frames("20261119T172917-358088-2")
+        self.assertLess(bc.bv.spot_floor(before, before), 0.1)
+        self.assertIsNone(bc.bv.spot_floor(None, before))
+        self.assertIsNone(bc.bv.spot_floor(before, before[:100]))
 
 
 if __name__ == "__main__":
