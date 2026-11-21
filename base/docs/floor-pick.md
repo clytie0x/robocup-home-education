@@ -33,7 +33,8 @@ domain 42. Never change, restart or reconfigure their nodes.
 - Events go out on `/robot/event` with the names hmc_flow.py parses: `grab_success`,
   `grab_failed|CODE|message`, `drop_done`, `drop_failed|CODE|message`. The codes are UNREACHABLE,
   COLLISION, BUSY, HOLDING, NOT_HOLDING, MISSED, DROPPED, NOT_FOUND, NOT_CENTRED, TIMEOUT and FAILED.
-  hmc_flow does not call floor_pick yet.
+  hmc_flow does not call floor_pick's pick: its `pick_bag` goes to `bag_arm.py` (below), which uses
+  floor_pick only for the camera look moves.
 - Camera frames come only from the arm team's `webcam_view.py` at
   `http://<jetson>:8082/snap.jpg`. `/dev/video0` is never opened, because that would fight their program.
 
