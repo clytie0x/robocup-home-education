@@ -364,6 +364,19 @@ class RelayTest(unittest.TestCase):
         self.assertEqual(self.state(), "AT_CAR")
         self.assertEqual(self.console.mission.car_pose, {"x": 4.0, "y": 1.5, "heading": 0.4})
 
+    def test_bag_only_drive_picks_then_puts_the_bag_down(self):
+        # the step test of the bag: bag_near, the pick, then the drop, so the arm is free for the next try
+        self.console._drop = {"x": 0.38, "y": 0.0}
+        self.jobs.running = {"kind": "task", "label": "bag only"}
+        self.reach_bag()
+        code, raw = self.request("/api/task/start", {"drive": True, "speed": 0.08, "minutes": 5,
+                                                     "mission": "bag_only"}, pin="2468")
+        self.assertEqual(code, 200, raw)
+        self.wait_until(lambda: len(self.arm_posts()) == 2, "the pick, then the drop")
+        self.assertIn("bag_near", self.run.commands)
+        self.assertEqual([body for body, _ in self.arm_posts()],
+                         [{"cmd": "pick_bag", "x": 0.31, "y": 0.02, "top": 0.2}, {"cmd": "drop_bag", "x": 0.38, "y": 0.0}])
+
     def test_a_missed_pick_measures_the_bag_again(self):
         self.flow.arm_answer = (409, {"ok": False, "error": "MISSED: closed on air", "code": "MISSED",
                                       "message": "closed on air"})

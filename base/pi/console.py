@@ -1838,7 +1838,10 @@ class Console:
                 result = ((status.get("record") or {}).get("bag_task") or {}).get("result")
                 if isinstance(result, dict) and "ok" in result:
                     if result.get("ok") and drive:
-                        self.bag_job("pick_bag", {}, task=True)
+                        code, answer = self.bag_job("pick_bag", {}, task=True)
+                        drop = self.drop_default()
+                        if code == 200 and isinstance(answer, dict) and answer.get("ok") is True and drop.get("x") is not None:
+                            self.bag_job("drop_bag", {"x": drop["x"], "y": drop["y"]}, task=True)  # the arm is free again
                     return
             time.sleep(0.5)
 
