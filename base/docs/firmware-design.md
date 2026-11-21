@@ -1,7 +1,7 @@
 # New firmware for the wheeled base (STM32), design draft
 
-Status: **draft, not approved by the owner.** Nothing has been written to the board, and
-nothing may be flashed until the owner approves this document and is at the robot.
+Status: **flashed 2026-11-14** on the owner's approval, with the owner at the robot (build
+0c020e4, `hardware-assessment-2026-11-13.md`, "New firmware flashed"). Code: `base/firmware/`.
 
 Why: the previous owner left without handing over the firmware source. The current
 firmware caps the base at about 0.12 m/s whatever is commanded (`F015` and `F037` both
