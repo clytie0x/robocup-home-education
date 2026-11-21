@@ -33,7 +33,7 @@ ROS side:
       seen when it was sent): bag_chosen|SIDE|say text (SIDE LEFT, RIGHT, MIDDLE or NONE for one bag),
       then bag_reached|CODE|x,y[,top=T][,yaw=Y] (CODE OK, or ESTIMATED when the LiDAR never saw the bag; robot
       frame, metres, 3 decimals; top m and yaw rad when the Pi's look measured them, base/docs/bag-sensing.md)
-      or bag_failed|CODE|message (NOT_POINTED, NO_BAG, BLOCKED, TIMEOUT, LOST_BAG,
+      or bag_failed|CODE|message (NOT_POINTED, NO_OPERATOR, NO_BAG, BLOCKED, TIMEOUT, LOST_BAG,
       CANCELLED; REFUSED when the Pi refused the command).
   /base/status  every Pi status as JSON, plus "link": true and "search": true while the Pi's brain looks for a
       lost operator (the Pi's "mode" == "search" when it sends a mode, else FOLLOW, not waiting, not held and

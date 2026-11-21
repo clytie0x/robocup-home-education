@@ -329,6 +329,17 @@ class Approach(unittest.TestCase):
             task = World(bags, operator=(-1.0, 1.0), point=None).run(new_task("near"))
             self.assertEqual(task.result["code"], "NO_BAG", bags)
 
+    def test_a_point_task_with_nobody_to_point_ends_at_once_as_no_operator(self):
+        # 2026-11-19: 13 of 30 NOT_POINTED tasks began with the follower unlocked and nobody for the camera: 20 s lost
+        task, t = new_task("point"), 0.0
+        while not task.done and t < 5.0:
+            task.step(bag.View(t, (0.0, 0.0, 0.0), seen=[(2.0, 0.0)]))  # a wall, no operator, no camera person
+            t += 0.1
+        self.assertEqual(task.result["code"], "NO_OPERATOR")
+        self.assertAlmostEqual(t, bag.NO_OPERATOR_S, delta=0.25)
+        there = World([(1.6, 0.0)], operator=(2.6, 0.2), point=None)  # an operator who does not point: as before
+        self.assertEqual(there.run(new_task("point"), seconds=bag.POINTING_S + 1).result["code"], "NOT_POINTED")
+
     def test_bag_near_waits_for_the_first_lidar_scan(self):
         # 2026-11-20 22:59: the console sent bag_near 0.3 s into the run, the LiDAR's first scan came at 0.6 s
         world = World([(1.0, 0.0)], operator=(-1.0, 1.0), point=None)

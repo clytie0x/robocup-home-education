@@ -74,6 +74,7 @@ MAX_TURNS = 5  # turns on the spot per task
 SETTLE_S = 0.8  # s standing before a measurement
 # Limits
 POINTING_S = 20.0  # s to find a steady pointing at a bag
+NO_OPERATOR_S = 2.0  # s from the start with no operator at all (no LiDAR track, no camera person to point): NO_OPERATOR
 NO_BAG_S = 2.0  # s of steady pointing with no bag near it: NO_BAG
 APPROACH_S = 120.0  # s from the choice to reached
 MAX_TRAVEL = 4.0  # m driven from the choice
@@ -280,6 +281,7 @@ class BagTask:
         self.state = POINTING
         self.steady = pointing.Steady()
         self.no_bag_since = None
+        self.someone = False  # an operator (LiDAR) or a camera person to point was there once in this task
         self.bag = None  # odometry (x, y) of the bag centre
         self.last = last  # odometry (x, y) of the previous task's bag (mode "again")
         self.lidar = False  # the LiDAR saw the bag since the choice
@@ -408,6 +410,10 @@ class BagTask:
             return self._again(view)
         if self.mode == "near":
             return self._ahead(view)
+        if view.operator is not None or view.found is not None:
+            self.someone = True
+        elif not self.someone and now - self.t0 >= NO_OPERATOR_S:  # nobody to point: the flow asks, not 20 s of waiting
+            return self._fail("NO_OPERATOR", "nobody to point: no operator track and no person for the camera")
         if now - self.t0 > POINTING_S:
             if self.no_bag_since is not None:
                 return self._fail("NO_BAG", "no bag where you point")
