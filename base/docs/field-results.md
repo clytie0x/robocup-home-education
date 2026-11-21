@@ -4,6 +4,28 @@ The record of what the robot really did. Every plan since 2026-11-13 points here
 the commit the robot ran (`~/hmc-base/VERSION.json`), what was run, and the numbers. Claims without a log, an
 image or a measured number stay out.
 
+## Start here: the state on 2026-11-21 at 15:30, for whoever goes to the lab next
+
+- **The robot runs 4934b53. main is newer (PR #35: the bag pointing ends at once as NO_OPERATOR when nobody is there to
+  point) and is not deployed yet.** At about 15:20 the Jetson and the Pi stopped answering over Tailscale. The
+  Tailscale admin page still showed them online. A laptop off the lab network checked its own side (it reached the
+  Singapore relay and its other peers), but no handshake with either robot ever completed.
+- **First, at the lab: get the robots back online.** On the Jetson and the Pi, from a computer on the lab Wi-Fi:
+  1. `ping -c 3 8.8.8.8` and `curl -sI https://controlplane.tailscale.com`. A university portal page instead of a
+     normal answer means the portal login has to be done again.
+  2. `tailscale netcheck` should list a "Nearest DERP" with a time.
+  3. `sudo systemctl restart tailscaled` on both.
+- **Then deploy main** from a laptop that has the repo, as `base/tools/deploy.sh` says:
+  1. read `~/hmc-base/VERSION.json` on the Pi (4934b53 is expected);
+  2. check that nobody uses the robot (no console job, the arm at rest);
+  3. run `base/tools/deploy.sh --dry-run`, then `base/tools/deploy.sh`. No `--params`: `params.json` did not change;
+  4. restart only the Pi console, with `kill -TERM` of `console.py` (`run_console.sh` starts it again), because
+     `hmc/flow.py` changed and the executive lives in the console. The Jetson needs no restart;
+  5. add the deploy to the table below.
+- **Then the robot checks**, in the order of "Next robot checks" below, with the owner and helpers there. Merge the
+  arm PRs #21, #26 and #30 only after the pick check (item 4). The plan the work follows, with the status of
+  every item, is `base/docs/superpowers/plans/2026-11-21-help-me-carry-real-robot.md`.
+
 ## 2026-11-21: review of the robot's logs since 2026-11-14
 
 Read only, from the Pi's `~/hmc-base/logs/` (run folders and `console/`) and the Jetson's `~/hmc-follow/runs/`
