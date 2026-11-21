@@ -350,6 +350,20 @@ class RelayTest(unittest.TestCase):
         time.sleep(0.6)
         self.assertEqual(len(self.flow.sent("release")), 1)
 
+    def test_the_car_is_stored_from_the_runs_believed_pose(self):
+        # run_follow's believed and pose are [x, y, heading] lists: the car pose must not stay empty
+        status = console._mission_status({"record": {"believed": [4.0, 1.5, 0.4], "pose": [3.9, 1.6, 0.3]}})
+        self.assertEqual(status["pose"], [4.0, 1.5, 0.4])
+        self.start()
+        self.run.record = {"phase": "follow", "believed": [4.0, 1.5, 0.4]}
+        time.sleep(0.6)  # one status read
+        for path, key, value in (("hear", "text", "follow me"), ("event", "event", "locked"), ("hear", "text", "stop"),
+                                 ("hear", "text", "yes")):
+            code, raw = self.request("/api/mission/" + path, {key: value}, pin="2468")
+            self.assertEqual(code, 200, raw)
+        self.assertEqual(self.state(), "AT_CAR")
+        self.assertEqual(self.console.mission.car_pose, {"x": 4.0, "y": 1.5, "heading": 0.4})
+
     def test_a_missed_pick_measures_the_bag_again(self):
         self.flow.arm_answer = (409, {"ok": False, "error": "MISSED: closed on air", "code": "MISSED",
                                       "message": "closed on air"})

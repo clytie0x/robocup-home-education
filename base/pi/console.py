@@ -1342,8 +1342,8 @@ def _mission_status(body):
     wheels = record.get("wheels")
     if isinstance(wheels, str) and wheels:
         status["wheels"] = wheels
-    pose = record.get("believed") if isinstance(record.get("believed"), dict) else record.get("pose")
-    if isinstance(pose, dict):
+    pose = record.get("believed") if record.get("believed") is not None else record.get("pose")
+    if isinstance(pose, (dict, list)):  # run_follow's are [x, y, heading] lists; hmc.flow takes both
         status["pose"] = pose
     if isinstance(record.get("bag_task"), dict):
         status["bag_task"] = record["bag_task"]  # the executive does not read it: Console._bag_events does
