@@ -267,8 +267,9 @@ class RealSenses:
         self._last_now = now
         return geometry.base_to_odom(self._base(c), self._pose), None
 
-    def read(self, now, pose, v, w, dt, scan, depth_points, answer, link_alive, score, frame=None):
-        """frame: this cycle's camera frame (camera.Frame), kept for the range of the people in its answer."""
+    def read(self, now, pose, v, w, dt, scan, depth_points, answer, link_alive, score, frame=None, depth_heights=None):
+        """frame: this cycle's camera frame (camera.Frame), kept for the range of the people in its answer.
+        depth_heights: each depth point's height (m), for the obstacle memory of what leaves the view."""
         self.why = None  # which rule made this cycle unsure or dropped the track, for the log
         self._pose = pose
         self._yaws = [s for s in self._yaws if now - s[0] <= YAW_KEEP] + [(now, pose[2])]
@@ -369,7 +370,7 @@ class RealSenses:
             if len(self._lights) > LEARNED:
                 del self._lights[0]
         everyone = list(people.values()) + ([operator] if operator is not None else [])
-        obstacles = self.memory.update(now, pose, scan, depth_points, everyone)
+        obstacles = self.memory.update(now, pose, scan, depth_points, everyone, heights=depth_heights)
         return Senses(now, operator, look, people, obstacles, looks=looks,
                       operator_colour=op_colour, soft_look=op_soft)
 

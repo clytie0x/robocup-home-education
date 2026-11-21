@@ -482,10 +482,11 @@ class Loop(Logged):
         state = self.state(FakeBase())
         state.senses = Recording()
         self.cycle(state, 0.0)
-        self.assertEqual(got[0][-1].depth.shape, (240, 320))  # the Xtion frame, depth and all
+        self.assertEqual(got[0][9].depth.shape, (240, 320))  # the Xtion frame, depth and all
+        self.assertEqual(len(got[0][10]), len(got[0][5]))  # a height for every depth point (the obstacle memory)
         state.virtual = SimpleNamespace(apply=lambda now, pose, scan, answer, alive: (scan, answer, alive), report={})
         self.cycle(state, 0.1)
-        self.assertIsNone(got[1][-1])  # a simulated person has no depth: the real image would lie about them
+        self.assertIsNone(got[1][9])  # a simulated person has no depth: the real image would lie about them
 
     def test_drive_is_refused_above_0_15_with_closed_gates(self):
         closed = dict(P, max_speed=0.3, decel=None)
@@ -838,7 +839,7 @@ class Return(Logged):
         self.assertGreater(records[-1]["v"], 0.05)  # turned round and driving back
         now = records[-1]["time"]
         state.follower.obstacle_memory[("old",)] = (now, Circle(50.0, 50.0, 0.05))  # the brain's memory: the believed frame
-        state.senses.memory._depth[("old",)] = (2.0, 0.0, now)  # the senses' memory: the odometry frame
+        state.senses.memory._depth[("old",)] = (2.0, 0.0, now, None)  # the senses' memory: the odometry frame
         state.keyframes = Shifted(0.3)
         state.follower.navigator._planned_at = now  # planned last cycle: only the correction can make it plan again
         records = records + self.drive(state, base, now, 0.1, world)
@@ -1199,6 +1200,21 @@ class WheelWatch(Logged):
         self.assertTrue(all(r["stop"] is None and r["wheels"] is None for r in records))
         self.assertEqual(self.said(), [])
 
+
+
+class BeltTest(Logged):
+    def test_a_belt_the_camera_saw_is_remembered_with_its_height(self):
+        from test_depth_obstacles import scene_depth
+
+        class BeltCamera(Camera):
+            def latest(self):
+                return SimpleNamespace(time=self.t, depth=scene_depth(P, [(1.8, -0.4, 0.4, 0.85, 0.92)]))
+
+        state = self.state(FakeBase())
+        state.camera = BeltCamera()
+        self.cycle(state, 0.0)
+        heights = [cell[3] for cell in state.senses.memory._depth.values()]
+        self.assertTrue(heights and all(0.84 < h < 0.93 for h in heights), heights)
 
 
 class OneReIdModelTest(unittest.TestCase):
