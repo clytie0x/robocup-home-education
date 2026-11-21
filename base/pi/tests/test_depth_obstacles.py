@@ -88,6 +88,15 @@ class DepthObstacleTest(unittest.TestCase):
         self.assertGreater(len(belt), 5)
         self.assertTrue(np.all(np.abs(belt[:, 0] - 1.8) < 0.08), belt[:, 0])
 
+    def test_the_height_of_each_cell_comes_on_request(self):
+        real = params.load()
+        depth = scene_depth(real, [(1.8, -0.4, 0.4, 0.85, 0.92)])
+        belt = depth_obstacles.points(depth, real, heights=True)
+        self.assertEqual(belt.shape[1], 3)
+        self.assertTrue(np.all((belt[:, 2] > 0.84) & (belt[:, 2] < 0.93)), belt[:, 2])  # the cell's highest pixel
+        np.testing.assert_allclose(belt[:, :2], depth_obstacles.points(depth, real))  # the same cells as before
+        self.assertIsNone(depth_obstacles.points(np.zeros((240, 320), np.uint16), real, heights=True))
+
     def test_isolated_flying_depth_pixels_are_dropped(self):
         depth = scene_depth(P)
         depth[100, 160] = 1200  # 1 stray pixel in mid-air

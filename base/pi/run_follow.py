@@ -848,9 +848,11 @@ def cycle(state, now):
     if state.phase == RETURN and scan:
         believed, report = _correct(state, pose, believed, scan)
     # 2. Depth obstacles (only once the camera pose is measured), the speed cap, the pose.
-    depth_points = None
+    depth_points = depth_heights = None
     if frame is not None and params.depth_gates_open(p):
-        depth_points = depth_obstacles.points(frame.depth, p)
+        depth = depth_obstacles.points(frame.depth, p, heights=True)
+        if depth is not None:
+            depth_points, depth_heights = depth[:, :2], depth[:, 2]  # the heights: for the memory of what leaves view
     state.cable.lay.refresh(pose, lambda q: _moved(state.fix, q), now)  # the cable's lay for this cycle's plans
     LAY["lay"] = state.cable.lay
     state.body.limit(min(state.max_speed, switches["max_speed"], safety.speed_cap(depth_points, p),
@@ -885,7 +887,8 @@ def cycle(state, now):
     # furniture, the yaw history for old camera answers. Only their output goes to the believed frame.
     # The frame's depth gives the range of the people in its answer; a simulated person has none.
     seen = _to_believed(state.fix, senses.read(now, pose, v_was, w_was, dt, sensed, depth_points, answer, link_alive,
-                                               follower.score, frame if state.virtual is None else None))
+                                               follower.score, frame if state.virtual is None else None,
+                                               depth_heights))
     t_senses = state.clock() - now
     if REMOTE is not None and REMOTE.waiting():
         follower.navigator._goal = None  # no answer to a request after forget yet: ask again this cycle

@@ -27,8 +27,9 @@ def _rays(shape, hfov_deg):
     return (u - (width - 1) / 2) / f, (v - (height - 1) / 2) / f
 
 
-def points(depth, p):
-    """(N, 2) base-frame x, y of obstacle pixels, or None when the depth image is blind.
+def points(depth, p, heights=False):
+    """(N, 2) base-frame x, y of obstacle pixels, or None when the depth image is blind. heights: (N, 3), the
+    third column each cell's highest point above the floor (m), for the memory of what leaves the view.
 
     depth is uint16 millimetres, 0 = no reading. None means "no depth"; an empty array
     means "looked, nothing there".
@@ -58,13 +59,18 @@ def points(depth, p):
     keep = (up > MIN_HEIGHT) & (up < p["robot_height"])
     xy = np.column_stack([ahead[keep], left[keep]])
     if len(xy) == 0:
-        return xy
+        return np.empty((0, 3)) if heights else xy
     cells = np.floor(xy / CELL).astype(np.int64)
-    _, first, counts = np.unique(cells, axis=0, return_index=True, return_counts=True)
-    kept = first[counts >= MIN_CELL_PIXELS]
-    xy = xy[np.sort(kept)]
+    _, first, inverse, counts = np.unique(cells, axis=0, return_index=True, return_inverse=True, return_counts=True)
+    top = np.full(len(first), -np.inf)
+    np.maximum.at(top, inverse.ravel(), up[keep])  # each cell's highest pixel
+    good = np.flatnonzero(counts >= MIN_CELL_PIXELS)
+    good = good[np.argsort(first[good])]  # one point per cell, in pixel order as before
+    xy, top = xy[first[good]], top[good]
     # The arm, cable and a carried bag are rigid in the base frame. robot_height 1.05 m lets the
     # upward-tilted Xtion turn them into an obstacle a fixed ~0.26 m away (18 Nov).
     kept = footprint.drop_self(xy, p, sensor="depth")
     points.last = dict(footprint.LAST.get("depth") or points.last)
-    return kept
+    if not heights:
+        return kept
+    return np.column_stack([kept, top[~footprint.own_mask(xy, p)]]) if len(xy) else np.empty((0, 3))
