@@ -11,7 +11,7 @@ Wheeled base and person following on the real robot (Raspberry Pi, STM32, LiDAR,
 | Entry point | Machine | What it does |
 |---|---|---|
 | `base/pi/console.py` | Pi | Web console on :8081: starts `run_follow.py` and the checks, relays the camera and the LiDAR, shows the Jetson |
-| `base/jetson/agent.py` | Jetson | Agent on :8090: starts, stops and restarts the seven programs, Start all in their order |
+| `base/jetson/agent.py` | Jetson | Agent on :8090: starts, stops and restarts the eight programs, Start all in their order |
 | `base/tools/deploy.sh` | laptop | Deploys a git commit to both hosts, writes `VERSION.json`, backs up, `--rollback`, `--voice`, `--arm`, `--params` |
 
 Docs:

@@ -1,12 +1,13 @@
 # Base firmware (STM32F103C8T6)
 
 New firmware for the wheeled base, following the draft in
-[`../docs/firmware-design.md`](../docs/firmware-design.md). **Flashing approved by the
-owner on 2026-11-14; not flashed yet.** The chip is an STM32F103C8T6 on a Blue Pill
+[`../docs/firmware-design.md`](../docs/firmware-design.md). **Flashed on 2026-11-14 on the
+owner's approval (build 0c020e4, `../docs/hardware-assessment-2026-11-13.md`).** The chip
+is an STM32F103C8T6 on a Blue Pill
 driving an L298N. The pin map below was read from the old firmware's binary. Flash once
 with the jumper, update without it, roll back: [`FLASHING.md`](FLASHING.md).
 
-- Lifecycle state: `unconfirmed` (draft until the owner approves the design)
+- Lifecycle state: `unconfirmed`
 - Entry point on the laptop: `make test` in this folder
 - Entry point on the board: `make firmware` gives `build/full.bin` (stage1 + application,
   for the one jumper flash) and `build/app.bin` (application only, for every update with
@@ -153,7 +154,8 @@ parity or framing error drops the message it is in. `\r` and `\n` are ignored.
 
 ## Open decisions for the owner
 
-1. Approve or change the design draft (nothing gets flashed before that).
+1. Approve or change the design draft: **the owner approved flashing on 2026-11-14;
+   flashed that day (0c020e4).**
 2. Letter and format of the fine odometry reply (`P#` above is a proposal). The old
    firmware answers only `F B S O R`, so `P`, `M` and `E` were free.
 3. PWM frequency: **decided 2026-11-14, the owner chose 1 kHz** (`PWM_HZ`) instead of
