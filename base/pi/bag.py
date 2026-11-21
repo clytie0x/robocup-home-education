@@ -96,6 +96,7 @@ BLIND_MARGIN = 0.03  # m: a bag predicted this near SIGHT_MIN is not lost when i
 AGAIN_R = 0.25  # m: bag_again looks for the last bag this close to where it was
 NEAR_BAG_R = 2.0  # m: bag_near takes the nearest bag within this of the turning centre
 NEAR_BAG_DEG = 40.0  # and within this of straight ahead
+NO_SCAN_S = 3.0  # s bag_near and bag_again wait for a LiDAR scan (a run's first one comes about 0.6 s in)
 LAY_KEEP = 0.05  # m beside the body's half width: the cable on the floor nearer the drive line blocks it
 VIRTUAL_R = 0.1  # m, a bag this close to a virtual bag is the virtual one
 # The look (base/docs/bag-sensing.md)
@@ -355,6 +356,11 @@ class BagTask:
 
     def _pointing(self, view):
         now = view.now
+        if self.mode in ("again", "near") and not len(view.seen):  # no scan yet: an empty view is no bag either
+            if now - self.t0 > NO_SCAN_S:
+                return self._fail("NO_BAG", "no LiDAR scan in %.0f s" % NO_SCAN_S)
+            self.why = "waiting for the LiDAR's first scan"
+            return self._stand()
         if self.mode == "again":
             return self._again(view)
         if self.mode == "near":
