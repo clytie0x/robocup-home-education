@@ -1311,6 +1311,7 @@ class Remote(Logged):
         jetson.cmd("return")  # before it moved: it is at the start at once
         record = self.cycle(state, 0.1)
         self.assertTrue(record["end"].startswith("done"), record)
+        self.assertIs(record["at_start"], True)  # in the record the console reads too, not only the status line
         self.assertEqual(base.stops, 1)  # S#
         status = jetson.read()[-1]
         self.assertEqual((status["phase"], status["at_start"], status["ack"]), ("DONE", True, "return"))

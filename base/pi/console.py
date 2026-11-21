@@ -1182,6 +1182,23 @@ def voice_commands(root=LOG_ROOT, size=RUN_TAIL):
     return out
 
 
+def run_end_record(root=LOG_ROOT):
+    """The newest run log's last record with "end" (a no_path dump may follow it), or None. run_follow's page goes
+    with the run, often before the console's next read of it: its at_start and its end are still in the log."""
+    try:
+        newest = max((d for d in Path(root).iterdir() if RUN_NAME.match(d.name) and d.is_dir()), default=None)
+    except OSError:
+        return None
+    for text in reversed(tail_lines(newest / "log.jsonl", 3, RUN_TAIL) if newest else []):
+        try:
+            record = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and "end" in record:
+            return record
+    return None
+
+
 def list_runs(root=LOG_ROOT, limit=20):
     """The newest run_follow log folders: [{"name", "start", "seconds", "end", "size"}]."""
     try:
@@ -1750,9 +1767,10 @@ class Console:
         if task:
             code, status = self.run_status()
             record = status.get("record") if code == 200 and isinstance(status, dict) else None
-            if not isinstance(record, dict):
+            ended = cmd == "drop_bag" and status == {"state": "idle"}  # run_follow ended at the start: nothing moves
+            if not isinstance(record, dict) and not ended:
                 return 503, {"error": "the run's status does not answer: cannot tell whether a bag task moves the base"}
-            if record.get("phase") == "bag":
+            if (record or {}).get("phase") == "bag":
                 return 409, {"error": "a bag task is moving the base: the arm waits until it ended"}
         if cmd == "bagpick":
             putback = body.get("putback", False)
@@ -1880,6 +1898,9 @@ class Console:
                     self._mission_saw_run = True
                 elif self._mission_saw_run:
                     self._mission_saw_run = False
+                    last = _mission_status(run_end_record(self.log_root))  # the page is gone: at_start, end in the log
+                    if last is not None:
+                        self._apply(self.mission.on_status(last, now))
                     self._apply(self.mission.on_event(
                         "base_run_ended|BASE_RUN_ENDED|the run ended", now))
                     continue
@@ -1987,12 +2008,14 @@ class Console:
         """One run's voice thread, every FLOW_POLL s: the executive's say lines out in order, then one read of what
         the parked flow heard after seq (it renews the lease), each line to the executive. A failed call never ends
         the run: logged once when lost and once when back. It ends one round after the run did (a terminal state,
-        STOP, or the run job's end) with one release, at a newer run's start, or with the console."""
+        STOP, or the run job's end, except on the way back or at the drop: run_follow ends at the start, then the arm
+        drops the bag and the executive says so) with one release, at a newer run's start, or with the console."""
         lost = saw_run = ending = False
         while not self._mission_stop.wait(FLOW_POLL) and self._voice_run == run:
             live = self.live_from_run()
             saw_run = saw_run or live
-            over = not self.mission.running or (saw_run and not live)
+            home = getattr(self.mission, "state", None) in ("RETURNING", "DROPPING")
+            over = not self.mission.running or (saw_run and not live and not home)
             calls = []
             while not self._says.empty():
                 calls.append({"cmd": "say", "text": self._says.get()})
@@ -2034,6 +2057,9 @@ class Console:
         with self._arm_lock:
             if not self.mission.running:
                 return  # STOP or the run's end came while an earlier job held the arm
+            drop = self.drop_default() if action == "drop_bag" else {}
+            if drop.get("x") is not None:
+                params = {"x": drop["x"], "y": drop["y"]}  # so100_ik.reachable_drop, as the Jetson flow drops
             try:  # pick_bag's x and y are the run's reached bag (bag_reached): measured, as bag_job's own from the run
                 code, answer = self.bag_job(action, dict(params, measured=True), task=True)
             except Exception as error:

@@ -401,6 +401,23 @@ def test_a_pi_end_after_done_does_not_change_the_outcome(tmp_path):
     assert flow.reason["code"] == "SUCCESS"
 
 
+def test_the_base_run_ending_at_the_start_does_not_fail_the_drop(tmp_path):
+    # the real run_follow reports at_start and ends (DONE) in the same cycle: the arm drops after the base stopped
+    flow = begin(tmp_path, "end_at_start")
+    follow(flow)
+    to_car(flow)
+    to_point(flow)
+    to_pick(flow)
+    flow.on_event("grab_success", 6.0)
+    out = flow.on_status({"link": True, "at_start": True, "end": "done: back at the start"}, 6.1)
+    assert flow.state == "DROPPING"
+    assert actions(out) == ["drop_bag"]
+    flow.on_event("base_run_ended|BASE_RUN_ENDED|the run ended", 6.5)
+    assert flow.state == "DROPPING"
+    flow.on_event("drop_done", 7.0)
+    assert (flow.state, flow.outcome) == ("DONE", "SUCCESS")
+
+
 def test_unknown_precheck_fields_still_start(tmp_path):
     flow = fresh(tmp_path, "dry")
     flow.start(0.0, report=None)

@@ -1028,6 +1028,7 @@ def cycle(state, now):
         "believed": list(believed),  # the pose the brain used: odometry moved by the keyframe corrections
         "breadcrumbs": len(follower.route.points),
         "target": None if state.returner is None or state.returner.target is None else list(state.returner.target),
+        "at_start": state.returner is not None and state.returner.done,  # back at the start (the status line's at_start)
         "keyframe": report,  # the match against the nearest keyframe (RETURN), or None
         "queue": state.queue.last_tail[1] if state.joined and state.queue.last_tail else None,  # tail's id
         "wheels": state.wheels_alarm,  # "not turning" or "fault 03" while held for it (_watch_wheels), else None

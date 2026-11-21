@@ -934,7 +934,7 @@ class HmcFlow:
             mapped = code
         else:
             mapped = code_from_pi_end(detail or code)
-        if self.state in TERMINAL or not self.running:
+        if self.state in TERMINAL or not self.running or self.state == "DROPPING":  # the drop needs no base
             self._log("ignored", self.state, code=mapped, detail=self._saw_end)
             return [("log", "(base run ended in %s: expected)" % self.state)]
         return self._finish(now, mapped, self._saw_end)

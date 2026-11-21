@@ -321,12 +321,34 @@ class RelayTest(unittest.TestCase):
         self.assertEqual([e for e in self.events if e.startswith("bag_")],
                          ["bag_chosen|LEFT|I see the bag on the left.", "bag_reached|OK|0.310,0.020,top=0.200"])
         self.assertEqual(self.flow.says().count("I see the bag on the left."), 1)
-        self.run.record = dict(self.run.record, phase="return", at_start=True)
+        self.console._drop = {"x": 0.38, "y": 0.0}  # so100_ik.reachable_drop
+        # as the real run_follow: at_start and its end in the same record, the base stopped (DONE)
+        self.run.record = dict(self.run.record, phase="done", at_start=True, end="done: back at the start")
         self.wait_until(lambda: self.state() == "DONE", "DONE after drop_done")
-        self.assertEqual(self.arm_posts()[1], ({"cmd": "drop_bag", "x": 0.31, "y": 0.0}, console.ARM_JOB_TIMEOUT))
+        self.assertEqual(self.arm_posts()[1], ({"cmd": "drop_bag", "x": 0.38, "y": 0.0}, console.ARM_JOB_TIMEOUT))
         self.assertIn("drop_done", self.events)
         self.assertEqual(self.mission()["outcome"], "SUCCESS")
         self.wait_until(lambda: self.flow.sent("release"), "release at DONE")
+
+    def test_a_run_that_ended_at_the_start_still_drops_and_says_so(self):
+        # run_follow ends in the cycle it arrives and its page goes with it: the console reads that end in its log
+        self.console._drop = {"x": 0.38, "y": 0.0}
+        self.to_pointing()
+        self.reach_bag()
+        self.wait_until(lambda: self.state() == "RETURNING", "RETURNING after grab_success")
+        self.run.record = dict(self.run.record, phase="return")
+        log = Path(self.console.mission.log_path).parent / "log.jsonl"
+        log.write_text(json.dumps({"time": 1.0, "phase": "done", "at_start": True,
+                                   "end": "done: back at the start"}) + "\n", encoding="utf-8")
+        self.jobs.running = None
+        self.wait_until(lambda: self.state() == "DONE", "DONE after drop_done")
+        self.assertEqual(self.arm_posts()[1], ({"cmd": "drop_bag", "x": 0.38, "y": 0.0}, console.ARM_JOB_TIMEOUT))
+        self.assertEqual(self.mission()["outcome"], "SUCCESS")
+        self.wait_until(lambda: "Here is your bag." in self.flow.says(), "the last line said")
+        self.assertIn("I am back at the start.", self.flow.says())
+        self.wait_until(lambda: self.flow.sent("release"), "release at DONE")
+        time.sleep(0.6)
+        self.assertEqual(len(self.flow.sent("release")), 1)
 
     def test_a_missed_pick_measures_the_bag_again(self):
         self.flow.arm_answer = (409, {"ok": False, "error": "MISSED: closed on air", "code": "MISSED",
