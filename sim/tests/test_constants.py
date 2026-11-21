@@ -21,12 +21,12 @@ def test_tries_and_speeds_match_bag_camera():
 
 def test_close_height_and_bias_match_the_node():
     text = (repo_root() / "arm/so100_driver/so100_driver/pick_place_node.py").read_text()
-    assert 'self.declare_parameter("bag_cam_close_h", 0.19)' in text
+    assert 'self.declare_parameter("bag_cam_close_h", 0.21)' in text
     assert 'self.declare_parameter("bag_cam_close_bias", [-0.012, -0.014])' in text
     assert 'self.declare_parameter("bag_cam_rim_h", 0.27)' in text
     assert 'self.declare_parameter("bag_cam_width", 0.18)' in text
     assert 'self.declare_parameter("bag_cam_half_depth", 0.055)' in text
-    assert C.CLOSE_H == 0.19
+    assert C.CLOSE_H == 0.21
     assert C.BIAS_FORWARD == -0.012
     assert C.BIAS_UP == -0.014
 

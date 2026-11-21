@@ -215,7 +215,9 @@ class ContinuousPlan(unittest.TestCase):
         self.assertAlmostEqual(seconds["lift_s"], line_seconds(len(lift), LIFT_SPEED, JOINT_STEP))
         # The arm is at the top of the lift when the raise and the swing are planned.
         node.joints = {j: float(lift[-1][j]) for j in ARM}
-        raise_path, top, raise_pitch = cam.raise_path(reach, roll, close_z + lifted)
+        # raise to the carry height (the bag's bottom 0.28 m up, over the LiDAR), the jaws tilting to HOLD_PITCH
+        want_tz = FLOOR + 0.28 + (close_z - FLOOR)
+        raise_path, top, raise_pitch = cam.raise_path(reach, roll, close_z + lifted, pitch, want_tz)
         raise_s = line_seconds(len(raise_path), HELD_SPEED)
         if raise_path:
             node.joints = {j: float(raise_path[-1][j]) for j in ARM}

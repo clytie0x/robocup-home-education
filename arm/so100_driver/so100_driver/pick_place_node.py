@@ -151,9 +151,12 @@ class PickPlace(Node):
         # the arm's pan axis in the robot frame bag_arm sends goals in (origin under the LiDAR; HMC Mount.pan_xy):
         # only for the log lines in that frame
         self.declare_parameter("bag_robot_pan", [0.012, 0.0145])
-        self.declare_parameter("bag_cam_close_h", 0.19)   # m above the floor: finger tips at the close (paper rim
-        #                                                   27 cm on the test bag: about 8 cm of wall in the jaws;
-        #                                                   0.25 and 0.22 slipped out in the lift, 2026-11-18)
+        self.declare_parameter("bag_cam_close_h", 0.21)   # m above the floor: finger tips at the close (paper rim
+        #                                                   27 cm on the test bag: about 6 cm of wall in the jaws;
+        #                                                   simulated 2026-11-19: at 0.19 the gripper body cuts the rim
+        #                                                   on the way down (pushes the bag), from 0.20 it is clear)
+        # m above the floor the held bag's bottom is lifted to (LiDAR plane 0.245 m + 3.5 cm)
+        self.declare_parameter("bag_carry_bottom", 0.28)
         self.declare_parameter("bag_cam_half_depth", 0.055)   # m: bag centre -> its front wall (test bag 11 cm deep)
         # front camera bag finding (bag_camera.locate): the front wall's rim height above the floor (test bag
         # 27 cm) and the rim width the image must show for a standing bag (test bag: 0.178 m measured from two
