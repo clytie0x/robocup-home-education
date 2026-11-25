@@ -126,7 +126,7 @@ def _sides(bags):
 
 
 def list_bags(image, cam, bv, bc, segmenters=None, pan=pbc.ARM_PAN, half_depth=pbc.HALF_DEPTH, rim_h=pbc.RIM_H,
-              laser_x=pbc.LASER_X, width=pbc.BAG_WIDTH, width_tol=pbc.WIDTH_TOL, reach=pbc.REACH_X):
+              cam_pan=pbc.CAM_PAN, width=pbc.BAG_WIDTH, width_tol=pbc.WIDTH_TOL, reach=pbc.REACH_X):
     """Every bag in the frame, left to right in the robot (ok ones first), see the module note."""
     orange = bv.orange_mask(image)
     out = []
@@ -136,7 +136,6 @@ def list_bags(image, cam, bv, bc, segmenters=None, pan=pbc.ARM_PAN, half_depth=p
     else:  # no segmenter at all: the arm team's own single-bag fallbacks (floor difference, pink/red)
         b = bv.find_bag(image)
         blobs = [(b, None)] if b is not None else []
-    cam_pan = (pan[0] + laser_x, pan[1])
     for blob, m in blobs:
         if blob is None:
             continue
