@@ -14,7 +14,7 @@ wall's rim; from this steep camera it may be the back rim or the handles, puttin
   python3 tools/pick_bag_cam.py --image f.jpg --dry-run   # a saved frame instead of the camera
 Refused (nothing moves): no red blob, a blob whose rim is not about 0.18 m wide, a centre outside 0.20-0.50 m ahead.
 Options: --top M (handle top above the floor; left out = the arm's own rim height), --home (arm to ready first,
-then the frame), --agent URL, --snap URL, --camera FILE, --pan X Y, --half-depth M, --rim-h M.
+then the frame), --agent URL, --snap URL, --camera FILE, --pan X Y, --cam-pan X Y, --half-depth M, --rim-h M.
 """
 import argparse
 import json
@@ -37,7 +37,10 @@ SNAP_URL = "http://127.0.0.1:%d/snap.jpg" % ports.WEBCAM
 AGENT_URL = "http://127.0.0.1:%d/arm" % ports.AGENT
 # the arm team's parameter defaults (pick_place_node.py, 2026-11-18 22:09); --pan etc. override them
 ARM_PAN = (0.012, 0.0145)  # arm pan axis from the LiDAR (bag_robot_pan; bag_arm.py Mount.pan_xy)
-LASER_X = 0.175            # LiDAR ahead of the turning centre (slam_bridge.LASER_X), front_camera.json's origin
+# the arm's pan axis in front_camera.json's frame (turning centre), the arm team's bag_front_cam_pan: measured in the
+# camera's own picture on 2026-11-24 (arm meshes at known joint angles: x 0.258 to 0.268; a bag taped 20 cm from the
+# axis: 0.246 to 0.252). It was LASER_X 0.175 + ARM_PAN[0] = 0.187, which put bags 6 to 7 cm too far.
+CAM_PAN = (0.255, 0.0)
 HALF_DEPTH = 0.055         # bag_cam_half_depth
 RIM_H = 0.27               # bag_cam_rim_h
 BAG_WIDTH = 0.18           # bag_cam_width: the rim must look about this wide, else it is not the bag (or it lies)
@@ -59,7 +62,7 @@ def robot_xy(centre, pan=ARM_PAN):
     return float(centre[0] + pan[0]), float(centre[1] + pan[1])
 
 
-def find(image, cam, bv, bc, pan=ARM_PAN, half_depth=HALF_DEPTH, rim_h=RIM_H, laser_x=LASER_X,
+def find(image, cam, bv, bc, pan=ARM_PAN, half_depth=HALF_DEPTH, rim_h=RIM_H, cam_pan=CAM_PAN,
          width=BAG_WIDTH, width_tol=WIDTH_TOL, reach=REACH_X):
     """One BGR frame -> dict(ok, x, y, from, width, blob) or dict(ok False, why). Refused: no blob, a blob whose
     rim is not about `width` wide (something else red, or a fallen bag), a centre outside `reach`."""
@@ -69,7 +72,6 @@ def find(image, cam, bv, bc, pan=ARM_PAN, half_depth=HALF_DEPTH, rim_h=RIM_H, la
         return dict(out, ok=False, why="no bag in the picture")
     out["blob"] = {k: float(b[k]) for k in ("x0", "x1", "y0", "y1")}
     foot = bv.foot_y(image, b)
-    cam_pan = (pan[0] + laser_x, pan[1])          # the pan axis in front_camera.json's frame (turning centre)
     where = bc.locate(cam, b, cam_pan, half_depth, rim_h, foot=foot)
     if where is None:
         return dict(out, ok=False, why="the bag's rays do not reach the floor")
@@ -129,6 +131,7 @@ def main(argv=None):
     ap.add_argument("--snap", default=SNAP_URL)
     ap.add_argument("--camera", default=CAMERA_FILE)
     ap.add_argument("--pan", type=float, nargs=2, default=ARM_PAN)
+    ap.add_argument("--cam-pan", type=float, nargs=2, default=CAM_PAN, help="the pan axis in the camera file's frame")
     ap.add_argument("--half-depth", type=float, default=HALF_DEPTH)
     ap.add_argument("--rim-h", type=float, default=RIM_H)
     a = ap.parse_args(argv)
@@ -145,7 +148,7 @@ def main(argv=None):
     if image is None:
         print("cannot read", a.image)
         return 1
-    res = find(image, cam, bv, bc, tuple(a.pan), a.half_depth, a.rim_h)
+    res = find(image, cam, bv, bc, tuple(a.pan), a.half_depth, a.rim_h, tuple(a.cam_pan))
     try:
         overlay(image, res, a.overlay)
     except Exception as exc:  # noqa: BLE001 (the picture is only for looking)

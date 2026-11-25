@@ -39,9 +39,17 @@ class PickBagCamTest(unittest.TestCase):
         res = pbc.find(img, self.cam, BV, BC)
         self.assertTrue(res["ok"], res)
         b = BV.find_bag(img)
-        where = BC.locate(self.cam, b, (0.012 + 0.175, 0.0145), 0.055, 0.27, foot=BV.foot_y(img, b))
+        where = BC.locate(self.cam, b, (0.255, 0.0), 0.055, 0.27, foot=BV.foot_y(img, b))
         self.assertAlmostEqual(res["x"], where["centre"][0] + 0.012, places=3)
         self.assertAlmostEqual(res["y"], where["centre"][1] + 0.0145, places=3)
+
+    def test_the_measured_pan_axis_puts_the_bag_nearer_than_the_old_sum(self):
+        """2026-11-24: the pan axis is 0.255 m in the camera's frame, not LASER_X 0.175 + 0.012 = 0.187."""
+        img = frame()
+        new = pbc.find(img, self.cam, BV, BC)
+        old = pbc.find(img, self.cam, BV, BC, cam_pan=(0.187, 0.0145))
+        self.assertAlmostEqual(old["x"] - new["x"], 0.255 - 0.187, delta=0.002)  # x, y are rounded to 1 mm
+        self.assertAlmostEqual(old["y"] - new["y"], 0.0 - 0.0145, delta=0.002)
 
     def test_a_bag_on_the_robots_right_has_negative_y(self):
         res = pbc.find(frame(430, 600), self.cam, BV, BC)
