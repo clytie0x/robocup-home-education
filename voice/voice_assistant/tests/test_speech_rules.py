@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from voice_assistant.speech_rules import BargeInDetector, LoudnessGate, noise_transcript
+from voice_assistant.speech_rules import BargeInDetector, LoudnessGate, frame_rms, noise_transcript, whisper_text
 
 STT_NODE = Path(__file__).resolve().parents[1] / "voice_assistant" / "stt_node.py"
 PARAMS = Path(__file__).resolve().parents[1] / "config" / "params.yaml"
@@ -119,6 +119,36 @@ def test_gate_absolute_minimum_rms():
     assert gate.check([70.0] * 10)[0]
 
 
+def test_empty_frame_and_nan_noise_do_not_break_the_gate():
+    assert frame_rms(np.array([], dtype=np.int16)) == 0.0
+    gate = LoudnessGate(min_snr=2.0, min_rms=0.0, floor_min=30.0)
+    gate.update_noise(float("nan"))
+    gate.update_noise(float("inf"))
+    gate.update_noise("loud")
+    for _ in range(50):
+        gate.update_noise(40.0)
+    ok, _, noise, _ = gate.check([float("nan"), 100.0, "x"])
+    assert ok and noise >= 39.0
+    # a poisoned floor must not make every later clip look silent
+    gate.noise = float("nan")
+    ok, _, noise, _ = gate.check([100.0] * 10)
+    assert ok and noise == 30.0
+
+
+@pytest.mark.parametrize("payload, text", [
+    (None, ""),
+    ([], ""),
+    ("hello", ""),
+    ({}, ""),
+    ({"text": None}, ""),
+    ({"text": 12}, ""),
+    ({"text": "  hi robot  "}, "hi robot"),
+    ({"text": ""}, ""),
+])
+def test_whisper_payload_that_is_not_text_is_empty(payload, text):
+    assert whisper_text(payload) == text
+
+
 # ---------- barge-in detector ----------
 
 def frames(n, value):
@@ -164,3 +194,12 @@ def test_barge_detector_needs_more_margin_while_the_robot_says_stop():
     plain = det.threshold()
     det.extra = 1.5                              # stt_node raises this when its own line contains "stop"
     assert det.threshold() == pytest.approx(plain * 1.5)
+
+
+def test_barge_detector_ignores_a_non_finite_level():
+    det = BargeInDetector(ratio=2.0)
+    for frame in frames(12, 100):
+        det.feed(frame, 100.0)
+    det.feed(frames(1, 0)[0], float("nan"))
+    det.feed(frames(1, 0)[0], float("inf"))
+    assert det.threshold() == pytest.approx(200.0)

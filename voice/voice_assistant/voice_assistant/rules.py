@@ -200,7 +200,11 @@ class RuleParser:
 
     def parse(self, text):
         """Returns (action, params, reply). action 'none' = nothing to send to the robot."""
+        if not isinstance(text, str):
+            text = ""
         t = text.strip()
+        if not t:
+            return "none", {}, "Sorry, I didn't catch that. Please say it again."
         low = t.lower()
         bare = " ".join(re.sub(r"[^a-z' -]", " ", low).split())
         parts = [p.strip() for p in re.split(r"[.!?,]+", low) if p.strip()]

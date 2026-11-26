@@ -4,6 +4,7 @@ No ROS, no audio device, numpy only, so they can be unit-tested on a PC. stt_nod
 the VAD loop and the whisper request.
 """
 import collections
+import math
 import re
 
 import numpy as np
@@ -12,7 +13,35 @@ BARGE_RX = re.compile(r"\b(stop|halt|freeze)\b|^\W*(?:robot\W+|please\W+)*(finis
 
 
 def frame_rms(frame: np.ndarray) -> float:
-    return float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
+    """RMS of one audio frame. An empty frame is 0, not NaN (NaN would poison the noise floor)."""
+    if frame is None or len(frame) == 0:
+        return 0.0
+    value = float(np.sqrt(np.mean(np.square(frame.astype(np.float32)))))
+    return value if math.isfinite(value) else 0.0
+
+
+def _real(value):
+    """A finite real number, or None. Rejects bools, text, and NaN/inf."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def whisper_text(payload) -> str:
+    """The transcript string from a whisper.cpp JSON body, or "" when the body is not that shape.
+
+    A 200 response of `null`, `[]`, or `{"text": null}` is silence, not a failed request.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    text = payload.get("text", "")
+    if not isinstance(text, str):
+        return ""
+    return text.strip()
 
 
 def noise_transcript(text, allow):
@@ -40,12 +69,26 @@ class LoudnessGate:
         self.noise = None
 
     def update_noise(self, rms: float):
-        """Call with frames that are NOT speech (robot not talking)."""
-        self.noise = rms if self.noise is None else (1 - self.alpha) * self.noise + self.alpha * rms
+        """Call with frames that are NOT speech (robot not talking).
+
+        Non-finite samples are skipped. One NaN would otherwise make every later clip look silent.
+        """
+        number = _real(rms)
+        if number is None or number < 0:
+            return
+        self.noise = number if self.noise is None else (1 - self.alpha) * self.noise + self.alpha * number
 
     def check(self, frame_levels):
-        level = float(np.percentile(frame_levels, 75)) if len(frame_levels) else 0.0
-        noise = max(self.noise if self.noise is not None else self.floor_min, self.floor_min)
+        clean = []
+        for sample in frame_levels or []:
+            number = _real(sample)
+            if number is not None:
+                clean.append(number)
+        level = float(np.percentile(clean, 75)) if clean else 0.0
+        noise = _real(self.noise)
+        noise = self.floor_min if noise is None else max(noise, self.floor_min)
+        if noise <= 0:
+            noise = 1e-6
         snr = level / noise
         ok = level >= self.min_rms and (self.min_snr <= 0 or snr >= self.min_snr)
         return ok, level, noise, snr
@@ -78,6 +121,8 @@ class BargeInDetector:
         return max(float(np.percentile(self.echo, 90)) * self.ratio * self.extra, self.min_level)
 
     def feed(self, frame, rms):
+        number = _real(rms)
+        rms = 0.0 if number is None or number < 0 else number
         thr = self.threshold()
         loud = thr is not None and rms > thr
         if not self.active:

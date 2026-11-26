@@ -29,7 +29,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Empty, String
 
-from voice_assistant.speech_rules import BARGE_RX, BargeInDetector, LoudnessGate, frame_rms, noise_transcript
+from voice_assistant.speech_rules import BARGE_RX, BargeInDetector, LoudnessGate, frame_rms, noise_transcript, whisper_text
 
 VAD_RATE = 16000          # whisper + webrtcvad expect 16 kHz mono
 FRAME_MS = 30             # webrtcvad accepts 10/20/30 ms frames
@@ -171,7 +171,7 @@ class SttNode(Node):
                 self._stop.wait(5.0)
 
     def _to_16k(self, x: np.ndarray) -> np.ndarray:
-        if self.mic_rate == VAD_RATE:
+        if len(x) == 0 or self.mic_rate == VAD_RATE or self.mic_rate <= 0:
             return x
         n_out = int(len(x) * VAD_RATE / self.mic_rate)
         xi = np.linspace(0, len(x) - 1, n_out)
@@ -267,7 +267,7 @@ class SttNode(Node):
                               files={"file": ("audio.wav", wav.getvalue(), "audio/wav")},
                               data=data, timeout=30)
             r.raise_for_status()
-            return r.json().get("text", "").strip()
+            return whisper_text(r.json())
         except Exception as e:
             self.get_logger().error(f"whisper request failed: {e}")
             return None

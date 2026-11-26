@@ -23,6 +23,8 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
+from voice_assistant.input_safety import finite_seconds
+
 STOP_RX = re.compile(r"^\W*(?:(?:hey\s+)?\w+\W+)?(stop|halt|freeze)\b", re.I)
 FAREWELL_RX = re.compile(
     r"^\W*(no|nope|nothing|no thanks?|no thank you|that'?s (all|it)|that is all|goodbye|good bye|bye"
@@ -55,7 +57,7 @@ class DialogLogic:
         self.wake_rx = re.compile(rf"\b(?:(?:hey|hi|hello|ok|okay)\s+)?(?:{words})\b\W*", re.I)
         self.greeting, self.capabilities = greeting, capabilities
         self.farewell, self.sleep_message = farewell, sleep_message
-        self.awake_timeout = awake_timeout
+        self.awake_timeout = finite_seconds(awake_timeout, 15.0)
         self.require_wake_word = require_wake_word
         self.awake = not require_wake_word
         self.awake_until = 0.0
@@ -119,6 +121,8 @@ class DialogLogic:
         return []
 
     def on_heard(self, text, now):
+        if not isinstance(text, str):
+            return []
         text = text.strip()
         if not text:
             return []
@@ -188,7 +192,7 @@ class DialogNode(Node):
         p = lambda n: self.get_parameter(n).value
         self.logic = DialogLogic(list(p("wake_words")), p("greeting"), p("capabilities"),
                                  p("farewell"), p("sleep_message"),
-                                 float(p("awake_timeout")), bool(p("require_wake_word")),
+                                 p("awake_timeout"), bool(p("require_wake_word")),
                                  float(p("wake_fuzzy")), list(p("fuzzy_words")), p("robot_name"),
                                  list(p("start_only_words")), p("wake_chime"), p("sleep_chime"),
                                  bool(p("intro_once")))

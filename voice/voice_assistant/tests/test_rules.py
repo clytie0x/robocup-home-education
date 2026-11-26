@@ -111,3 +111,11 @@ def test_other_sentences_with_a_colour_or_side_are_no_choice(sentence, action):
 
 def test_the_generic_launch_has_no_choice_answers():
     assert parser(task_words=False).parse("the blue one")[0] == "none"
+
+
+def test_empty_or_non_text_is_not_a_command():
+    p = parser(task_words=False)
+    for text in ("", "   ", None, 12):
+        action, params, reply = p.parse(text)
+        assert action == "none" and params == {}
+        assert reply.lower().startswith("sorry")

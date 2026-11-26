@@ -25,13 +25,13 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
 
+from voice_assistant.input_safety import accepted_command
+
 try:
     from so100_interfaces.action import Pick, Place
     from so100_interfaces.msg import ArmState
 except ImportError:          # package not built here yet -> node explains what to do
     Pick = Place = ArmState = None
-
-import json
 
 BASE_AXIS_Y = -0.0452        # SO-100: base rotation axis is at (x=0, y=-0.0452) in frame "base"
 
@@ -117,9 +117,11 @@ class ArmActionBridge(Node):
 
     # ---------------- commands ----------------
     def _on_cmd(self, msg: String):
-        try:
-            action = json.loads(msg.data).get("action")
-        except json.JSONDecodeError:
+        parsed = accepted_command(msg.data)
+        if parsed is None:
+            return
+        action, params = parsed
+        if params is None:
             return
         if action == "carry_bag":
             self._pick()

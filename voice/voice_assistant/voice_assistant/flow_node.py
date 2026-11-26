@@ -17,7 +17,8 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 
-from voice_assistant.flow_logic import FlowLogic
+from voice_assistant.flow_logic import FlowLogic, ready_to_start
+from voice_assistant.input_safety import object_from_json
 
 
 class FlowNode(Node):
@@ -33,10 +34,12 @@ class FlowNode(Node):
         self.declare_parameter("beatbox_file", "~/robot_voice/sounds/cat_beatbox.wav")
         self.declare_parameter("ask_follow", True)       # after picking up: ask "Should I follow you?" first
         self.declare_parameter("ask_follow_text", "I have your bag. Should I follow you?")
+        self.declare_parameter("speech_limit_s", 15.0)   # give up if /tts/speaking stays true this long
         p = lambda n: self.get_parameter(n).value
-        self.logic = FlowLogic(p("ask_text"), p("ready_text"), float(p("reask_s")), float(p("grab_timeout")),
-                               float(p("drop_timeout")), float(p("person_timeout")), bool(p("require_person")),
-                               p("beatbox_file"), bool(p("ask_follow")), str(p("ask_follow_text")))
+        self.logic = FlowLogic(p("ask_text"), p("ready_text"), p("reask_s"), p("grab_timeout"),
+                               p("drop_timeout"), p("person_timeout"), bool(p("require_person")),
+                               p("beatbox_file"), bool(p("ask_follow")), str(p("ask_follow_text")),
+                               p("speech_limit_s"))
 
         self.pub_text = self.create_publisher(String, "/speech/text", 10)
         self.pub_say = self.create_publisher(String, "/tts/say", 10)
@@ -52,7 +55,7 @@ class FlowNode(Node):
         # Start (= first "How can I help you?") only once tts_node says it can talk (/tts/ready, latched) plus a
         # short settle time; a message published the instant tts_node appears can be lost during discovery.
         self.declare_parameter("start_delay_s", 1.5)
-        self.start_delay = float(self.get_parameter("start_delay_s").value)
+        self.start_delay = self.get_parameter("start_delay_s").value
         self.tts_ready_at = None
         self.sub_seen_at = None
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
@@ -82,9 +85,8 @@ class FlowNode(Node):
         self.pub_text.publish(msg)                       # hand the sentence to the brain (rules / LLM)
 
     def _on_intent(self, msg: String):
-        try:
-            intent = json.loads(msg.data)
-        except json.JSONDecodeError:
+        intent = object_from_json(msg.data)
+        if intent is None:
             self.get_logger().warn(f"bad intent: {msg.data}")
             return
         self._emit(self.logic.on_intent(intent, time.time()))
@@ -108,9 +110,7 @@ class FlowNode(Node):
                 return
             if self.sub_seen_at is None:
                 self.sub_seen_at = now
-            ready = self.tts_ready_at is not None and now - self.tts_ready_at >= self.start_delay
-            old_tts = self.tts_ready_at is None and now - self.sub_seen_at >= 5.0   # tts_node without /tts/ready
-            if not (ready or old_tts):
+            if not ready_to_start(now, self.tts_ready_at, self.sub_seen_at, self.start_delay):
                 return
             self.started = True
             self._emit(self.logic.start(now))
