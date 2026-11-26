@@ -483,9 +483,11 @@ class ArmCommands:
             self.stopped = True
             self.log("console: stop")
             proc = self.bagpick
+            # /arm/stop before the signal. bagpick's finally puts rest_after_s back as soon as the
+            # process ends, and that thread can run before this one reaches stop if the signal goes first.
+            self.api.stop()
             if proc is not None:  # the answer does not wait for the signal steps
                 threading.Thread(target=self._stop_bagpick, args=(proc,), daemon=True).start()
-            self.api.stop()
             return {"ok": True, "error": None}
         if name in ("pick_bag", "drop_bag"):
             return self._bag_job(name, cmd)
