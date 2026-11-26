@@ -21,6 +21,16 @@ def raw_app(body=b"\x00" * 0x300, build=b"Vversion:1,build:abc1234#"):
     return bytes(raw)
 
 
+def app_of_size(size):
+    """An unsealed application of exactly `size` bytes, header still empty."""
+    raw = bytearray(size)
+    struct.pack_into("<II", raw, 0, 0x20005000, image.APP_BASE + 0x201)
+    struct.pack_into("<II", raw, 0x100, image.APP_MAGIC, 0)
+    text = b"Vversion:1,build:abc1234#"
+    raw[0x300:0x300 + len(text)] = text
+    return bytes(raw)
+
+
 class Image(unittest.TestCase):
     def test_seal_then_check(self):
         sealed = image.seal(raw_app() + b"\x01")  # odd length: padded to whole words
@@ -38,6 +48,18 @@ class Image(unittest.TestCase):
         self.assertIn("length", image.check(sealed[:-8]))
         self.assertIn("header", image.check(b"\xff" * 0x1000 + sealed))  # full.bin is not an app
         self.assertIn("header", image.check(b"\xff" * 0x200))  # erased / old firmware
+
+    def test_a_fitting_image_passes_and_one_past_the_flash_says_so(self):
+        # boot.c accepts length == space - 4 (the CRC fills the last word) and rejects
+        # anything longer. The longer file's header still matches its own length.
+        fits = image.seal(app_of_size(image.APP_SPACE - 4))
+        self.assertEqual(len(fits), image.APP_SPACE)
+        self.assertIsNone(image.check(fits))
+        past = image.seal(app_of_size(image.APP_SPACE))
+        self.assertEqual(len(past), image.APP_SPACE + 4)
+        problem = image.check(past)
+        self.assertIn("application space", problem)
+        self.assertNotIn("does not match the file", problem)
 
     def test_combine_puts_the_app_at_4_kib(self):
         sealed = image.seal(raw_app())
@@ -131,6 +153,17 @@ class Update(unittest.TestCase):
         chip = FakeChip(self.sealed)
         with self.assertRaisesRegex(update.Failed, "Nothing was written"):
             self.go(chip)
+        self.assertEqual(chip.commands, [])
+
+    def test_no_version_string_stops_before_the_port(self):
+        # check() accepts it (header, length, CRC). There is nothing for V# to match, so the
+        # port stays closed: a traceback here would hide "nothing was written".
+        open(self.path, "wb").write(image.seal(raw_app(build=b"\x00" * 8)))
+        chip = FakeChip(self.sealed)
+        with self.assertRaises(update.Failed) as caught:
+            self.go(chip)
+        self.assertIn("Nothing was written", str(caught.exception))
+        self.assertIn("version", str(caught.exception))
         self.assertEqual(chip.commands, [])
 
     def test_busy_port(self):

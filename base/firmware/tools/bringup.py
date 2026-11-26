@@ -80,11 +80,14 @@ def replies(base):
 
 
 def by_hand(base, wheel):
-    base.ask(b"Kbrake_at_zero=0#")  # coast, or the shorted motor fights the hand
-    before = base.encoders()
-    input(f"Turn the {wheel.upper()} wheel FORWARD about a quarter turn by hand, then press Enter ")
-    after = base.encoders()
-    base.ask(b"Kbrake_at_zero=1#")
+    try:
+        base.ask(b"Kbrake_at_zero=0#")  # coast, or the shorted motor fights the hand
+        before = base.encoders()
+        input(f"Turn the {wheel.upper()} wheel FORWARD about a quarter turn by hand, then press Enter ")
+        after = base.encoders()
+    finally:
+        # S# only brakes while brake_at_zero is 1. A bad reply or Ctrl-C used to leave the motors coasting.
+        base.ask(b"Kbrake_at_zero=1#")
     mine, other = (0, 1) if wheel == "left" else (1, 0)
     moved, still = after[mine] - before[mine], after[other] - before[other]
     ok = moved > QUARTER_TURN // 4 and abs(still) < QUARTER_TURN // 20
