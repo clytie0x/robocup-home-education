@@ -340,6 +340,56 @@ class Approach(unittest.TestCase):
         there = World([(1.6, 0.0)], operator=(2.6, 0.2), point=None)  # an operator who does not point: as before
         self.assertEqual(there.run(new_task("point"), seconds=bag.POINTING_S + 1).result["code"], "NOT_POINTED")
 
+    def test_camera_people_who_are_not_a_pointing_are_not_nobody(self):
+        # camera_pointing is None for two people and no LiDAR operator, and for a person whose keypoints
+        # were dropped. Both are still in the picture: wait the 20 s, do not say "I cannot see you" at 2 s.
+        class NoKeypoints:
+            pass
+
+        self.assertEqual(bag.camera_people(None), 0)
+        self.assertEqual(bag.camera_people(Answer(0.0, [NoKeypoints()])), 1)
+        self.assertEqual(bag.camera_people(Answer(0.0, [NoKeypoints(), NoKeypoints()])), 2)
+        for n in (1, 2):
+            task, t = new_task("point"), 0.0
+            while not task.done and t < bag.POINTING_S + 1:
+                task.step(bag.View(t, (0.0, 0.0, 0.0), seen=[(2.0, 0.0)], people=n))
+                t += 0.1
+            self.assertEqual(task.result["code"], "NOT_POINTED", n)
+            self.assertGreater(t, bag.NO_OPERATOR_S + 1)
+
+    def test_one_camera_person_seen_keeps_the_task_from_no_operator(self):
+        task = new_task("point")
+        task.step(bag.View(0.0, (0.0, 0.0, 0.0), seen=[(2.0, 0.0)], people=1))
+        t = 0.1
+        while not task.done and t < bag.POINTING_S + 1:
+            task.step(bag.View(t, (0.0, 0.0, 0.0), seen=[(2.0, 0.0)]))  # gone after that one frame
+            t += 0.1
+        self.assertEqual(task.result["code"], "NOT_POINTED")
+
+    def test_the_bag_step_passes_camera_people_the_pointing_could_not_use(self):
+        class Rec:
+            wants_pose = True
+
+            def step(self, view):
+                self.view = view
+                return (0.0, 0.0, None)
+
+        class Bare:
+            pass
+
+        task = Rec()
+        state = type("S", (), {})()
+        state.p = P
+        state.virtual = None
+        state.bag = task
+        state.bag_look = None
+        state.cable = type("C", (), {"holding": False, "lay": type("L", (), {"shapes": []})()})()
+        state.body = type("B", (), {"robot": type("R", (), {"max_speed": 0.08})()})()
+        seen = type("Seen", (), {"operator": None})()
+        run_follow._bag_step(state, 1.0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), seen, [],
+                             Answer(0.0, [Bare(), Bare()]), None, numpy.zeros((0, 2)))
+        self.assertEqual((task.view.people, task.view.found, task.view.operator), (2, None, None))
+
     def test_bag_near_waits_for_the_first_lidar_scan(self):
         # 2026-11-20 22:59: the console sent bag_near 0.3 s into the run, the LiDAR's first scan came at 0.6 s
         world = World([(1.0, 0.0)], operator=(-1.0, 1.0), point=None)

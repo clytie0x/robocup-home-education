@@ -543,7 +543,8 @@ def _bag_step(state, now, pose, believed, seen, sensed, answer, frame, points):
     boxes = [] if answer is None else [o.box for o in getattr(answer, "objects", [])]
     view = bag_module.View(
         now, pose, seen=scan_points(sensed, p), clusters=bag_module.lidar_clusters(sensed, p), operator=operator,
-        found=found, boxes=boxes, frame=(getattr(frame, "width", 320), getattr(frame, "height", 240)),
+        found=found, people=bag_module.camera_people(answer), boxes=boxes,
+        frame=(getattr(frame, "width", 320), getattr(frame, "height", 240)),
         virtual_bags=virtual_bags or (), lay=[geometry.odom_to_base((c.x, c.y), believed) for c in state.cable.lay.shapes],
         speed_cap=state.body.robot.max_speed, cable_holding=state.cable.holding, real=points,
         depth=getattr(frame, "depth", None))
