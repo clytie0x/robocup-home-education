@@ -75,6 +75,7 @@ FEW_SHOT = [
 # immediately, without waiting for (or trusting) the LLM.
 NEGATION = re.compile(r"\b(don'?t|do not|never|not|no)\b", re.I)
 from voice_assistant.rules import STOP_ALIKE, FUZZY_REPLY, fuzzy_command   # shared with the rule brain
+from voice_assistant.input_safety import llm_fields
 
 FAST_RULES = [
     ("stop", re.compile(r"^\W*(?:(?:hey\s+)?robot\W+|please\W+)*(stop|halt|freeze)\b", re.I),
@@ -204,7 +205,10 @@ class LlmNode(Node):
                 text = self.jobs.get(timeout=0.5)
             except queue.Empty:
                 continue
-            self._handle(text)
+            try:
+                self._handle(text)
+            except Exception as e:  # noqa: BLE001  a bad reply must not kill this thread
+                self.get_logger().error(f"LLM handle failed: {e}")
 
     def _handle(self, text: str):
         sys_msg = self.system_prompt + f"\nAllowed actions: {', '.join(self.actions)}."
@@ -230,12 +234,13 @@ class LlmNode(Node):
             self.get_logger().error(f"LLM request/parse failed: {e}")
             self._intent("none", {}, "Sorry, I didn't catch that.", text, "llm")
             return
-
-        reply = str(out.get("reply", "")).strip()
-        action = out.get("action", "none")
-        if action not in self.actions:
-            action = "none"
-        params = out.get("params") or {}
+        fields = llm_fields(out, self.actions)
+        if fields is None:
+            self.get_logger().error(f"LLM reply was not an object: {out!r}")
+            self._intent("none", {}, "Sorry, I didn't catch that.", text, "llm")
+            return
+        reply, action, params = fields
+        out = {"reply": reply, "action": action, "params": params}
         rx = ACTION_RX.get(action)
         if self.check_words and rx is not None and not rx.search(text):
             self.get_logger().info(f'(gated) LLM chose {action} but "{text}" has no {action} words -> none')

@@ -8,8 +8,6 @@ This is the place to connect the voice system to YOUR robot.
 
 Replace or extend `_dispatch()` for your robot. Keep the safety limits.
 """
-import json
-import math
 import time
 
 import rclpy
@@ -17,6 +15,8 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Empty, String
 from std_srvs.srv import Trigger
+
+from voice_assistant.input_safety import MotionLimits, accepted_command, plan_motion
 
 try:                                   # SO-100 arm state (optional: only if so100_interfaces is built here)
     from so100_interfaces.msg import ArmState
@@ -32,6 +32,8 @@ class CommandBridge(Node):
         self.declare_parameter("max_speed", 0.3)         # m/s safety clamp
         self.declare_parameter("turn_speed", 0.6)        # rad/s
         self.declare_parameter("max_distance", 2.0)      # m per voice command
+        self.declare_parameter("max_turn_deg", 360.0)    # one full circle; a bigger ask is cut down
+        self.declare_parameter("max_duration_s", 20.0)   # a tiny speed cannot drive for minutes
         self.declare_parameter("drop_topic", "/robot/drop_bag")    # std_msgs/Empty -> your gripper node
         self.declare_parameter("carry_topic", "/robot/carry_bag")  # std_msgs/Empty -> grab / hold the bag
         # False with arm:=actions: arm_action_bridge drives /arm/pick + /arm/place, so the old topics must stay
@@ -40,10 +42,8 @@ class CommandBridge(Node):
         self.declare_parameter("arm_stop_service", "/arm/stop")    # std_srvs/Trigger: "stop" also freezes the arm ('' = off)
 
         p = lambda n: self.get_parameter(n).value
-        self.default_speed = float(p("default_speed"))
-        self.max_speed = float(p("max_speed"))
-        self.turn_speed = float(p("turn_speed"))
-        self.max_distance = float(p("max_distance"))
+        self.limits = MotionLimits(p("default_speed"), p("max_speed"), p("turn_speed"),
+                                   p("max_distance"), p("max_turn_deg"), p("max_duration_s"))
 
         self.pub = self.create_publisher(Twist, p("cmd_vel_topic"), 10)
         # '' = do not publish (arm:=actions: arm_action_bridge talks to /arm/pick and /arm/place instead)
@@ -68,12 +68,15 @@ class CommandBridge(Node):
                                f'{"/robot/carry_bag, /robot/drop_bag" if self.pub_carry else "OFF - arm actions"})')
 
     def _on_cmd(self, msg: String):
-        try:
-            cmd = json.loads(msg.data)
-        except json.JSONDecodeError:
+        parsed = accepted_command(msg.data)
+        if parsed is None:
             self.get_logger().warn(f"bad command: {msg.data}")
             return
-        self._dispatch(cmd.get("action", "none"), cmd.get("params") or {})
+        action, params = parsed
+        if params is None:
+            self.get_logger().warn(f"ignored {action}: params are not an object")
+            return
+        self._dispatch(action, params)
 
     def _dispatch(self, action: str, prm: dict):
         t = Twist()
@@ -85,16 +88,18 @@ class CommandBridge(Node):
             self._state("stopped")
             return
 
-        if action in ("move_forward", "move_backward"):
-            speed = min(abs(float(prm.get("speed") or self.default_speed)), self.max_speed)
-            dist = min(abs(float(prm.get("distance") or 0.5)), self.max_distance)
-            t.linear.x = speed if action == "move_forward" else -speed
-            self._start(t, dist / speed, f"{action} {dist:.2f} m")
-        elif action == "turn":
-            ang = math.radians(float(prm.get("angle") or 90.0))
-            t.angular.z = math.copysign(self.turn_speed, ang)
-            self._start(t, abs(ang) / self.turn_speed, f"turning {math.degrees(ang):.0f} deg")
-        elif action == "carry_bag":
+        plan = plan_motion(action, prm, self.limits)
+        if action in ("move_forward", "move_backward", "turn"):
+            if plan is None:
+                self.get_logger().info(f"ignored action: {action} (bad or zero motion)")
+                return
+            linear, angular, duration, desc = plan
+            t.linear.x = linear
+            t.angular.z = angular
+            self._start(t, duration, desc)
+            return
+
+        if action == "carry_bag":
             # stop, then ask the gripper/servo node to grab / hold the bag
             self.until = 0.0
             self.pub.publish(Twist())

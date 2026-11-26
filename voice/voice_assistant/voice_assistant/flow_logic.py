@@ -23,9 +23,14 @@ Fixes vs. the original drawing
   2. picking bag + "drop the bag" / "stop" -> cancel -> LISTENING (not ERROR)
   3. ERROR always speaks first, then returns to LISTENING
   4. "stop" works in every state
-  5. timeouts when the robot never answers (grab 30 s / drop 20 s / person 5 s)
+  5. timeouts when the robot never answers (grab 30 s / drop 20 s / person 5 s).
+     A non-finite timeout uses that documented wait. Speech that starts and never ends
+     is given up after speech_limit_s, so a stuck /tts/speaking cannot hold the task.
 """
+import math
 import re
+
+from voice_assistant.input_safety import finite_seconds
 
 LISTENING, PICKING_BAG, ANNOUNCE_READY, FOLLOWING, DROPPING_BAG, ERROR, ASK_FOLLOW = (
     "listening", "picking_bag", "announce_ready", "following", "dropping_bag", "error", "ask_follow")
@@ -38,6 +43,25 @@ EVENT_ALIASES = {"drop_success": "drop_done", "grab_done": "grab_success", "pick
                  "pick_failed": "grab_failed", "person_seen": "see_person", "person_lost": "lost_person"}
 
 
+def _clock(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def ready_to_start(now, tts_ready_at, sub_seen_at, start_delay, fallback_wait=5.0):
+    """True once /tts/ready has been true for start_delay seconds.
+
+    A tts_node that never publishes /tts/ready is given fallback_wait (5 s) after the first subscriber,
+    which is the old behaviour. A non-finite start_delay uses 1.5 s instead of never starting.
+    """
+    if not _clock(now):
+        return False
+    delay = finite_seconds(start_delay, 1.5)
+    if _clock(tts_ready_at) and now - tts_ready_at >= delay:
+        return True
+    wait = finite_seconds(fallback_wait, 5.0, allow_zero=False)
+    return tts_ready_at is None and _clock(sub_seen_at) and now - sub_seen_at >= wait
+
+
 class FlowLogic:
     """Pure state machine (no ROS), unit-testable. Every method returns a list of outputs:
     ("say", text) | ("play", wav_path) | ("cmd", {"action":..., "params":{...}}) | ("state", name) | ("log", text)"""
@@ -45,10 +69,16 @@ class FlowLogic:
     def __init__(self, ask_text="How can I help you?", ready_text="I am ready to follow you.",
                  reask_s=10.0, grab_timeout=30.0, drop_timeout=20.0, person_timeout=5.0,
                  require_person=True, beatbox_file="", ask_follow=True,
-                 ask_follow_text="I have your bag. Should I follow you?"):
+                 ask_follow_text="I have your bag. Should I follow you?", speech_limit_s=15.0):
         self.ask_text, self.ready_text = ask_text, ready_text
-        self.reask_s, self.grab_timeout, self.drop_timeout = reask_s, grab_timeout, drop_timeout
-        self.person_timeout, self.require_person = person_timeout, require_person
+        # NaN / inf never satisfies `now > deadline`, so the task would wait forever.
+        # A negative wait is not "off" either: both use the documented default. 0 still means already due.
+        self.reask_s = finite_seconds(reask_s, 10.0)
+        self.grab_timeout = finite_seconds(grab_timeout, 30.0)
+        self.drop_timeout = finite_seconds(drop_timeout, 20.0)
+        self.person_timeout = finite_seconds(person_timeout, 5.0)
+        self.speech_limit_s = finite_seconds(speech_limit_s, 15.0, allow_zero=False)
+        self.require_person = require_person
         self.beatbox_file = beatbox_file
         self.ask_follow, self.ask_follow_text = ask_follow, ask_follow_text
         self.asks = 0                 # how many times ASK_FOLLOW asked without an answer
@@ -104,16 +134,33 @@ class FlowLogic:
         return [("state", LISTENING)] + self._say(text, now)
 
     def _speech_done(self, now):
-        """True once after the speech we asked for has finished (or TTS never started within 4 s)."""
+        """True once after the speech we asked for has finished.
+
+        TTS never started within 4 s, or it started and is still going after speech_limit_s:
+        don't hang in announce / ask-follow / error.
+        """
         if not self.await_speech:
             return False
         if self.speech_started and not self.speaking:
+            self.await_speech = False
+            return True
+        if self.speech_started and now - self.speech_sent_at > self.speech_limit_s:
             self.await_speech = False
             return True
         if not self.speech_started and now - self.speech_sent_at > 4.0:   # TTS dead / muted: don't hang
             self.await_speech = False
             return True
         return False
+
+    def _overdue(self, now):
+        """True when the state's deadline has passed. A deadline of 0.0 is a real time, not 'off'.
+        A non-finite deadline is treated as already passed so a bad clock cannot wait forever."""
+        d = self.deadline
+        if d is None or isinstance(d, bool) or not isinstance(d, (int, float)):
+            return False
+        if not math.isfinite(d):
+            return True
+        return now > d
 
     def _stop(self, now, reply="Stopping."):
         out = [("cmd", {"action": "stop", "params": {}})]
@@ -127,7 +174,8 @@ class FlowLogic:
         return self._goto(LISTENING, now)
 
     def on_heard(self, text, now):
-        self.last_activity = now            # someone is talking: don't nag
+        if isinstance(text, str) and text.strip():
+            self.last_activity = now        # someone is talking: don't nag. Blank text is not that.
         return []
 
     def on_speaking(self, speaking, now):
@@ -140,6 +188,8 @@ class FlowLogic:
 
     def on_event(self, ev, now):
         # "name" or "name|ERROR_CODE|English message" (from arm_action_bridge / SO-100 API)
+        if not isinstance(ev, str) or not ev.strip():
+            return [("log", "(ignored empty event)")]
         parts = ev.strip().split("|", 2)
         ev = EVENT_ALIASES.get(parts[0].strip().lower(), parts[0].strip().lower())
         code = parts[1].strip().upper() if len(parts) > 1 else ""
@@ -198,12 +248,12 @@ class FlowLogic:
             elif not self.await_speech and self.deadline is not None:
                 if self.person_visible:
                     return self._goto(FOLLOWING, now)
-                if now > self.deadline:
+                if self._overdue(now):
                     return self._goto(ERROR, now, "I can't see you. Please stand in front of me.")
         elif s == ASK_FOLLOW:
             if done:
                 self.deadline = now + self.reask_s               # wait for "yes" / "no"
-            elif not self.await_speech and self.deadline is not None and now > self.deadline:
+            elif not self.await_speech and self._overdue(now):
                 if self.asks < 2:
                     self.asks += 1
                     self.deadline = None
@@ -212,16 +262,28 @@ class FlowLogic:
         elif s == ERROR:
             if done:
                 return self._goto(LISTENING, now)
-        elif s == PICKING_BAG and self.deadline and now > self.deadline:
+        elif s == PICKING_BAG and self._overdue(now):
             return self._goto(ERROR, now, "Sorry, I could not pick up the bag.")
-        elif s == DROPPING_BAG and self.deadline and now > self.deadline:
+        elif s == DROPPING_BAG and self._overdue(now):
             return self._goto(ERROR, now, "Sorry, I could not drop the bag.")
         return []
 
     def on_intent(self, intent, now):
-        a = intent.get("action", "none")
-        params = intent.get("params") or {}
-        reply = intent.get("reply") or ""
+        if not isinstance(intent, dict):
+            return [("log", "(ignored intent: not an object)")]
+        a = intent.get("action") or "none"
+        if not isinstance(a, str) or not a.strip():
+            a = "none"
+        else:
+            a = a.strip()
+        raw = intent.get("params", None)
+        if raw is None or a == "stop":
+            params = {} if not isinstance(raw, dict) else raw
+        elif isinstance(raw, dict):
+            params = raw
+        else:
+            return [("log", "(ignored intent: params are not an object)")]
+        reply = intent.get("reply") if isinstance(intent.get("reply"), str) else ""
         s = self.state
         self.last_activity = now
 

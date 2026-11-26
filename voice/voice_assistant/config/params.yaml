@@ -31,6 +31,7 @@ flow_node:                     # task state machine (no wake word). Robot events
     grab_timeout: 30.0         # no grab_success within this -> error (SO-100 pick takes 12-18 s)
     drop_timeout: 20.0         # no drop_done within this -> error (SO-100 place takes 8-12 s)
     person_timeout: 5.0        # no see_person after "I am ready to follow you" -> error
+    speech_limit_s: 15.0       # /tts/speaking stuck true this long -> treat the line as finished
     require_person: true       # false = start following without waiting for see_person
 
 dialog_node:                   # NOT launched any more (wake-word version, kept for reference)
@@ -90,6 +91,8 @@ command_bridge_node:
     max_speed: 0.3
     turn_speed: 0.6
     max_distance: 2.0
+    max_turn_deg: 360.0        # one full circle; "turn 3600 degrees" is cut to this
+    max_duration_s: 20.0       # a very small speed cannot keep the wheels moving for minutes
     arm_stop_service: "/arm/stop"   # "stop" also freezes the SO-100 arm ("" = wheels only)
     drop_topic: "/robot/drop_bag"    # std_msgs/Empty sent when the user says "drop the bag"
     carry_topic: "/robot/carry_bag"  # std_msgs/Empty sent when the user says "carry this bag"
