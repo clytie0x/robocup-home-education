@@ -76,6 +76,29 @@ class Rules(unittest.TestCase):
         base = bringup.Base(FakePort([e(5000, 5000, 40, 40), e(5400, 5400, 40, 40)]))
         self.assertFalse(bringup.stops(base, "stop", base.stop))
 
+    def test_forward_by_hand_needs_that_wheel_to_count_up(self):
+        prompts = []
+        self.addCleanup(setattr, bringup, "input", input)
+        bringup.input = prompts.append
+        step = bringup.QUARTER_TURN // 4
+        base = bringup.Base(FakePort([e(100, 50), e(100 + step + 1, 50 + 10)]))
+        self.assertTrue(bringup.by_hand(base, "left"))
+        self.assertIn("LEFT", prompts[0])
+        self.assertEqual(base.port.written[-1], b"Kbrake_at_zero=1#")
+        base = bringup.Base(FakePort([e(5000, 50), e(5000 - step - 1, 50)]))
+        self.assertFalse(bringup.by_hand(base, "left"))  # forward is positive on the reported counts
+        base = bringup.Base(FakePort([e(0, 0), e(10, step + 1)]))
+        self.assertTrue(bringup.by_hand(base, "right"))
+        base = bringup.Base(FakePort([e(0, 0), e(bringup.QUARTER_TURN // 20, step + 1)]))
+        self.assertFalse(bringup.by_hand(base, "right"))  # the other wheel moved too
+
+    def test_a_bad_count_reply_still_puts_the_brake_back(self):
+        base = bringup.Base(FakePort(["junk#"]))
+        with self.assertRaises(ValueError):
+            bringup.by_hand(base, "left")
+        self.assertEqual(base.port.written[0], b"Kbrake_at_zero=0#")
+        self.assertEqual(base.port.written[-1], b"Kbrake_at_zero=1#")
+
 
 if __name__ == "__main__":
     unittest.main()

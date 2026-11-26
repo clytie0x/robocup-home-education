@@ -39,8 +39,12 @@ def check(image):
     magic, length = struct.unpack_from("<II", image, HEADER_OFFSET)
     if magic != APP_MAGIC:
         return "no application header at +0x100 (full.bin or the old firmware? those need the jumper)"
-    if length + 4 != len(image) or length + 4 > APP_SPACE:
+    if length + 4 != len(image):
         return f"length {length} in the header does not match the file ({len(image)} bytes)"
+    # length matches this file. The CRC word after it still has to fit in the application space
+    # (boot.c: length > space - 4). Saying "does not match" here sent people looking for a bad copy.
+    if length + 4 > APP_SPACE:
+        return f"image is {length + 4} bytes with its CRC, past the {APP_SPACE}-byte application space"
     sp, reset = struct.unpack_from("<II", image, 0)
     if not (RAM_START < sp <= RAM_END and sp % 4 == 0):
         return f"stack pointer {sp:#x} is not in RAM"

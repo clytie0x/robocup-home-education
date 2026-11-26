@@ -141,7 +141,10 @@ def update(path, port=PORT, rescue=False, run=subprocess.run, connect=open_port,
     problem = image.check(data)
     if problem:
         fail(f"{path}: {problem}", UNTOUCHED)
-    want = image.version(data)
+    try:
+        want = image.version(data)  # check() does not look for V#; nothing to compare after the write
+    except ValueError as error:
+        fail(f"{path}: {error}", UNTOUCHED)
     print(f"{path}: {len(data)} bytes, will report {want}")
 
     busy, who = port_busy(port, run)
