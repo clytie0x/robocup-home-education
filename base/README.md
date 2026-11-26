@@ -26,10 +26,11 @@ Docs:
 Run the tests with pytest from each suite's folder, as CI does (`.github/workflows/ci.yml`, job `robot`):
 
 ```
-pip install -r base/pi/requirements.txt -r base/jetson/requirements.txt pytest
+pip install -r base/pi/requirements.txt -r base/jetson/requirements.txt scipy pytest
 cd base/pi && python -m pytest -q
 ```
 
 The same in base/jetson, base/firmware/tools, base/pc/virtual_operator and voice/voice_assistant,
-`python -m pytest -q test` in arm/so100_driver (with scipy), `make test` in base/firmware for the C code. On the Pi, without pytest:
+`python -m pytest -q test` in arm/so100_driver, `make test` in base/firmware for the C code.
+scipy is required for the jetson camera fit and the arm tests. On the Pi, without pytest:
 `.venv/bin/python -m unittest discover -s tests`.
