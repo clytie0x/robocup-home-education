@@ -2390,11 +2390,12 @@ def handler_for(console):
             elif path in ("/api/stop", "/api/arm/stop", "/api/jetson/stop-all"):
                 console.note("info", "%s ok" % path)
             session = self.headers.get("X-HMC-Session") or ""
-            try:
-                self._send(code, answer)
-            finally:  # the page's session token only in part: it also picks the run's heartbeat
-                console.log_command(program[:64] if program is not None else "page" + (" " + session[:6] if session else ""),
-                                    self.client_address[0], path, self.body, code, answer)
+            # Before the answer. The handler thread used to write the line after _send, so the client's
+            # next request (or GET /api/commands) could run first and miss the line, or pass it.
+            # The session token is only kept in part: it also picks the run's heartbeat.
+            console.log_command(program[:64] if program is not None else "page" + (" " + session[:6] if session else ""),
+                                self.client_address[0], path, self.body, code, answer)
+            self._send(code, answer)
 
         def _post(self, path, program):
             try:

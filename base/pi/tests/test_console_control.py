@@ -95,8 +95,9 @@ class ControlTest(unittest.TestCase):
             conn.close()
 
     def log(self, n=None):
-        """The command lines written so far. The server writes a line after it has sent the answer, so a read
-        in the same moment can miss the last POST. `n` waits (briefly) until that many lines are there."""
+        """The command lines written so far. The server writes a line before it sends the answer, so a
+        request() that has returned already has its line. `n` still waits briefly for a read that races
+        a handler which has not answered yet."""
         path = Path(self.tmp.name) / "console" / "commands.jsonl"
         deadline = time.monotonic() + 1.0
         while True:
@@ -123,9 +124,9 @@ class ControlTest(unittest.TestCase):
         self.request("/api/run/command", {"command": "follow", "pin": "2468"}, page=False, program="xohm@10.0.0.9")
         self.request("/api/task/start", {"drive": True}, pin="0000")
         self.request("/api/stop", {})
-        text = (Path(self.tmp.name) / "console" / "commands.jsonl").read_text(encoding="utf-8")
-        self.assertNotIn("2468", text)
         first, wrong, stop = self.log(3)
+        for line in (first, wrong, stop):  # not the raw line: its "time" can contain the digits 2468
+            self.assertNotIn("2468", json.dumps({k: v for k, v in line.items() if k != "time"}))
         self.assertEqual((first["client"], first["address"], first["path"], first["code"]),
                          ("xohm@10.0.0.9", "127.0.0.1", "/api/run/command", 409))
         self.assertEqual(first["body"], {"command": "follow"})
