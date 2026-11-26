@@ -28,7 +28,7 @@ returns through the usual safety stop and the cable rules, and tells it what rea
 Results (status and record "bag"): reached with the bag centre measured after the last stop (code OK from the
 LiDAR, ESTIMATED from odometry when the LiDAR never saw it), with "top" (m, "top_by" depth or rgb) and "yaw" (rad,
 base frame at the end, the long axis as a line in [-pi/2, pi/2)) when the look measured them, or failed with
-NOT_POINTED, NO_BAG, BLOCKED, TIMEOUT, LOST_BAG or CANCELLED (a wait, resume, follow or return came).
+NOT_POINTED, NO_OPERATOR, NO_BAG, BLOCKED, TIMEOUT, LOST_BAG or CANCELLED (a wait, resume, follow or return came).
 
 The bag centre: the LiDAR sees the side facing it; the centre is taken BAG_HALF_DEPTH behind the middle of those
 points, along the ray from the laser (an assumption: a gift bag about 0.10 m deep side-on; measure it).
@@ -141,18 +141,21 @@ class View:
     pose: odometry (x, y, yaw). seen: (N, 2) points the senses read (with --virtual-operator: its legs and bags
     too), for finding and tracking. real: the real points (and depth points) the stop decides on; seen when not
     given. clusters: LiDAR cluster centres (the side facing the laser) from that scan.
-    operator: (x, y) or None. found: a pointing.Pointing this cycle, or None. boxes: bag boxes [x1, y1, x2, y2]
+    operator: (x, y) or None. found: a pointing.Pointing this cycle, or None. people: camera people this
+    cycle (a person the detector saw, even with no keypoints and even when two of them leave found empty).
+    boxes: bag boxes [x1, y1, x2, y2]
     in the frame's pixels, frame (width, height). virtual_bags: centres of the virtual bags. lay: (x, y) circles of
     the cable on the floor. speed_cap: m/s the body may drive this cycle. cable_holding: the cable rules stopped
     the last turn. depth: the camera's depth image of this cycle, or None."""
 
     def __init__(self, now, pose, seen=None, clusters=(), operator=None, found=None, boxes=(), frame=(320, 240),
-                 virtual_bags=(), lay=(), speed_cap=FAR_SPEED, cable_holding=False, real=None, depth=None):
+                 virtual_bags=(), lay=(), speed_cap=FAR_SPEED, cable_holding=False, real=None, depth=None, people=0):
         self.now, self.pose = now, tuple(pose)
         self.depth = depth  # this cycle's depth image (uint16 mm) or None: only the look reads it
         self.seen = numpy.zeros((0, 2)) if seen is None else numpy.asarray(seen, dtype=float).reshape(-1, 2)
         self.real = self.seen if real is None else numpy.asarray(real, dtype=float).reshape(-1, 2)
         self.clusters, self.operator, self.found = [tuple(c) for c in clusters], operator, found
+        self.people = people  # camera people this cycle; 0 also when this view has no camera answer
         self.boxes, self.frame = list(boxes), tuple(frame)
         self.virtual_bags, self.lay = [tuple(b) for b in virtual_bags], [tuple(c) for c in lay]
         self.speed_cap, self.cable_holding = speed_cap, cable_holding
@@ -224,6 +227,13 @@ class Unranged:
 
     def __init__(self, kp, bearing_deg, frame):
         self.kp, self.bearing_deg, self.frame = kp, bearing_deg, frame
+
+
+def camera_people(answer):
+    """How many people the camera reported. None (no answer yet) is 0. A person with no keypoints still counts:
+    camera_pointing returns None for them, and for two people when there is no LiDAR operator, but they are there."""
+    people = () if answer is None else (getattr(answer, "people", None) or ())
+    return len(people)
 
 
 def camera_pointing(answer, operator, frame, p):
@@ -410,7 +420,9 @@ class BagTask:
             return self._again(view)
         if self.mode == "near":
             return self._ahead(view)
-        if view.operator is not None or view.found is not None:
+        # found is a pointing, not "a person is in the picture": no keypoints, or two people and no LiDAR
+        # operator, leaves it empty while the camera still sees someone. That is not nobody.
+        if view.operator is not None or view.found is not None or view.people:
             self.someone = True
         elif not self.someone and now - self.t0 >= NO_OPERATOR_S:  # nobody to point: the flow asks, not 20 s of waiting
             return self._fail("NO_OPERATOR", "nobody to point: no operator track and no person for the camera")
