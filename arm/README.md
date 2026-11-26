@@ -14,7 +14,7 @@
 
 ## ติดตั้งบน Jetson (ROS 2 Jazzy) จาก repo นี้
 ```
-git clone -b arm-system https://github.com/clytie0x/robocup-home-education.git ~/robocup-home-education
+git clone https://github.com/clytie0x/robocup-home-education.git ~/robocup-home-education
 mkdir -p ~/so100_ws/src && cd ~/so100_ws/src
 ln -s ~/robocup-home-education/arm/so100_driver ~/robocup-home-education/arm/so100_interfaces \
       ~/robocup-home-education/arm/so100_moveit_config .
@@ -205,5 +205,5 @@ ros2 run so100_driver calibrate flip <joint>       # ถ้าข้อไหน
 ค่าเก็บที่ `~/so100_ws/calibration.json` (มีสำรอง `.bak`)
 
 ## ทดสอบ
-- `python -m unittest discover -s test` ใน `so100_driver` (ไม่ต้องมีแขน)
+- `python -m pytest -q test` ใน `so100_driver` (ไม่ต้องมีแขน ต้องมี numpy, scipy, opencv-python-headless และ pytest)
 - `ros2 run so100_driver motion_test` ชุดท่าใหญ่ + วัดการสั่น (แขนจะขยับ! เคลียร์พื้นที่ ~45 ซม.)
