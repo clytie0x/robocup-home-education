@@ -9,7 +9,8 @@ fisheye when that file says dist_model "fisheye".
   1. where (before EVERY try: a miss or a drop may have pushed the bag): the arm goes to LOOK if it would be
      in the picture, then the bag's centre comes from the image (locate). Two edge estimates, the rim at
      bag_cam_rim_h and the foot on the floor, are reconciled (reconcile_edges). The camera centre is used
-     when its confidence is at least CONF_MIN; otherwise the goal's x, y are used. A camera centre more
+     when its confidence is at least CONF_MIN; otherwise the goal's x, y are used: always with only the rim
+     in the picture, or a blob that is not a bag detection (trusted). A camera centre more
      than LIDAR_DISAGREE from the Pi LiDAR goal, or a rim wider than WIDTH_MAX, is looked at once more and
      then the LiDAR goal is used (the source is recorded). A bag that is not standing, or whose rim is not
      about bag_cam_width wide, is still an error. No bag in the picture: the goal on the first try, an error
@@ -68,6 +69,22 @@ TRIES = ((0.0, -60), (0.015, -60), (-0.015, -60), (0.03, -50))
 EDGE_AGREE = 0.04
 EDGE_LOST = 0.12
 CONF_MIN = 0.55
+# The rim alone is under CONF_MIN, so it never replaces the goal's x, y. The steep camera (pitch 47.7 deg, 2026-11-20)
+# sees the far rim above the near one and the rim height is assumed: on a 36 cm bag whose foot projected to 0.29 m
+# it put the front wall 0.52 m out (frames 2026-11-20 22:43 and 22:47; the true distance was not taped).
+RIM_ONLY_CONF = 0.50
+# Blob sources that are not a bag detection. The floor-difference mask takes lamp glare on the floor for the bag: one
+# scene gave 0.52 and 0.73 m (2026-11-20 22:47), and its outline does not move when the bag is lifted.
+UNTRUSTED_SOURCES = ("floor-diff",)
+# m: a foot this much farther than the blob's top rim is a piece of the bag, not its foot (locate)
+FOOT_PAST_TOP = 0.02
+# the front rim found inside an open bag's outline (bag_vision.front_rim) with the rim height measured: over
+# CONF_MIN, so it replaces the goal (2026-11-27: 19.1 to 19.2 cm for bags taped at 20, 23.9 to 24.3 at 25). With
+# the rim height only assumed it stays RIM_ONLY_CONF (front_rim_trust): 2 cm of height is about 1 cm of distance.
+FRONT_RIM_CONF = 0.65
+# m, the gap middle's reach from which bag_cam_close_bias applies. It was measured at about 0.31 m; at 0.255 m it made
+# the close 2.1 cm short and 1.8 cm low (pick 2026-11-20 22:53).
+BIAS_FROM_R = 0.28
 # arm pose for looking: folded REST pose stays completely out of the front camera's picture (0 pts in view;
 # READY puts 55 pts in view), so the arm never lifts high just to look at the bag
 LOOK = {"shoulder_pan": 0.0, "shoulder_lift": 0.04, "elbow_flex": -0.04, "wrist_flex": 0.0, "wrist_roll": 0.0}
@@ -131,6 +148,24 @@ def spot_left(start, now, floor=None, min_overlap=0.5, same_rows=25.0, min_floor
     w = max(1.0, start["x1"] - start["x0"])
     overlap = (min(start["x1"], now["x1"]) - max(start["x0"], now["x0"])) / w
     return not (overlap > min_overlap and abs(now["y0"] - start["y0"]) < same_rows)
+
+
+def trusted(blob):
+    """True when the blob is a bag detection (not the floor-difference fallback). None is not."""
+    return blob is not None and blob.get("source") not in UNTRUSTED_SOURCES
+
+
+def front_rim_trust(loc, rim_from):
+    """loc with a front-rim reading kept at RIM_ONLY_CONF unless the rim height was measured (rim_height)."""
+    if loc is not None and loc.get("rim_edge") == "front" and rim_from != "measured":
+        loc = dict(loc, confidence=RIM_ONLY_CONF)
+    return loc
+
+
+def close_bias(r, bias, r_from=BIAS_FROM_R):
+    """(forward, up) added to the close pose asked of the arm at reach r: the measured bias, (0, 0) nearer than it
+    was measured."""
+    return (float(bias[0]), float(bias[1])) if r >= r_from else (0.0, 0.0)
 
 
 def tip_overshoot(kin, path):
@@ -480,8 +515,8 @@ def reconcile_edges(centre_top, centre_bottom, agree=EDGE_AGREE, lost=EDGE_LOST)
     method:
       neither: no centre, confidence 0.
       foot only: the foot, confidence 0.80 (the floor height is known).
-      rim only: the rim, confidence 0.70 (usual: the foot is out of the frame; the rim height is assumed,
-                and 0.70 stays above CONF_MIN so a clear rim is still used).
+      rim only: the rim, confidence RIM_ONLY_CONF (usual: the foot is out of the frame; the rim height is assumed
+                and the edge may be the far rim, so it stays under CONF_MIN: the goal's x, y are used).
       both, spread <= agree: the mean. Confidence 0.98 - 0.20 * (spread / agree).
       both, spread > agree: the foot. Confidence 0.75 * max(0, 1 - (spread - agree) / (lost - agree)),
                 so 0 once the estimates are `lost` metres apart (8 cm is already under CONF_MIN).
@@ -496,7 +531,7 @@ def reconcile_edges(centre_top, centre_bottom, agree=EDGE_AGREE, lost=EDGE_LOST)
     if top is None:
         return {"centre": bot, "method": "foot", "spread": 0.0, "confidence": 0.80}
     if bot is None:
-        return {"centre": top, "method": "rim", "spread": 0.0, "confidence": 0.70}
+        return {"centre": top, "method": "rim", "spread": 0.0, "confidence": RIM_ONLY_CONF}
     spread = math.hypot(top[0] - bot[0], top[1] - bot[1])
     if spread <= agree:
         ratio = (spread / agree) if agree else 0.0
@@ -579,7 +614,7 @@ def _handle_left_at(cam, hx, hy, pan, half_depth, centre):
 def locate(cam, b, pan, half_depth, top_h, foot=None, lying_h=0.12):
     """The bag's centre from a front-camera blob (bag_vision.find_bag), the bag standing and facing the arm.
     pan: the arm's pan axis (x, y) in the camera's robot frame. Two ways, then reconcile_edges:
-      bottom: foot = image row of the front wall's foot on the floor (bag_vision.foot_y; z = 0, known):
+      bottom: foot = image row of the front wall's foot on the floor (bag_vision.foot_row; z = 0, known):
               centre half_depth beyond it.
       top:    the blob's top edge (median over its columns) is the front wall's rim, top_h above the floor
               (the camera looks steeply down on the front wall): centre half_depth beyond it. The usual case
@@ -594,6 +629,10 @@ def locate(cam, b, pan, half_depth, top_h, foot=None, lying_h=0.12):
     # every column's top (a gripper in front of the rim still hides those columns), across the middle
     t = b.get("all_tops", b["tops"])
     rim_u, rim_v = (b["x0"] + b["x1"]) / 2, float(np.median(t[:, 1]))
+    fr = b.get("front_rim") if isinstance(b.get("front_rim"), dict) else None
+    front = fr is not None and fr.get("kind") == "open"
+    if front:                                  # the front wall's rim, not the outline's top (bag_vision.front_rim)
+        rim_v = float(fr["row"])
     handle = b.get("handle") if isinstance(b.get("handle"), dict) else None
     hx = _num(None if handle is None else handle.get("cx"))
     hy = _num(None if handle is None else handle.get("cy"))
@@ -617,14 +656,33 @@ def locate(cam, b, pan, half_depth, top_h, foot=None, lying_h=0.12):
                 s = (rel @ n - (cam.pos[:2] - pan) @ n) / (d[:2] @ n)
                 out["top_seen_h"] = float(cam.pos[2] + s * d[2])
                 out["standing"] = out["top_seen_h"] > lying_h
-    edges = reconcile_edges(out.get("centre_top"), out.get("centre_bottom"))
+    # The foot, when found, is the distance: the floor height is known. The blob's top is the far (back) rim
+    # of an open bag seen from above, plus the segmenter's overshoot: on the robot it read 10 to 12 cm beyond
+    # the front wall of bags taped at 20 and 25 cm (2026-11-24) and 6 to 14 cm beyond a 29 cm bag's foot
+    # (2026-11-27), so averaging the two, or fading the foot out when they disagree, threw the foot away.
+    # The rim stays for the standing check, the width and the log (spread). A foot farther than the blob's top
+    # is not a foot: the blob is a piece of the bag (the arm across it; 41.8 cm read for a bag at 25, the
+    # piece's top at 25.8), so then only the rim is left.
+    top, bot = out.get("centre_top"), out.get("centre_bottom")
+    if top is not None and bot is not None and bot[0] > top[0] + FOOT_PAST_TOP:
+        out["foot_dropped"] = float(bot[0])
+        out.pop("centre_bottom")
+    if out.get("centre_bottom") is not None:
+        edges = reconcile_edges(None, out["centre_bottom"])
+        if out.get("centre_top") is not None:
+            edges["spread"] = float(np.hypot(*(np.asarray(out["centre_top"]) - np.asarray(out["centre_bottom"]))))
+    else:
+        edges = reconcile_edges(out.get("centre_top"), None)
+        if front and edges["centre"] is not None:
+            edges = dict(edges, method="front rim", confidence=FRONT_RIM_CONF)
+            out["rim_edge"] = "front"           # front_rim_trust reads this (a handle renames the method)
     if edges["centre"] is None:
         return None
     if hx is not None and hy is not None:
         left = _handle_left_at(cam, hx, hy, pan, half_depth, edges["centre"])
         if left is not None:
             edges = {"centre": (float(edges["centre"][0]), left), "method": "handle",
-                     "spread": edges["spread"], "confidence": max(edges["confidence"], 0.70)}
+                     "spread": edges["spread"], "confidence": edges["confidence"]}
             out["aim"] = "handle"
     out["centre"] = edges["centre"]
     out["from"] = edges["method"]
@@ -1035,8 +1093,9 @@ class CameraBag:
     def place_left(self, start):
         """With the arm at the side: True = the place the bag stood is empty (the bag is in the jaws), False =
         the bag is still there (it slipped out), None = cannot tell (no calibration, no picture before or now,
-        or the arm still in the picture). A missing picture is no evidence either way."""
-        if start is None:
+        or the arm still in the picture). A missing picture is no evidence either way, and neither is a blob that
+        is not a bag detection (trusted): False opens the jaws, so glare must not say "still there"."""
+        if not trusted(start):
             return None
         try:
             cam = FrontCamera.load(str(self.p("bag_front_cam_file")))
@@ -1050,6 +1109,8 @@ class CameraBag:
             return None
         model, path = self.vision_model()
         now = bv.find_bag(im, model=model, tuned_engine=path)
+        if not trusted(now):
+            now = None
         floor = None
         if now is None and start.get("frame") is not None:
             floor = bv.spot_floor(start["frame"], im, (start["x0"], start["y0"], start["x1"], start["y1"]))
@@ -1093,7 +1154,11 @@ class CameraBag:
         b = bv.find_bag(im, model=model, tuned_engine=path)
         if b is not None:
             b["frame"] = im                       # the hold check compares the bag's spot with this picture
+            b["front_rim"] = bv.front_rim(im, b)
         if b is None or cam is None:
+            return b, None
+        if not trusted(b):
+            self.n.say("กล้องหน้าหาถุงด้วยโมเดลไม่เจอ (เห็นแค่สีต่างจากพื้น): ไม่ใช้ระยะจากกล้อง")
             return b, None
         cam = cam.for_image(im)
         if cam is None:
@@ -1101,7 +1166,7 @@ class CameraBag:
             return b, None
         px, py = (float(v) for v in self.p("bag_front_cam_pan"))
         rim = float(self.p("bag_cam_rim_h") if top_h is None else top_h)
-        loc = locate(cam, b, (px, py), float(self.p("bag_cam_half_depth")), rim, foot=bv.foot_y(im, b))
+        loc = locate(cam, b, (px, py), float(self.p("bag_cam_half_depth")), rim, foot=bv.foot_row(im, b))
         if loc is not None:
             loc["rim_h"] = rim
         return b, loc
@@ -1147,13 +1212,14 @@ class CameraBag:
             if b2 is not None:
                 seen = b2
         want = float(self.p("bag_cam_width"))
+        looks = [front_rim_trust(one, rim_from) for one in looks]
         decision = resolve_grasp(looks, goal, want)
         out["seen"] = seen
         loc = decision["loc"]
         if loc is None and not decision["relook"]:
             self._note_measure(None, goal, "request", 0.0, None)
             self._tag_measure(False)
-            if not first:
+            if not first and (seen is None or trusted(seen)):
                 raise Failed("ดูกล้องหน้าใหม่แล้วไม่เห็นถุง (ถุงหลุดไปไหน หรือมีอะไรบัง): หยุด", "MISSED")
             self.n.say("กล้องหน้าหาถุงไม่ได้: ใช้ตำแหน่งจากคำสั่งอย่างเดียว")
         elif decision["failure"] == "fallen":
@@ -1360,7 +1426,6 @@ class CameraBag:
                 raise Failed(
                     "move closer: the bag front is %.2f m from the arm base; the arm reaches %.2f m "
                     "(ขยับหุ่นเข้าใกล้ถุง)" % (r_front, reach), "UNREACHABLE")
-            bias_f, bias_up = (float(v) for v in self.p("bag_cam_close_bias"))
             plan, last = None, None
             for which in WALLS:
                 wall = front + (2.0 * half * normal if which == "back" else 0.0)
@@ -1371,6 +1436,7 @@ class CameraBag:
                     continue
                 self.theta = theta
                 r = r_wall + dt
+                bias_f, bias_up = close_bias(r, self.p("bag_cam_close_bias"))
                 # where the gap middle should end up (log), then the pose asked of the arm: the measured bias of the
                 # close pose taken off (bag_cam_close_bias)
                 want = (r * math.cos(theta), r * math.sin(theta), close_z - self.n.table_z)
