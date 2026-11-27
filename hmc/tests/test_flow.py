@@ -742,3 +742,24 @@ def test_take_the_bag_while_following_does_not_stop_the_robot(tmp_path):
     out = flow.on_heard("I'm going to take the bag.", 2.0)
     assert flow.state == "FOLLOWING"
     assert actions(out) == []
+
+
+def test_classify_a_longer_answer_at_the_car():
+    # 2026-11-27 17:35: "yes, we are at the car now." and "Hello, we are the car now." were not taken
+    assert classify("yes, we are at the car now.")[0] in ("yes", "arrive")
+    assert classify("Hello, we are the car now.")[0] == "arrive"
+    assert classify("we're at the car")[0] == "arrive"
+    assert classify("Yes, this is it.")[0] == "yes"
+    assert classify("No, not yet, keep going.")[0] in ("no", "resume")
+    assert classify("I think yes is a word people say a lot")[0] is None
+
+
+def test_yes_we_are_at_the_car_now_stores_the_car(tmp_path):
+    flow = begin(tmp_path, "long-yes")
+    follow(flow)
+    flow.on_event({"name": "pose", "x": 4.0, "y": 1.5, "heading": 0.4}, 3.0)
+    flow.on_heard("stop", 3.1)
+    assert flow.state == "CONFIRM_CAR"
+    flow.on_heard("yes, we are at the car now.", 3.2)
+    assert flow.state == "AT_CAR"
+    assert flow.car_pose == {"x": 4.0, "y": 1.5, "heading": 0.4}
