@@ -209,6 +209,7 @@ body.job { --stopbar: 62px; } /* STOP stays on the phone bar whether or not a jo
 .bank-name { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
 .bank-motor { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line2); }
 .bank-use { font-size: 16px; font-weight: 500; margin: 2px 0 4px; }
+#tab-data #bank-panel { max-width: 520px; margin-bottom: 14px; } /* the battery panel heads Engineer > ข้อมูล */
 .reading { display: grid; grid-template-columns: 58px 1fr; gap: 0; margin: 0; min-width: 0; }
 .reading input {
   width: 100%; min-width: 0; height: 44px; border: 1.5px solid var(--ink); border-right: 0; border-radius: 0;
