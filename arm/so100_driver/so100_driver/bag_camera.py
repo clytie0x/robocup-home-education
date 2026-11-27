@@ -1094,18 +1094,26 @@ class CameraBag:
         """With the arm at the side: True = the place the bag stood is empty (the bag is in the jaws), False =
         the bag is still there (it slipped out), None = cannot tell (no calibration, no picture before or now,
         or the arm still in the picture). A missing picture is no evidence either way, and neither is a blob that
-        is not a bag detection (trusted): False opens the jaws, so glare must not say "still there"."""
+        is not a bag detection (trusted): False opens the jaws, so glare must not say "still there".
+        self.hold_why says why a None could not tell. The picture is kept on the trial ("hold") even with the arm
+        in it: in both slips on the robot (2026-11-24) the arm at the carry pose was in the picture, so the check
+        never ran, and a check that can tell a held bag from a dropped one needs such pictures of both."""
+        self.hold_why = ""
         if not trusted(start):
+            self.hold_why = "ภาพก่อนหยิบไม่ใช่ถุงที่โมเดลหาเจอ"
             return None
         try:
             cam = FrontCamera.load(str(self.p("bag_front_cam_file")))
         except (OSError, ValueError, KeyError, TypeError):
-            return None
-        if self.in_view(cam, self.n.joints):
+            self.hold_why = "ไม่มีค่าคาลิเบรตกล้องหน้า"
             return None
         time.sleep(0.4)
-        im = self.web()
+        im = self._keep_frame("hold", self.web())
+        if self.in_view(cam, self.n.joints):
+            self.hold_why = "แขนท่าถือถุงบังภาพกล้องหน้า"
+            return None
         if im is None:
+            self.hold_why = "ไม่มีภาพจากกล้องหน้า"
             return None
         model, path = self.vision_model()
         now = bv.find_bag(im, model=model, tuned_engine=path)
@@ -1115,7 +1123,10 @@ class CameraBag:
         if now is None and start.get("frame") is not None:
             floor = bv.spot_floor(start["frame"], im, (start["x0"], start["y0"], start["x1"], start["y1"]))
             self._note_spot("front", floor)
-        return spot_left(start, now, floor)
+        left = spot_left(start, now, floor)
+        if left is None:
+            self.hold_why = "กล้องไม่เห็นถุง และที่เดิมยังดูไม่ออกว่าว่าง"
+        return left
 
     def _note_spot(self, camera, floor):
         """Keep a spot_floor share on the trial JSON (the robot test compares it with the pictures)."""
@@ -1554,12 +1565,17 @@ class CameraBag:
                 self.n.gripper(0.9, "อ้าก้าม")
                 continue
             verified = held["verified"] = bool(gone)
-            note = "" if verified else " (ยังไม่ได้ยืนยันด้วยกล้อง)"
-            text = f"ถือถุงไว้ด้านข้าง ปลายก้ามสูงจากพื้น {top - self.n.table_z:.2f} ม. (ลองที่ {i + 1}){note}"
+            if verified:
+                text = f"ถือถุงไว้ด้านข้าง ปลายก้ามสูงจากพื้น {top - self.n.table_z:.2f} ม. (ลองที่ {i + 1})"
+            else:
+                # not "holding the bag": on the robot (2026-11-24) both picks that said so had dropped it
+                text = (f"หนีบแล้วยกขึ้น ปลายก้ามสูงจากพื้น {top - self.n.table_z:.2f} ม. แต่ยืนยันไม่ได้ว่าถุงติดก้ามมา "
+                        f"({getattr(self, 'hold_why', '') or 'กล้องตรวจไม่ได้'}) (ลองที่ {i + 1})")
             code = "SUCCESS" if verified else "SUCCESS_UNVERIFIED"
             trial = getattr(self, "_trial", None)
             if trial is not None:
                 trial["result_code"] = code
+                trial["hold_check"] = "verified" if verified else (getattr(self, "hold_why", "") or "unknown")
             if code == "SUCCESS":
                 return text
             return (code, text)

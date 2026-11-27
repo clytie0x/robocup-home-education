@@ -157,8 +157,8 @@ class HoldCheckFromTheSide(unittest.TestCase):
         self.assertTrue(bc.spot_left(self.START, {"x0": 500.0, "x1": 640.0, "y0": 300.0}))   # seen elsewhere
         self.assertTrue(bc.spot_left(self.START, {"x0": 230.0, "x1": 440.0, "y0": 330.0}))   # up in the picture
 
-    def check(self, frame, blob, in_view=False, start=None):
-        cam = bc.CameraBag(NS(kin=NS(heading0=0), joints={}))
+    def check(self, frame, blob, in_view=False, start=None, cam=None):
+        cam = cam or bc.CameraBag(NS(kin=NS(heading0=0), joints={}))
         cam.p = lambda key: "calibration"
         cam.in_view = lambda *a: in_view
         cam.web = lambda: frame
@@ -177,6 +177,18 @@ class HoldCheckFromTheSide(unittest.TestCase):
 
     def test_arm_still_in_the_picture_cannot_tell(self):
         self.assertIsNone(self.check(object(), None, in_view=True))
+
+    def test_the_picture_at_the_carry_pose_is_kept_and_the_reason_given(self):
+        """Both slips on the robot (2026-11-24): the arm at the carry pose was in the picture. The frame is kept anyway
+        (for a check that can tell held from dropped) and the result says why it could not tell."""
+        cam = bc.CameraBag(NS(kin=NS(heading0=0), joints={}))
+        kept = []
+        cam._keep_frame = lambda kind, image: kept.append(kind) or image
+        self.assertIsNone(self.check(np.zeros((480, 640, 3), np.uint8), None, in_view=True, cam=cam))
+        self.assertEqual(kept, ["hold"])
+        self.assertIn("บัง", cam.hold_why)
+        self.assertIsNone(self.check(object(), None, start={"source": "floor-diff", "x0": 0.0, "x1": 1.0}, cam=cam))
+        self.assertIn("ไม่ใช่ถุง", cam.hold_why)
 
     def test_place_empty_and_bag_still_there(self):
         before = np.zeros((480, 640, 3), np.uint8)
