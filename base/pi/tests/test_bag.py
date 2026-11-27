@@ -329,6 +329,32 @@ class Approach(unittest.TestCase):
             task = World(bags, operator=(-1.0, 1.0), point=None).run(new_task("near"))
             self.assertEqual(task.result["code"], "NO_BAG", bags)
 
+    def test_a_spoken_side_takes_that_bag_when_no_pointing_is_seen(self):
+        # 2026-11-27 19:09: "take the left bag" twice, the camera saw no steady pointing, and no bag was taken
+        bags = [(2.0, 0.8), (2.0, -0.2)]
+        for side, i in (("left", 1), ("right", 0)):  # the operator faces the robot: their left is the robot's right
+            world = World(bags, operator=(2.6, 0.3), point=None)
+            task = world.run(new_task(side=side))
+            self.assertEqual(task.chosen["side"], side)
+            self.assertEqual(task.chosen["say"], "I will take the %s bag, on your %s." % (side, side))
+            self.assertIsNone(task.chosen["point"])
+            self.assert_reached(task, world, i)
+            self.assertLess(task.chosen_at, bag.POINTING_S)  # it did not wait out the whole pointing time
+
+    def test_a_steady_pointing_still_wins_over_the_spoken_side(self):
+        bags = [(2.0, 0.8), (2.0, -0.2)]
+        world = World(bags, operator=(2.6, 0.3), point=bags[0])  # points at the operator's right bag
+        task = world.run(new_task(side="left"))
+        self.assertEqual(task.chosen["side"], "right")
+        self.assert_reached(task, world, 0)
+
+    def test_a_spoken_side_with_one_bag_takes_it_and_with_none_is_no_bag(self):
+        world = World([(1.8, 0.3)], operator=(2.6, 0.3), point=None)
+        task = world.run(new_task(side="right"))
+        self.assert_reached(task, world)
+        task = World([], operator=(2.6, 0.3), point=None).run(new_task(side="left"))
+        self.assertEqual(task.result["code"], "NO_BAG")
+
     def test_a_point_task_with_nobody_to_point_ends_at_once_as_no_operator(self):
         # 2026-11-19: 13 of 30 NOT_POINTED tasks began with the follower unlocked and nobody for the camera: 20 s lost
         task, t = new_task("point"), 0.0
@@ -796,6 +822,19 @@ class Phase(Logged):
         self.jetson.cmd("follow")
         self.tick(2)
         self.assertEqual(self.state.phase, "follow")
+
+    def test_bag_left_and_bag_right_start_a_point_task_with_that_side(self):
+        for command, side in (("bag_left", "left"), ("bag_right", "right")):
+            self.jetson.cmd("follow")
+            self.tick(2)
+            self.jetson.cmd("wait")
+            self.tick(2)
+            self.jetson.cmd(command)
+            record = self.tick()
+            self.assertEqual(record["phase"], "bag", command)
+            self.assertEqual((self.state.bag.mode, self.state.bag.side), ("point", side))
+            self.jetson.cmd("wait")  # cancels the task: back to FOLLOW, held
+            self.tick(2)
 
     def test_bag_near_is_refused_while_following_not_held(self):
         self.jetson.cmd("follow")

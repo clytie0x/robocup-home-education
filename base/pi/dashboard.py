@@ -43,7 +43,7 @@ PORT = ports.DASHBOARD
 PAGE = Path(__file__).resolve().parent / "dashboard.html"
 # the task buttons: the --remote client's commands but stop and ping ("bag": the virtual operator's word for the
 # flow's find_bag, run_follow's BAG phase; all three bag commands: the console's step commands)
-COMMANDS = ("follow", "wait", "resume", "return", "bag", "bag_again", "bag_near")
+COMMANDS = ("follow", "wait", "resume", "return", "bag", "bag_again", "bag_near", "bag_left", "bag_right")
 COMMANDS_KEPT = 10  # presses kept while nobody takes them (run_follow waiting for Enter): the newest
 CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS"}  # reading only
 CONSOLE_HEADER = "X-HMC-Console"  # a custom header: a page of another site cannot send it without a CORS yes

@@ -17,10 +17,11 @@ still until resume, follow or return. The way back starts where follow came.
 BAG (--remote): the client's "bag" while it holds the robot with wait in FOLLOW (at the car) finds the bag the
 operator points at and drives up to it until the arm reaches it (bag.py); "bag_again" measures and approaches
 the last bag once more; "bag_near" goes to the nearest bag in front, nobody points, also from IDLE (a step test
-from the console). The status line carries "bag": its id, state, the chosen bag and the result; the
-record "bag" is the chosen bag in the odometry frame (the PC's virtual operator app shows it). Wait, resume,
-follow or return cancel it; the drive counts as path for the way back. Then the phase it came from: FOLLOW,
-still waiting, or IDLE.
+from the console); "bag_left" / "bag_right" are "bag" with the operator's spoken side ("take the left bag"): the
+pointed bag when a steady pointing is seen, else after bag.SIDE_WAIT_S the bag on that side.
+The status line carries "bag": its id, state, the chosen bag and the result; the record "bag" is the chosen bag
+in the odometry frame (the PC's virtual operator app shows it). Wait, resume, follow or return cancel it; the
+drive counts as path for the way back. Then the phase it came from: FOLLOW, still waiting, or IDLE.
 
 The dashboard's task buttons (Follow, Wait, Resume, Go back) work when voice or the Jetson is down:
 with --remote they are taken as the client's commands, without it Go back is Enter and Wait holds
@@ -160,7 +161,9 @@ LOG_ROOT = Path(__file__).resolve().parent / "logs"  # on the Pi: ~/hmc-base/log
 FOLLOW, RETURN, DONE = "follow", "return", "done"  # the phases of a run
 IDLE = "idle"  # --remote only: before the client's follow; the wheels stay stopped
 BAG = "bag"  # --remote only: from FOLLOW held by the client's wait, up to the pointed bag (bag.py), then FOLLOW again
-BAG_COMMANDS = {"bag": "point", "bag_again": "again", "bag_near": "near"}  # command -> bag.BagTask mode
+BAG_COMMANDS = {"bag": "point", "bag_again": "again", "bag_near": "near",  # command -> bag.BagTask mode
+                "bag_left": "point", "bag_right": "point"}
+BAG_SIDES = {"bag_left": "left", "bag_right": "right"}  # the operator's spoken side: that bag when no pointing is seen
 STATUS_EVERY = 0.2  # s; --remote status lines at most 5 Hz (and after each command)
 REMOTE_SILENCE = 2.0  # s without a command line from the --remote client: hold still until resume, follow or return
 REFUSED_IDLE = {"return": "not following yet", "stop": "idle: nothing to stop"}  # --remote commands IDLE answers with an error
@@ -511,9 +514,10 @@ def _bag_refused(state, cmd):
 def _start_bag(state, now, cmd):
     state.bag_seq += 1
     state.bag = bag_module.BagTask(state.p, now, state.bag_seq, BAG_COMMANDS[cmd], last=state.bag_odom, look=True,
-                                   rgb=state.bag_look is not None)
+                                   rgb=state.bag_look is not None, side=BAG_SIDES.get(cmd))
     state.bag_from, state.phase = state.phase, BAG
-    state.log.write({"time": now, "bag": "start", "mode": state.bag.mode, "seq": state.bag_seq})
+    state.log.write(dict({"time": now, "bag": "start", "mode": state.bag.mode, "seq": state.bag_seq},
+                         **({"side": state.bag.side} if state.bag.side else {})))
 
 
 def _end_bag(state, now, by=None):

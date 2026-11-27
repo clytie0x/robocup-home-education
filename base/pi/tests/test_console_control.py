@@ -191,10 +191,10 @@ class ControlTest(unittest.TestCase):
     def test_the_bag_commands_go_to_the_run(self):
         self.console.fetch = run = FakeRun()
         self.jobs.running = {"kind": "task", "label": "Drive task"}
-        for command in ("bag", "bag_again", "bag_near"):
+        for command in ("bag", "bag_again", "bag_near", "bag_left", "bag_right"):
             self.assertEqual(self.request("/api/run/command", {"command": command})[0], 200, command)
         self.assertEqual(self.request("/api/run/command", {"command": "bag_far"})[0], 400)
-        self.assertEqual(run.commands, ["bag", "bag_again", "bag_near"])
+        self.assertEqual(run.commands, ["bag", "bag_again", "bag_near", "bag_left", "bag_right"])
 
     def test_pick_and_drop_at_a_given_point_wait_for_the_whole_bag_job(self):
         pick = {"cmd": "pick_bag", "x": 0.31, "y": 0.01, "top": 0.27, "yaw": 0.4}

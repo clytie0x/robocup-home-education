@@ -463,6 +463,16 @@ class RelayTest(unittest.TestCase):
         self.wait_until(lambda: "Please walk slowly, at about 0.06 metres per second, so I can follow you."
                         in self.flow.says(), "the pace said after the lock")
 
+    def test_take_the_left_bag_sends_the_side_to_the_bag_task(self):
+        # 2026-11-27 19:09: the side never reached the Pi, and the fallback's bag_again failed at once 3 times
+        self.start()
+        for path, key, value in (("hear", "text", "follow me"), ("event", "event", "locked"), ("hear", "text", "stop"),
+                                 ("hear", "text", "yes"), ("hear", "text", "take the left bag")):
+            code, raw = self.request("/api/mission/" + path, {key: value}, pin="2468")
+            self.assertEqual(code, 200, raw)
+        self.assertEqual(self.state(), "POINTING")
+        self.assertEqual(self.run.commands[-1], "bag_left")
+
     def test_a_missed_pick_measures_the_bag_again(self):
         self.flow.arm_answer = (409, {"ok": False, "error": "MISSED: closed on air", "code": "MISSED",
                                       "message": "closed on air"})
