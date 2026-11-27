@@ -35,6 +35,7 @@ HANDOVER_S = 30.0
 DROP_S = 60.0
 LINK_GRACE_S = 4.0
 LINK_ASKS = 2  # spoken refusals while the base link is unknown or down; then the reason sticks
+AT_CAR_SAY = "Please point at the bag and say take the left bag or take the right bag."
 PAUSE_ASK_S = 20.0  # a wait on the way back never resumes by itself
 
 # The spine the console shows as step i of N. LOST_SEARCH shares FOLLOWING;
@@ -335,6 +336,13 @@ _WORDS = (
     ("wait", re.compile(r"\bwait\b")),
 )
 _SHORT = 3
+# "take the left bag", "pick up the bag on the right", "grab the right one", "take the bag": the operator at the
+# car choosing the bag (2026-11-27 16:51 "Take the bag." three times was not a command). A verb, then the bag
+# word later in the same clause; a side anywhere in that clause. Any length: the verb and the bag word together
+# are the command, so it is not left to the short-sentence rule. "take it back" stays "back".
+_TAKE = re.compile(r"\b(take|pick|grab|carry|bring)\b")
+_TAKE_WHAT = re.compile(r"\b(bag|bags|one|it)\b")
+_SIDE = re.compile(r"\b(left|right)\b")
 _PI_END = (
     ("ODOM_STALE", ("odometry", "odom")),
     ("WHEEL_FAULT_02", ("fault 02", "fault 2")),
@@ -347,7 +355,7 @@ _PI_END = (
 
 
 def classify(text):
-    """follow, arrive, yes, no, side, back, resume, done, wait, or None.
+    """follow, arrive, yes, no, side, take, back, resume, done, wait, or None.
 
     left/right, yes/no and wait count only in a short sentence, so a long
     remark does not steer the task. "here" alone is not an arrival.
@@ -356,6 +364,9 @@ def classify(text):
     if not low:
         return None, ""
     short = len(re.findall(r"[a-z']+", low)) <= _SHORT
+    take = _take(low)
+    if take is not None:
+        return "take", take
     for kind, rx in _WORDS:
         if kind in ("side", "yes", "no", "wait", "done") and not short and kind != "done":
             # "done"/"ready" may be short only; a long "ready" sentence is not a command
@@ -369,6 +380,21 @@ def classify(text):
             extra = match.group(1) if kind == "side" and match.lastindex else ""
             return kind, extra
     return None, ""
+
+
+def _take(low):
+    """The side ("left", "right" or "") of a "take the ... bag" clause, or None when there is none."""
+    if dict(_WORDS)["back"].search(low):
+        return None
+    for clause in _CLAUSE.split(low):
+        verb = _TAKE.search(clause)
+        if verb is None or _NEG.search(clause[:verb.start()]):
+            continue
+        if _TAKE_WHAT.search(clause, verb.end()) is None:
+            continue
+        side = _SIDE.search(clause)
+        return side.group(1) if side else ""
+    return None
 
 
 def code_from_pi_end(text):
@@ -755,6 +781,13 @@ class HmcFlow:
         if state == "FOLLOWING" and kind == "back":
             return self._enter("RETURNING", now, say="I will go back to the start now.",
                                cmds=[{"action": "go_back", "params": {}}])
+        if state == "CONFIRM_CAR" and kind == "take":
+            # "take the left bag" answers "Are we at the car?": store the car, then look (on that side)
+            return self._store_car(now, say=False) + self._point(now, extra or self.side)
+        if state in ("AT_CAR", "POINTING") and kind == "take":
+            if state == "POINTING" and not extra:
+                return [("log", "(take: already looking for the bag)")]
+            return self._point(now, extra or self.side)
         if state == "CONFIRM_CAR":
             if kind in ("yes", "arrive", "done"):
                 return self._store_car(now)
@@ -792,11 +825,11 @@ class HmcFlow:
         return self._enter("CONFIRM_CAR", now, say="Are we at the car?",
                            cmds=[{"action": "wait", "params": {}}])
 
-    def _store_car(self, now):
+    def _store_car(self, now, say=True):
         self.car_pose = dict(self.pose) if self.pose else {"x": None, "y": None, "heading": None}
         self._log("car_pose", "CONFIRM_CAR", detail=json.dumps(self.car_pose), visible=True)
         return self._enter("AT_CAR", now,
-                           say="Please point at the bag. You can also say left or right.")
+                           say=AT_CAR_SAY if say else None)
 
     def _block_without_link(self, detail):
         """None when the base link is known up. Otherwise no follow_me and no find_bag.
@@ -1126,7 +1159,7 @@ class HmcFlow:
             return [("say", "Are we at the car?")]
         if state == "AT_CAR" and now - self.last_prompt >= REASK_S:
             self.last_prompt = now
-            self.last_say = "Please point at the bag. You can also say left or right."
+            self.last_say = AT_CAR_SAY
             return [("say", self.last_say)]
         if state == "RETURNING" and self.paused and not self.pause_asked \
                 and now - self.paused_at >= PAUSE_ASK_S:
