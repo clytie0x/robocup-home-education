@@ -326,7 +326,9 @@ _CLAUSE = re.compile(r"[,.!?;]+")
 _WORDS = (
     ("side", re.compile(r"\b(left|right)\b")),
     ("arrive", re.compile(r"\b(stop|halt|freeze|stay)\b|\bthis is (the|my|your) car\b|\bwe'?re here\b"
-                          r"|\bwe are here\b|\bhere we are\b")),
+                          r"|\bwe are here\b|\bhere we are\b"
+                          # "yes, we are at the car now", "we're at the car", and Whisper's "we are the car now"
+                          r"|\bwe(?:'re| are) (?:now )?(?:at )?(?:the|my|your) car\b")),
     ("yes", re.compile(r"\b(yes|yeah|yep|correct|we are)\b")),
     ("no", re.compile(r"\b(no|nope|not yet)\b")),
     ("follow", re.compile(r"\bfollow\b|\bcome with me\b")),
@@ -379,6 +381,13 @@ def classify(text):
                 continue
             extra = match.group(1) if kind == "side" and match.lastindex else ""
             return kind, extra
+    if not short:
+        # a short yes / no that opens a longer sentence ("Yes, this is it.", "No, not yet, keep going.") is the answer
+        first = _CLAUSE.split(low)[0].strip()
+        if first and len(re.findall(r"[a-z']+", first)) <= _SHORT:
+            for kind, rx in _WORDS:
+                if kind in ("yes", "no") and rx.search(first):
+                    return kind, ""
     return None, ""
 
 
