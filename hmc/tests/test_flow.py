@@ -677,3 +677,68 @@ def test_return_budget_ends_a_return_that_never_arrives(tmp_path):
     flow.on_tick(LIMIT_S + 180.0)
     assert flow.state == "ABORTED"
     assert flow.reason["code"] == "TIME_LIMIT"
+
+
+def test_classify_take_the_bag_with_or_without_a_side():
+    # 2026-11-27 16:51: "Take the bag." three times at the car, and the robot kept waiting
+    assert classify("Take the bag.") == ("take", "")
+    assert classify("take the left bag") == ("take", "left")
+    assert classify("Take the right bag, please.") == ("take", "right")
+    assert classify("pick up the bag on the left") == ("take", "left")
+    assert classify("grab the right one") == ("take", "right")
+    assert classify("pick it up") == ("take", "")
+    assert classify("Take a seat, okay?")[0] != "take"
+    assert classify("take it back")[0] == "back"
+    assert classify("don't take the left bag")[0] != "take"
+
+
+def test_take_the_left_bag_at_the_car_starts_the_search_on_that_side(tmp_path):
+    flow = begin(tmp_path, "take-left")
+    follow(flow)
+    to_car(flow)
+    out = flow.on_heard("take the left bag", 4.0)
+    assert flow.state == "POINTING"
+    assert flow.side == "left"
+    assert actions(out) == ["find_bag"]
+    assert [item["params"] for kind, item in out if kind == "cmd"] == [{"side": "left"}]
+
+
+def test_take_the_bag_at_the_car_starts_the_search(tmp_path):
+    flow = begin(tmp_path, "take-plain")
+    follow(flow)
+    to_car(flow)
+    out = flow.on_heard("Take the bag.", 4.0)
+    assert flow.state == "POINTING"
+    assert actions(out) == ["find_bag"]
+
+
+def test_take_the_right_bag_answers_are_we_at_the_car(tmp_path):
+    flow = begin(tmp_path, "take-confirm")
+    follow(flow)
+    flow.on_event({"name": "pose", "x": 4.0, "y": 1.5, "heading": 0.4}, 3.0)
+    flow.on_heard("this is the car", 3.1)
+    assert flow.state == "CONFIRM_CAR"
+    out = flow.on_heard("take the right bag", 3.2)
+    assert flow.car_pose == {"x": 4.0, "y": 1.5, "heading": 0.4}
+    assert flow.state == "POINTING"
+    assert flow.side == "right"
+    assert actions(out) == ["find_bag"]
+
+
+def test_a_new_side_while_searching_looks_again_there(tmp_path):
+    flow = begin(tmp_path, "take-switch")
+    follow(flow)
+    to_car(flow)
+    flow.on_heard("take the left bag", 4.0)
+    out = flow.on_heard("no, take the right bag", 5.0)
+    assert flow.state == "POINTING"
+    assert flow.side == "right"
+    assert [item["params"] for kind, item in out if kind == "cmd"] == [{"side": "right"}]
+
+
+def test_take_the_bag_while_following_does_not_stop_the_robot(tmp_path):
+    flow = begin(tmp_path, "take-following")
+    follow(flow)
+    out = flow.on_heard("I'm going to take the bag.", 2.0)
+    assert flow.state == "FOLLOWING"
+    assert actions(out) == []
