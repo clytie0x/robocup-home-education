@@ -182,37 +182,6 @@
             <div class="ph">Pi<span class="num">ทุก 1 s</span></div>
             <div id="pi-rows" class="rows"></div>
           </div>
-          <div class="panel dpanel" id="bank-panel">
-            <div class="ph">แบต<span class="num">ประมาณ</span></div>
-            <div class="bank">
-              <div class="bank-name">power bank (Pi)</div>
-              <div class="bank-top"><b class="num" id="bank-pct">-</b><span class="num" id="bank-range"></span></div>
-              <div class="bank-kv">
-                <div><span>ตั้งแต่ชาร์จเต็ม</span><b class="num" id="bank-hours">-</b></div>
-                <div><span>ขับไปแล้ว</span><b class="num" id="bank-drive">-</b></div>
-              </div>
-              <div class="fault" id="bank-warn" hidden>
-                <div class="h"><svg width="16" height="16"><use href="#i-warn"/></svg><span id="bank-warn-head">แบตใกล้หมด</span></div>
-                <div class="act">ต่ำกว่า 30% แล้ว ชาร์จ power bank ก่อน ถ้าแบตหมด Pi จะดับ</div>
-              </div>
-              <p class="note" id="bank-note"></p>
-              <div class="bank-actions">
-                <button type="button" class="btn" id="btn-bank-full">ชาร์จเต็มแล้ว</button>
-                <form class="reading" id="bank-form">
-                  <input type="number" id="bank-input" min="0" max="100" step="1" inputmode="numeric" placeholder="%" aria-label="เปอร์เซ็นต์ที่จอแบต">
-                  <button type="submit" class="btn">กรอกค่าจากจอ</button>
-                </form>
-              </div>
-              <div class="bank-motor">
-                <div class="bank-name">แบต 21V (มอเตอร์)</div>
-                <p class="bank-use num" id="motor-use">-</p>
-                <p class="note" id="motor-note"></p>
-                <div class="bank-actions">
-                  <button type="button" class="btn" id="btn-motor-full">ชาร์จเต็มแล้ว</button>
-                </div>
-              </div>
-            </div>
-          </div>
         </div>
       </div>
     </section>
@@ -273,6 +242,37 @@
 
     <!-- Data -->
     <section class="tab" id="tab-data" hidden>
+      <div class="panel dpanel" id="bank-panel">
+        <div class="ph">แบต<span class="num">ประมาณ</span></div>
+        <div class="bank">
+          <div class="bank-name">power bank (Pi)</div>
+          <div class="bank-top"><b class="num" id="bank-pct">-</b><span class="num" id="bank-range"></span></div>
+          <div class="bank-kv">
+            <div><span>ตั้งแต่ชาร์จเต็ม</span><b class="num" id="bank-hours">-</b></div>
+            <div><span>ขับไปแล้ว</span><b class="num" id="bank-drive">-</b></div>
+          </div>
+          <div class="fault" id="bank-warn" hidden>
+            <div class="h"><svg width="16" height="16"><use href="#i-warn"/></svg><span id="bank-warn-head">แบตใกล้หมด</span></div>
+            <div class="act">ต่ำกว่า 30% แล้ว ชาร์จ power bank ก่อน ถ้าแบตหมด Pi จะดับ</div>
+          </div>
+          <p class="note" id="bank-note"></p>
+          <div class="bank-actions">
+            <button type="button" class="btn" id="btn-bank-full">ชาร์จเต็มแล้ว</button>
+            <form class="reading" id="bank-form">
+              <input type="number" id="bank-input" min="0" max="100" step="1" inputmode="numeric" placeholder="%" aria-label="เปอร์เซ็นต์ที่จอแบต">
+              <button type="submit" class="btn">กรอกค่าจากจอ</button>
+            </form>
+          </div>
+          <div class="bank-motor">
+            <div class="bank-name">แบต 21V (มอเตอร์)</div>
+            <p class="bank-use num" id="motor-use">-</p>
+            <p class="note" id="motor-note"></p>
+            <div class="bank-actions">
+              <button type="button" class="btn" id="btn-motor-full">ชาร์จเต็มแล้ว</button>
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="range" id="range">
         <button type="button" data-range="hour">1 ชม.</button>
         <button type="button" data-range="today" class="on">วันนี้</button>
@@ -403,7 +403,7 @@
         <div class="panel">
           <div class="ph">ลำดับปกติ</div>
           <ol class="steps">
-            <li>ชาร์จพาวเวอร์แบงก์ (จ่ายไฟ Pi) และแบต 21V (จ่ายไฟมอเตอร์) ให้เต็มก่อน แล้วกด <b>ชาร์จเต็มแล้ว</b> ของแต่ละก้อนที่ Engineer</li>
+            <li>ชาร์จพาวเวอร์แบงก์ (จ่ายไฟ Pi) และแบต 21V (จ่ายไฟมอเตอร์) ให้เต็มก่อน แล้วกด <b>ชาร์จเต็มแล้ว</b> ของแต่ละก้อนที่ Engineer &rsaquo; ข้อมูล</li>
             <li>อยู่ที่ <b>Operate</b> ดูแถบไฟ ต้องไม่มีจุดแดง และคำว่าสถานะไม่ใช่ "ยังไม่พร้อม" ก่อนเริ่มงานจริง</li>
             <li>กด <b>ทดสอบล้อ</b> (หุ่นเดินหน้า 4 ซม.) ต้องได้ผ่าน</li>
             <li>กด <b>เปิดโปรแกรมหุ่น</b> รอจนไฟ Jetson เป็นครบ 8 โปรแกรม (detector, whisper, voice, bridge, armstack, webcam, arm, flow)</li>
