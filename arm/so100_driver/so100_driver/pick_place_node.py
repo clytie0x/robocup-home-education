@@ -135,8 +135,10 @@ class PickPlace(Node):
         # bag finder: 'coco' is the COCO YOLO11-seg engine (backpack, handbag, suitcase) plus the
         # floor-difference and HSV fallbacks. 'tuned' reads class 0 = bag and class 1 = handle from
         # bag_tuned_engine and leaves the fallbacks off. A missing or empty file stays on coco.
-        self.declare_parameter("bag_model", "coco")
-        self.declare_parameter("bag_tuned_engine", "~/hmc-follow/models/bag11s-seg-v2_480x640.engine")
+        # 'tuned' since 2026-11-27: on this camera coco scored 0.00 to 0.06 on the blue and the pink bag (needs
+        # 0.12) and bag11n-seg-v3 0.53 to 0.83. v2 was never on the Jetson, so 'tuned' had fallen back to coco.
+        self.declare_parameter("bag_model", "tuned")
+        self.declare_parameter("bag_tuned_engine", "~/hmc-follow/models/bag11n-seg-v3_480x640.engine")
         self.declare_parameter("bag_cam_url", "http://localhost:8082/snap.jpg")    # front webcam (webcam_view.py)
         # Xtion MJPEG on the base Pi. BAG_XTION_URL overrides this. The LAN cable (10.0.0.1) answers in
         # about a millisecond; the Wi-Fi address times out for ~5 s, twice, on every pick when Wi-Fi is down.
@@ -145,9 +147,11 @@ class PickPlace(Node):
         self.declare_parameter("bag_cam_tries", 4)        # camera grasp tries (a little further in / out each)
         # the HMC team's calibration of the fixed front webcam (robot frame, origin at the turning centre)
         self.declare_parameter("bag_front_cam_file", "~/hmc-follow/front_camera.json")
-        # the arm's pan axis in that frame: LiDAR 0.175 m ahead of the turning centre (slam_bridge.LASER_X)
-        # + the pan axis from the LiDAR (bag_robot_pan)
-        self.declare_parameter("bag_front_cam_pan", [0.187, 0.0145])
+        # the arm's pan axis in that frame, measured in the camera's own picture (2026-11-24): the arm at known joint
+        # angles (its meshes against the orange in two frames) gives x 0.258 to 0.268, y -0.001; a bag taped 20 cm
+        # from the axis gives x 0.246 to 0.252. It was LASER_X 0.175 + the pan axis from the LiDAR, [0.187, 0.0145]:
+        # bags read 6 to 7 cm too far. Redo it when the camera, front_camera.json or the arm base moves.
+        self.declare_parameter("bag_front_cam_pan", [0.255, 0.0])
         # the arm's pan axis in the robot frame bag_arm sends goals in (origin under the LiDAR; HMC Mount.pan_xy):
         # only for the log lines in that frame
         self.declare_parameter("bag_robot_pan", [0.012, 0.0145])

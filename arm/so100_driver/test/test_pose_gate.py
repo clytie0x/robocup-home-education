@@ -64,7 +64,7 @@ def test_one_edge_has_a_documented_confidence():
     foot = reconcile_edges(None, (0.43, 0.02))
     rim = reconcile_edges((0.43, 0.02), None)
     assert foot["method"] == "foot" and foot["confidence"] == pytest.approx(0.80)
-    assert rim["method"] == "rim" and rim["confidence"] == pytest.approx(0.70)
+    assert rim["method"] == "rim" and rim["confidence"] < CONF_MIN     # alone it never replaces the goal
     assert reconcile_edges(None, None)["confidence"] == 0.0
 
 

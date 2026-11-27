@@ -6,9 +6,9 @@ The frame is the AX1080P JPEG from webcam_view (MJPG 640x480, the calibration si
 does not open the camera and does not change that size.
 
 Bag detection (2026-11-19, color- and floor-agnostic):
-  1. Primary: TensorRT YOLO11-seg. bag_model 'coco' (the default) reads COCO backpack / handbag / suitcase
+  1. Primary: TensorRT YOLO11-seg. bag_model 'coco' (find_bag's default; the node's is 'tuned') reads COCO backpack / handbag / suitcase
      from ~/hmc-follow/models/yolo11s-seg_480x640.engine (or SO100_BAG_SEG_ENGINE). bag_model 'tuned' reads
-     class 0 = bag and class 1 = handle from the fine-tune (bag11s-seg-v2, same 480x640 input). A missing
+     class 0 = bag and class 1 = handle from the fine-tune (bag11n-seg-v3, same 480x640 input). A missing
      or empty tuned engine is logged and the coco engine is used.
   2. Fallback, coco only: adaptive Lab floor-difference, then legacy pink/red HSV. The tuned model leaves
      these off (they mark empty frames and merge blobs).
@@ -30,7 +30,8 @@ TUNED_HANDLE_CLASS = 1
 SEG_CONF = 0.12  # downward-angled close-up bags score 0.19-0.26 on COCO; background < 0.05
 SEG_IOU = 0.45
 DEFAULT_SEG_ENGINE = os.path.expanduser("~/hmc-follow/models/yolo11s-seg_480x640.engine")
-DEFAULT_TUNED_ENGINE = os.path.expanduser("~/hmc-follow/models/bag11s-seg-v2_480x640.engine")
+# bag11s-seg-v2 was never on the Jetson (2026-11-27: only bag11n-seg-v3 is), so 'tuned' always fell back to coco
+DEFAULT_TUNED_ENGINE = os.path.expanduser("~/hmc-follow/models/bag11n-seg-v3_480x640.engine")
 # A gripper is a compact orange part. A red bag's pixels in the same hue are wider than this.
 GRIPPER_MIN_PX = 400
 GRIPPER_MAX_PX = 20000
@@ -502,6 +503,7 @@ def _blob_from_mask(m, orange, source):
         "all_tops": all_tops,
         "y0": float(rows.min()), "y1": float(rows.max()), "h": int(m.shape[0]),
         "area": area, "grip_x": gripper_x(orange), "source": source,
+        "mask": m,                              # foot_edge reads the outline's bottom from it
     }
 
 
@@ -696,6 +698,108 @@ def foot_y(im, b, run=6):
     if len(found) < max(3, len(rows) // 2):
         return None
     return float(np.median(found))
+
+
+def foot_edge(im, b, up=45, down=8, gap=12, min_cols=20, min_share=0.2, max_cut=0.5):
+    """Image row of the bag's foot from its segmenter outline (b["mask"]), or None.
+
+    The outline's bottom is not the foot: on the robot (2026-11-24/27, bag11n-seg-v3) it ran 9 to 23 rows
+    below it, over the bag's shadow. So in each column the foot is the strongest colour change (Lab) from up
+    rows above the outline's bottom to down rows below it. Columns are left out where the outline is cut by
+    the picture's bottom edge or the gripper is in that stretch (it hides the foot). None when fewer than
+    min_cols columns (or min_share of the outline's width) are left, or when the picture's bottom edge cuts
+    more than max_cut of the outline: then the foot is out of the picture (a bag nearer than about 27 cm
+    from the pan axis) and the few side columns left are the bag's slanted sides, not its foot (they read
+    24.8 cm for a bag taped at 20). Median over the columns kept."""
+    m = b.get("mask")
+    if m is None or not m.any():
+        return None
+    h = m.shape[0]
+    cols = np.where(m.any(0))[0]
+    bottoms = np.array([int(np.nonzero(m[:, c])[0].max()) for c in cols])
+    if np.mean(bottoms >= h - 3) > max_cut:
+        return None
+    lab = cv2.GaussianBlur(cv2.cvtColor(im, cv2.COLOR_BGR2LAB).astype(np.float32), (5, 5), 0)
+    orange = orange_mask(im)
+    rows = []
+    for c, r in zip(cols, bottoms):
+        if r >= h - 3 or orange[max(0, r - up):min(h, r + gap), c].any():
+            continue
+        lo, hi = max(2, r - up), min(h - 3, r + down)
+        if hi <= lo:
+            continue
+        step = np.linalg.norm(lab[lo + 2:hi + 2, c] - lab[lo - 2:hi - 2, c], axis=1)
+        rows.append(lo + int(np.argmax(step)))
+    if len(rows) < max(min_cols, min_share * len(cols)):
+        return None
+    return float(np.median(rows))
+
+
+def front_rim(im, b, run=8, closed_px=8, min_cols=15, floor_share=0.5):
+    """The front wall's rim inside the segmenter outline (b["mask"]): dict(row, u, kind, cols) or None.
+
+    The outline's top is not the front rim. From this steep camera an open bag shows its front wall (outside),
+    then its inside, then its back rim at the top; on the robot the outline's top read 10 to 12 cm beyond the
+    front wall of a bag taped at 20 and 25 cm (2026-11-24). The outside colour is the median of the outline's
+    lower 40 %. Going down each column from the outline's top, the front rim is the first row where run rows in
+    a row are that colour. Columns with the gripper over them are left out; fewer than min_cols left: None.
+    kind: "open" when the band above the rim (median over the columns, more than closed_px rows) is the bag's
+    inside; "floor" when more than floor_share of that band is floor-coloured (the outline ran up over the
+    floor: a closed bag, 2026-11-27, 70 % floor against 2 to 32 % for the inside of open bags); "closed" when
+    there is no band. Only an "open" rim is the front rim for sure (bag_camera.locate)."""
+    m = b.get("mask")
+    if m is None or not m.any():
+        return None
+    lab = cv2.GaussianBlur(cv2.cvtColor(im, cv2.COLOR_BGR2LAB).astype(np.float32), (5, 5), 0)
+    orange = orange_mask(im) > 0
+    rows = np.where(m.any(1))[0]
+    y0, y1 = int(rows.min()), int(rows.max())
+    low = m.copy()
+    low[:y0 + int(0.6 * (y1 - y0))] = False
+    low &= ~orange
+    if low.sum() < 50:
+        return None
+    outer = np.median(lab[low], axis=0)
+    tol = max(12.0, 2.5 * float(np.median(np.linalg.norm(lab[low] - outer, axis=1))))
+    hits = []
+    for c in np.where(m.any(0))[0]:
+        rr = np.nonzero(m[:, c])[0]
+        top, bot = int(rr.min()), int(rr.max())
+        if orange[max(0, top - 12):bot + 1, c].mean() > 0.3:
+            continue
+        same = np.linalg.norm(lab[top:bot + 1, c] - outer, axis=1) < tol
+        for k in range(0, len(same) - run):
+            if same[k:k + run].all():
+                if not orange[max(0, top + k - 6):top + k + 1, c].any():
+                    hits.append((c, top + k, k))
+                break
+    if len(hits) < min_cols:
+        return None
+    a = np.array(hits, float)
+    out = {"row": float(np.median(a[:, 1])), "u": float(np.median(a[:, 0])), "cols": len(hits), "kind": "closed"}
+    if np.median(a[:, 2]) <= closed_px:
+        return out
+    ring = (cv2.dilate(m.astype(np.uint8), np.ones((25, 25), np.uint8)) > 0) & ~m & ~orange
+    ring[y0 + int(0.5 * (y1 - y0)):] = False             # the floor around the outline's top half
+    if ring.sum() < 50:
+        return out
+    floor = np.median(lab[ring], axis=0)
+    ftol = max(12.0, 2.5 * float(np.median(np.linalg.norm(lab[ring] - floor, axis=1))))
+    band = [lab[int(np.nonzero(m[:, c])[0].min()) + 3:int(r) - 2, int(c)] for c, r, k in hits if k > 6]
+    band = [x for x in band if len(x)]
+    if not band:
+        return out
+    band = np.vstack(band)
+    out["floor_share"] = float(np.mean(np.linalg.norm(band - floor, axis=1) < ftol))
+    out["kind"] = "floor" if out["floor_share"] > floor_share else "open"
+    return out
+
+
+def foot_row(im, b):
+    """Image row of the bag's foot: foot_y (the floor seen again below the blob), else foot_edge (the
+    segmenter outline's bottom, refined). None when neither finds it."""
+    row = foot_y(im, b)
+    return row if row is not None else foot_edge(im, b)
 
 
 def edge_y(b, half=40):
