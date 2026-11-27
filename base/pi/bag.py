@@ -99,6 +99,11 @@ SIGHT_MIN = 0.16  # m from the laser
 BLIND_MARGIN = 0.03  # m: a bag predicted this near SIGHT_MIN is not lost when it is not seen
 AGAIN_R = 0.25  # m: bag_again looks for the last bag this close to where it was
 NEAR_BAG_R = 2.0  # m: bag_near takes the nearest bag within this of the turning centre
+# bag_left / bag_right ("take the left bag"): a steady pointing in this many seconds still chooses; after it the bag
+# on the spoken side does (2026-11-27 19:09: no steady pointing twice in 20 s, and the side was never used)
+SIDE_WAIT_S = 8.0
+SIDE_BAG_R = 2.5  # m: bags within this of the turning centre count for the side words (the operator stands by them)
+SIDE_BAG_DEG = 60.0  # and within this of straight ahead (the robot turns to one beside it first)
 NEAR_BAG_DEG = 40.0  # and within this of straight ahead
 NO_SCAN_S = 3.0  # s bag_near and bag_again wait for a LiDAR scan (a run's first one comes about 0.6 s in)
 LAY_KEEP = 0.05  # m beside the body's half width: the cable on the floor nearer the drive line blocks it
@@ -283,8 +288,9 @@ class BagTask:
     """One "bag" (mode "point"), "bag_again" (mode "again": the last bag, measured and approached once more) or
     "bag_near" (mode "near": the nearest bag in front, nobody points)."""
 
-    def __init__(self, p, now, seq, mode="point", last=None, look=False, rgb=False):
+    def __init__(self, p, now, seq, mode="point", last=None, look=False, rgb=False, side=None):
         self.p, self.seq, self.mode = p, seq, mode
+        self.side = side if side in ("left", "right") else None  # the operator's spoken side (bag_left / bag_right)
         self.look, self.rgb = look, rgb  # measure the bag in the far stage; ask the Jetson when depth fails
         self.id = round(now, 3)  # tells this task's status from an earlier one (the bridge reads it)
         self.t0 = now
@@ -326,6 +332,8 @@ class BagTask:
         """For the status line and the record: base-frame chosen bag and the result."""
         out = {"id": self.id, "seq": self.seq, "mode": self.mode, "state": self.state, "chosen": self.chosen,
                "result": self.result}
+        if self.side:
+            out["side"] = self.side
         if self.look_state is not None:
             out["look"] = {k: v for k, v in self.look_state.items() if k not in ("points", "since")}
         return out
@@ -424,8 +432,11 @@ class BagTask:
         # operator, leaves it empty while the camera still sees someone. That is not nobody.
         if view.operator is not None or view.found is not None or view.people:
             self.someone = True
-        elif not self.someone and now - self.t0 >= NO_OPERATOR_S:  # nobody to point: the flow asks, not 20 s of waiting
+        elif not self.someone and not self.side and now - self.t0 >= NO_OPERATOR_S:
+            # nobody to point: the flow asks, not 20 s of waiting (a spoken side needs nobody to point)
             return self._fail("NO_OPERATOR", "nobody to point: no operator track and no person for the camera")
+        if self.side and now - self.t0 >= SIDE_WAIT_S:
+            return self._by_side(view)
         if now - self.t0 > POINTING_S:
             if self.no_bag_since is not None:
                 return self._fail("NO_BAG", "no bag where you point")
@@ -474,6 +485,31 @@ class BagTask:
         self._choose(view, bag)
         self.chosen = {"x": round(bag[0], 3), "y": round(bag[1], 3), "side": None,
                        "say": "I will go to the bag in front of me.", "point": None, "candidates": len(near)}
+        return self._plan(view)
+
+    def _by_side(self, view):
+        """bag_left / bag_right with no steady pointing: of the bags in front, the one on the spoken side. Sides are
+        the operator's, who faces the robot (as pointing.choose_bag says them); with no operator, the robot's own."""
+        near = [c for c in self._bags(view)
+                if math.hypot(*c) <= SIDE_BAG_R and abs(math.degrees(math.atan2(c[1], c[0]))) <= SIDE_BAG_DEG]
+        if not near:
+            return self._fail("NO_BAG", "no bag within %.1f m in front of me for the %s side" % (SIDE_BAG_R, self.side))
+        if view.operator is not None:
+            ox, oy = view.operator
+            r = math.hypot(ox, oy) or 1e-9
+            fx, fy = -ox / r, -oy / r  # facing the robot
+            lat = [(c[0] - ox) * -fy + (c[1] - oy) * fx for c in near]  # + = the operator's left
+            say = "I will take the %s bag, on your %s." % (self.side, self.side)
+        else:
+            lat = [c[1] for c in near]  # + = the robot's left
+            say = "I will take the bag on my %s." % self.side
+        pick = max if self.side == "left" else min
+        i = pick(range(len(near)), key=lambda k: lat[k])
+        if len(near) == 1:
+            say = "I will take the bag."
+        self._choose(view, near[i])
+        self.chosen = {"x": round(near[i][0], 3), "y": round(near[i][1], 3), "side": self.side, "say": say,
+                       "point": None, "candidates": len(near)}
         return self._plan(view)
 
     def _bags(self, view):

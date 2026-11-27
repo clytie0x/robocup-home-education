@@ -90,7 +90,7 @@ FILES = {
     "/preact-htm.js": ("preact-htm.js", "text/javascript; charset=utf-8"),
     "/robot.js": ("robot.js", "text/javascript; charset=utf-8"),
 }
-COMMANDS = ("follow", "wait", "resume", "return", "bag", "bag_again", "bag_near")
+COMMANDS = ("follow", "wait", "resume", "return", "bag", "bag_again", "bag_near", "bag_left", "bag_right")
 MISSIONS = ("full", "follow_only", "bag_only")
 RETURN_S = 180  # s more for run_follow in the full mission: hmc.flow RETURN_BUDGET, the way back after the clock
 EXECUTIVE_SAYS = ("I will go back to the start now.", "I am back at the start.")  # hmc.hri lines hmc.flow says
@@ -1975,7 +1975,10 @@ class Console:
                     threading.Thread(target=self._arm_job, args=(action, params), daemon=True).start()
                     continue
                 if action == "find_bag":
-                    command = "bag_again" if params.get("again") else "bag"
+                    # a spoken side goes with it (bag_left / bag_right: the pointed bag, else that side's), also in
+                    # the executive's fallback "I will use the left you said", which bag_again cannot do
+                    side = params.get("side") if params.get("side") in ("left", "right") else None
+                    command = "bag_" + side if side else "bag_again" if params.get("again") else "bag"
                     self._bag_asked = (self._bag_seen,)  # before it is sent: its task is the next new id
                 else:
                     command = _RUN_ACTION.get(action)

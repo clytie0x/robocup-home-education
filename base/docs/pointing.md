@@ -19,6 +19,12 @@ It runs on the Pi, which has the LiDAR clusters, the operator's LiDAR track and 
    `NEAR_BAG_R` 2.0 m and `NEAR_BAG_DEG` 40 deg of straight ahead, else NO_BAG (robot-console.md, step commands).
    `bag_near` and `bag_again` first wait up to `NO_SCAN_S` 3 s for a LiDAR scan (2026-11-20: the console's
    `bag_only` sent `bag_near` 0.3 s into the run, before the first scan at 0.6 s, and got NO_BAG at once).
+   With a spoken side ("take the left bag", the console executive's `find_bag {"side"}`), the Pi gets `bag_left` or
+   `bag_right`: step 2 as for `bag`, but with no steady pointing in `SIDE_WAIT_S` 8 s the bag on that side is
+   chosen from the bag-sized LiDAR clusters within `SIDE_BAG_R` 2.5 m and `SIDE_BAG_DEG` 60 deg of straight ahead
+   (the operator's side when the LiDAR tracks them, as in step 7, else the robot's own; one bag: that one), else
+   NO_BAG. A steady pointing in time still chooses. 2026-11-27 19:09: the side never reached the Pi, the camera
+   saw no steady pointing twice in 20 s, and no bag was taken.
 2. BAG, pointing: the robot stands; every frame goes to the Jetson with `pose=True` (only now). The camera person
    nearest the operator's LiDAR bearing (within 10 deg) gives `pointing()`; `Steady` needs about 1 s. With
    `--virtual-operator` the PC's pointed spot stands in for it (no camera). No steady pointing in 20 s: NOT_POINTED. No operator at all for the first 2 s (no LiDAR track and no camera
